@@ -94,9 +94,16 @@ func (r *SatelliteEphemerisReconciler) Reconcile(ctx context.Context, req ctrl.R
 		return r.handleFetchError(ctx, eph, fetchErr, effectiveInterval)
 	}
 
-	// Step 6: Update status with new data (skip on 304).
+	// Step 6: Update status with new data.
 	if result.NotModified {
 		log.Info("GP data unchanged (304 Not Modified)")
+		meta.SetStatusCondition(&eph.Status.Conditions, metav1.Condition{
+			Type:               ntnv1alpha1.ConditionGPDataFetched,
+			Status:             metav1.ConditionTrue,
+			Reason:             "NotModified",
+			Message:            fmt.Sprintf("GP data unchanged from %s (304)", eph.Spec.Source.Type),
+			ObservedGeneration: eph.Generation,
+		})
 	} else {
 		log.Info("Fetched GP data successfully", "satelliteCount", result.SatelliteCount)
 		eph.Status.SatelliteCount = result.SatelliteCount
@@ -118,7 +125,7 @@ func (r *SatelliteEphemerisReconciler) Reconcile(ctx context.Context, req ctrl.R
 		})
 	}
 
-	// Step 7: Compute pass predictions if configured.
+	// Step 7: Compute pass predictions if configured; clear stale data if disabled.
 	if eph.Spec.PassPrediction != nil && len(eph.Spec.PassPrediction.GroundStations) > 0 {
 		if err := r.predictPasses(ctx, eph, result); err != nil {
 			log.Error(err, "Pass prediction failed")
@@ -134,6 +141,9 @@ func (r *SatelliteEphemerisReconciler) Reconcile(ctx context.Context, req ctrl.R
 				r.Recorder.Eventf(eph, nil, "Warning", "PredictionFailed", "PredictionFailed", "%s", err.Error())
 			}
 		}
+	} else {
+		// Pass prediction not configured; clear any stale pass windows.
+		eph.Status.NextPassWindows = nil
 	}
 
 	if err := r.Status().Update(ctx, eph); err != nil {
@@ -205,7 +215,7 @@ func (r *SatelliteEphemerisReconciler) predictPasses(
 	}
 
 	// Run pass prediction.
-	passes, err := ephemeris.PredictPasses(fetchResult.OMMs, stations, minEl, horizon, noradFilter)
+	passes, err := ephemeris.PredictPasses(fetchResult.OMMs, stations, minEl, horizon, noradFilter, time.Time{})
 	if err != nil {
 		return fmt.Errorf("computing passes: %w", err)
 	}
@@ -260,6 +270,13 @@ func (r *SatelliteEphemerisReconciler) handleFetchError(
 		Status:             metav1.ConditionFalse,
 		Reason:             reason,
 		Message:            fetchErr.Error(),
+		ObservedGeneration: eph.Generation,
+	})
+	meta.SetStatusCondition(&eph.Status.Conditions, metav1.Condition{
+		Type:               ntnv1alpha1.ConditionGPDataParsed,
+		Status:             metav1.ConditionFalse,
+		Reason:             reason,
+		Message:            "No data to parse due to fetch failure",
 		ObservedGeneration: eph.Generation,
 	})
 

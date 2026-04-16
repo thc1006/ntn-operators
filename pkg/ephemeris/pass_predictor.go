@@ -52,12 +52,14 @@ type PassResult struct {
 
 // PredictPasses computes satellite pass windows for the given OMMs over ground stations.
 // It filters by minElevation, limits results to MaxPassWindows, and uses concurrent workers.
+// The startTime parameter sets the prediction window start; pass time.Time{} to use time.Now().
 func PredictPasses(
 	omms []sgp4.OMM,
 	stations []GroundStation,
 	minElevation float64,
 	horizon time.Duration,
 	noradFilter []int,
+	startTime time.Time,
 ) ([]PassResult, error) {
 	if len(omms) == 0 || len(stations) == 0 {
 		return nil, nil
@@ -69,9 +71,11 @@ func PredictPasses(
 		return nil, nil
 	}
 
-	now := time.Now()
-	start := now
-	stop := now.Add(horizon)
+	start := startTime
+	if start.IsZero() {
+		start = time.Now()
+	}
+	stop := start.Add(horizon)
 
 	// Build work items.
 	type workItem struct {

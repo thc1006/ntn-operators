@@ -39,7 +39,9 @@ const maxResponseBody = 50 * 1024 * 1024
 
 // GPFetchResult holds the outcome of a GP data fetch.
 type GPFetchResult struct {
-	OMMs           []sgp4.OMM // parsed OMM objects (nil on 304 Not Modified)
+	// OMMs contains parsed OMM objects. On 304 Not Modified, cached OMMs
+	// from the last successful fetch are returned.
+	OMMs           []sgp4.OMM
 	SatelliteCount int
 	FetchedAt      time.Time
 	NotModified    bool // true when server returned 304 (ETag matched)
@@ -115,9 +117,12 @@ func (f *CelesTrakFetcher) Fetch(ctx context.Context, url string) (GPFetchResult
 		}, nil
 
 	case http.StatusOK:
-		body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
+		body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody+1))
 		if err != nil {
 			return GPFetchResult{}, fmt.Errorf("reading response body: %w", err)
+		}
+		if int64(len(body)) > maxResponseBody {
+			return GPFetchResult{}, fmt.Errorf("response body exceeds %d bytes limit", maxResponseBody)
 		}
 
 		omms, err := sgp4.ParseOMMs(body)

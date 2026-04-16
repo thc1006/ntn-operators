@@ -90,6 +90,7 @@ func TestPredictPasses_SingleSatellite(t *testing.T) {
 		0, // all passes above horizon
 		24*time.Hour,
 		nil, // no filter
+		time.Time{},
 	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -120,6 +121,7 @@ func TestPredictPasses_MinElevationFilter(t *testing.T) {
 		0, // no filter
 		24*time.Hour,
 		nil,
+		time.Time{},
 	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -131,6 +133,7 @@ func TestPredictPasses_MinElevationFilter(t *testing.T) {
 		30, // high threshold
 		24*time.Hour,
 		nil,
+		time.Time{},
 	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -157,6 +160,7 @@ func TestPredictPasses_NoradFilter(t *testing.T) {
 		0,
 		24*time.Hour,
 		[]int{25544}, // ISS NORAD ID
+		time.Time{},
 	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -176,6 +180,7 @@ func TestPredictPasses_MultipleStations(t *testing.T) {
 		0,
 		24*time.Hour,
 		nil,
+		time.Time{},
 	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -192,7 +197,7 @@ func TestPredictPasses_MultipleStations(t *testing.T) {
 
 func TestPredictPasses_EmptyInputs(t *testing.T) {
 	// No OMMs.
-	passes, err := PredictPasses(nil, []GroundStation{montrealStation}, 0, 24*time.Hour, nil)
+	passes, err := PredictPasses(nil, []GroundStation{montrealStation}, 0, 24*time.Hour, nil, time.Time{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -201,7 +206,7 @@ func TestPredictPasses_EmptyInputs(t *testing.T) {
 	}
 
 	// No stations.
-	passes, err = PredictPasses([]sgp4.OMM{issOMM()}, nil, 0, 24*time.Hour, nil)
+	passes, err = PredictPasses([]sgp4.OMM{issOMM()}, nil, 0, 24*time.Hour, nil, time.Time{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -217,6 +222,7 @@ func TestPredictPasses_NoradFilterMatchesNone(t *testing.T) {
 		0,
 		24*time.Hour,
 		[]int{99999}, // no match
+		time.Time{},
 	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -233,6 +239,7 @@ func TestPredictPasses_SortedByAOS(t *testing.T) {
 		0,
 		48*time.Hour,
 		nil,
+		time.Time{},
 	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
