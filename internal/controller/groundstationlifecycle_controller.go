@@ -122,10 +122,15 @@ func (r *GroundStationLifecycleReconciler) findMatchingNode(ctx context.Context,
 	if err := r.List(ctx, &nodeList, client.MatchingLabels{groundStationLabel: gsName}); err != nil {
 		return nil, fmt.Errorf("listing nodes: %w", err)
 	}
-	if len(nodeList.Items) == 0 {
+	switch len(nodeList.Items) {
+	case 0:
 		return nil, nil
+	case 1:
+		return &nodeList.Items[0], nil
+	default:
+		return nil, fmt.Errorf("ambiguous node mapping: %d nodes have label %s=%s",
+			len(nodeList.Items), groundStationLabel, gsName)
 	}
-	return &nodeList.Items[0], nil
 }
 
 // reconcileHealth evaluates node conditions and sets phase + conditions on the GS status.
@@ -167,7 +172,6 @@ func (r *GroundStationLifecycleReconciler) reconcileHealth(
 
 	// Node exists — evaluate conditions.
 	gs.Status.K8sVersion = node.Status.NodeInfo.KubeletVersion
-	gs.Status.LastHealthCheck = &metav1.Time{Time: now}
 
 	nodeReady := isNodeConditionTrue(node, corev1.NodeReady)
 	memPressure := isNodeConditionTrue(node, corev1.NodeMemoryPressure)
@@ -211,6 +215,11 @@ func (r *GroundStationLifecycleReconciler) reconcileHealth(
 		gs.Status.Phase = ntnv1alpha1.PhaseRunning
 	}
 
+	// Only set lastHealthCheck when the overall health is successful.
+	if gs.Status.Phase == ntnv1alpha1.PhaseRunning || gs.Status.Phase == ntnv1alpha1.PhaseUpdating {
+		gs.Status.LastHealthCheck = &metav1.Time{Time: now}
+	}
+
 	// Optional HTTP health endpoint.
 	if gs.Spec.Monitoring != nil && gs.Spec.Monitoring.Endpoint != "" {
 		healthy := r.checkHTTPEndpoint(ctx, gs.Spec.Monitoring.Endpoint)
@@ -245,8 +254,8 @@ func (r *GroundStationLifecycleReconciler) reconcileFirmware(
 		return
 	}
 
-	// Sync firmware version from node annotation on first reconcile.
-	if gs.Status.FirmwareVersion == "" {
+	// Sync firmware version from node annotation each reconcile (unless Updating).
+	if gs.Status.Phase != ntnv1alpha1.PhaseUpdating {
 		if v, ok := node.Annotations[firmwareVersionAnnotation]; ok {
 			gs.Status.FirmwareVersion = v
 		}
@@ -295,9 +304,13 @@ func (r *GroundStationLifecycleReconciler) reconcileFirmware(
 		if gs.Spec.Firmware.MaintenanceWindow != "" {
 			inWindow, err := lifecycle.IsWithinMaintenanceWindow(gs.Spec.Firmware.MaintenanceWindow, r.now())
 			if err != nil {
-				log := logf.Log.WithName("groundstationlifecycle")
-				log.Error(err, "Invalid maintenance window format, skipping OTA",
-					"window", gs.Spec.Firmware.MaintenanceWindow)
+				meta.SetStatusCondition(&gs.Status.Conditions, metav1.Condition{
+					Type:               ntnv1alpha1.ConditionFirmwareUpToDate,
+					Status:             metav1.ConditionFalse,
+					Reason:             "InvalidMaintenanceWindow",
+					Message:            fmt.Sprintf("Cannot parse maintenance window %q: %v", gs.Spec.Firmware.MaintenanceWindow, err),
+					ObservedGeneration: gs.Generation,
+				})
 				return
 			}
 			if !inWindow {
@@ -313,12 +326,16 @@ func (r *GroundStationLifecycleReconciler) reconcileFirmware(
 }
 
 // checkHTTPEndpoint performs an HTTP GET and returns true if 2xx.
+// Only http:// and https:// schemes are allowed to mitigate SSRF risk.
 func (r *GroundStationLifecycleReconciler) checkHTTPEndpoint(ctx context.Context, endpoint string) bool {
 	if r.HTTPClient == nil {
-		return true // no client configured, assume healthy
+		return false // no client configured, cannot verify health
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
+		return false
+	}
+	if req.URL.Scheme != "http" && req.URL.Scheme != "https" {
 		return false
 	}
 	resp, err := r.HTTPClient.Do(req)

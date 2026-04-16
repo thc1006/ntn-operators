@@ -93,6 +93,12 @@ func TestIsWithinMaintenanceWindow(t *testing.T) {
 			now:    utc(3, 0),
 			err:    true,
 		},
+		{
+			name:   "start equals end is invalid",
+			window: "00:00-00:00 UTC",
+			now:    utc(0, 0),
+			err:    true,
+		},
 	}
 
 	for _, tc := range tests {

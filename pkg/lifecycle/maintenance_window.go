@@ -27,7 +27,9 @@ var maintenanceWindowRE = regexp.MustCompile(`^(\d{2}:\d{2})-(\d{2}:\d{2})\s+UTC
 // IsWithinMaintenanceWindow checks if the given time falls within the
 // maintenance window. The window format is "HH:MM-HH:MM UTC" (24-hour).
 // Handles midnight wraparound (e.g., "23:00-02:00 UTC").
-// Returns false for empty window strings (no restriction).
+// An empty window string means no maintenance window is configured;
+// returns (false, nil) so callers can decide to proceed unconditionally.
+// A window where start == end (e.g., "00:00-00:00 UTC") is treated as invalid.
 func IsWithinMaintenanceWindow(window string, now time.Time) (bool, error) {
 	if window == "" {
 		return false, nil
@@ -45,6 +47,10 @@ func IsWithinMaintenanceWindow(window string, now time.Time) (bool, error) {
 	endHM, err := parseHHMM(matches[2])
 	if err != nil {
 		return false, fmt.Errorf("invalid end time in window: %w", err)
+	}
+
+	if startHM == endHM {
+		return false, fmt.Errorf("invalid maintenance window: start and end are the same (%s)", matches[1])
 	}
 
 	nowUTC := now.UTC()
