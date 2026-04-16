@@ -21,7 +21,7 @@ jobs:
       - name: Cache golangci-lint binary
         uses: actions/cache@v4
         with:
-          path: bin/golangci-lint
+          path: bin/golangci-lint*
           key: golangci-lint-${{ hashFiles('.custom-gcl.yml', '.golangci.yml', 'go.sum') }}
 
       - name: Check linter configuration
