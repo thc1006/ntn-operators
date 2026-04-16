@@ -461,4 +461,50 @@ var _ = Describe("SatelliteEphemeris Controller", func() {
 			Expect(predCond).To(BeNil())
 		})
 	})
+
+	// --- S4 Tests: Watch GroundStationLifecycle changes ---
+
+	Context("When a GroundStationLifecycle changes", func() {
+		BeforeEach(func() {
+			createGroundStation()
+			createResourceWithPassPrediction()
+		})
+		AfterEach(func() {
+			deleteResource()
+			deleteGroundStation()
+		})
+
+		It("should map ground station to referencing ephemeris resources", func() {
+			reconciler := newReconciler(&mockGPFetcher{})
+
+			gs := &ntnv1alpha1.GroundStationLifecycle{}
+			Expect(k8sClient.Get(context.Background(),
+				types.NamespacedName{Name: gsName, Namespace: namespace}, gs)).To(Succeed())
+
+			requests := reconciler.GroundStationToEphemeris(context.Background(), gs)
+			Expect(requests).To(HaveLen(1))
+			Expect(requests[0].Name).To(Equal(resourceName))
+		})
+
+		It("should not map ground station that no ephemeris references", func() {
+			reconciler := newReconciler(&mockGPFetcher{})
+
+			unreferenced := &ntnv1alpha1.GroundStationLifecycle{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "gs-unreferenced",
+					Namespace: namespace,
+				},
+				Spec: ntnv1alpha1.GroundStationLifecycleSpec{
+					Hardware:   ntnv1alpha1.HardwareSpec{Vendor: "test", Model: "test"},
+					Deployment: ntnv1alpha1.DeploymentSpec{Location: ntnv1alpha1.GeoLocation{Lat: "0", Lon: "0"}},
+				},
+			}
+			Expect(k8sClient.Create(context.Background(), unreferenced)).To(Succeed())
+
+			requests := reconciler.GroundStationToEphemeris(context.Background(), unreferenced)
+			Expect(requests).To(BeEmpty())
+
+			Expect(k8sClient.Delete(context.Background(), unreferenced)).To(Succeed())
+		})
+	})
 })

@@ -270,15 +270,53 @@ var _ = Describe("Manager", Ordered, func() {
 
 		// +kubebuilder:scaffold:e2e-webhooks-checks
 
-		// TODO: Customize the e2e test suite with scenarios specific to your project.
-		// Consider applying sample/CR(s) and check their status and/or verifying
-		// the reconciliation by using the metrics, i.e.:
-		// metricsOutput, err := getMetricsOutput()
-		// Expect(err).NotTo(HaveOccurred(), "Failed to retrieve logs from curl pod")
-		// Expect(metricsOutput).To(ContainSubstring(
-		//    fmt.Sprintf(`controller_runtime_reconcile_total{controller="%s",result="success"} 1`,
-		//    strings.ToLower(<Kind>),
-		// ))
+		It("should reconcile SatelliteEphemeris and populate status", func() {
+			By("creating a GroundStationLifecycle resource")
+			cmd := exec.Command("kubectl", "apply", "-f",
+				filepath.Join("config", "samples", "ntn_v1alpha1_groundstationlifecycle.yaml"))
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("creating a SatelliteEphemeris resource")
+			cmd = exec.Command("kubectl", "apply", "-f",
+				filepath.Join("config", "samples", "ntn_v1alpha1_satelliteephemeris.yaml"))
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("verifying that satelliteCount is populated")
+			verifySatelliteCount := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "sateph", "oneweb-constellation",
+					"-o", "jsonpath={.status.satelliteCount}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).NotTo(BeEmpty(), "satelliteCount should be set")
+				g.Expect(output).NotTo(Equal("0"), "satelliteCount should not be 0")
+			}
+			Eventually(verifySatelliteCount, 2*time.Minute, 5*time.Second).Should(Succeed())
+
+			By("verifying that lastUpdated is set")
+			cmd = exec.Command("kubectl", "get", "sateph", "oneweb-constellation",
+				"-o", "jsonpath={.status.lastUpdated}")
+			output, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(output).NotTo(BeEmpty(), "lastUpdated should be set")
+
+			By("verifying that GPDataFetched condition is True")
+			verifyCondition := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "sateph", "oneweb-constellation",
+					"-o", "jsonpath={.status.conditions[?(@.type=='GPDataFetched')].status}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("True"))
+			}
+			Eventually(verifyCondition, 2*time.Minute, 5*time.Second).Should(Succeed())
+
+			By("cleaning up test resources")
+			cmd = exec.Command("kubectl", "delete", "sateph", "oneweb-constellation", "--ignore-not-found")
+			_, _ = utils.Run(cmd)
+			cmd = exec.Command("kubectl", "delete", "gs", "gs-taipei-01", "--ignore-not-found")
+			_, _ = utils.Run(cmd)
+		})
 	})
 })
 
