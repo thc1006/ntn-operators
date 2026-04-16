@@ -58,9 +58,13 @@ echo "--- Conditions ---"
 kubectl get sateph oneweb-constellation -o jsonpath='{range .status.conditions[*]}{.type}: {.status} ({.reason}) - {.message}{"\n"}{end}'
 echo ""
 echo "--- Pass Windows (first 5) ---"
-kubectl get sateph oneweb-constellation -o jsonpath='{.status.nextPassWindows}' | python3 -c "
+kubectl get sateph oneweb-constellation -o json | python3 -c "
 import sys, json
-data = json.load(sys.stdin)
+doc = json.load(sys.stdin)
+data = doc.get('status', {}).get('nextPassWindows') or []
+if not data:
+    print('(no passes yet)')
+    sys.exit(0)
 print(f'Total: {len(data)} passes')
 for p in data[:5]:
     print(f\"  {p['satellite']:20s} over {p['groundStation']:15s} AOS={p['aos'][:19]} LOS={p['los'][:19]} MaxEl={p['maxElevation']}°\")
