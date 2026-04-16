@@ -265,6 +265,8 @@ func (r *GroundStationLifecycleReconciler) reconcileFirmware(
 		return
 	}
 	if node == nil {
+		meta.RemoveStatusCondition(&gs.Status.Conditions, ntnv1alpha1.ConditionFirmwareUpToDate)
+		gs.Status.FirmwareVersion = ""
 		return
 	}
 
@@ -279,13 +281,21 @@ func (r *GroundStationLifecycleReconciler) reconcileFirmware(
 	currentVersion := gs.Status.FirmwareVersion
 	upToDate := availableVersion == "" || currentVersion == availableVersion
 
-	fwStatus := metav1.ConditionTrue
-	fwReason := "UpToDate"
-	fwMsg := fmt.Sprintf("Firmware %s is current", currentVersion)
-	if !upToDate {
+	var fwStatus metav1.ConditionStatus
+	var fwReason, fwMsg string
+	switch {
+	case currentVersion == "":
+		fwStatus = metav1.ConditionUnknown
+		fwReason = "VersionUnknown"
+		fwMsg = "Current firmware version not reported by node"
+	case !upToDate:
 		fwStatus = metav1.ConditionFalse
 		fwReason = "UpdateAvailable"
 		fwMsg = fmt.Sprintf("Update available: %s → %s", currentVersion, availableVersion)
+	default:
+		fwStatus = metav1.ConditionTrue
+		fwReason = "UpToDate"
+		fwMsg = fmt.Sprintf("Firmware %s is current", currentVersion)
 	}
 	meta.SetStatusCondition(&gs.Status.Conditions, metav1.Condition{
 		Type:               ntnv1alpha1.ConditionFirmwareUpToDate,

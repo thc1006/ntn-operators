@@ -98,17 +98,21 @@ var _ = Describe("GroundStationLifecycle Controller", func() {
 
 	deleteGS := func() {
 		gs := &ntnv1alpha1.GroundStationLifecycle{}
-		if err := k8sClient.Get(context.Background(), typeNamespacedName, gs); apierrors.IsNotFound(err) {
+		err := k8sClient.Get(context.Background(), typeNamespacedName, gs)
+		if apierrors.IsNotFound(err) {
 			return
 		}
+		Expect(err).NotTo(HaveOccurred())
 		Expect(k8sClient.Delete(context.Background(), gs)).To(Succeed())
 	}
 
 	deleteNode := func() {
 		node := &corev1.Node{}
-		if err := k8sClient.Get(context.Background(), types.NamespacedName{Name: nodeName}, node); apierrors.IsNotFound(err) {
+		err := k8sClient.Get(context.Background(), types.NamespacedName{Name: nodeName}, node)
+		if apierrors.IsNotFound(err) {
 			return
 		}
+		Expect(err).NotTo(HaveOccurred())
 		Expect(k8sClient.Delete(context.Background(), node)).To(Succeed())
 	}
 
