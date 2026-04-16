@@ -20,15 +20,19 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	ntnv1alpha1 "github.com/thc1006/ntn-operators/api/v1alpha1"
 	"github.com/thc1006/ntn-operators/pkg/ephemeris"
@@ -300,9 +304,49 @@ func (r *SatelliteEphemerisReconciler) handleFetchError(
 }
 
 // SetupWithManager sets up the controller with the Manager.
+// Watches GroundStationLifecycle changes to trigger pass re-prediction
+// when ground stations are added, modified, or deleted.
 func (r *SatelliteEphemerisReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&ntnv1alpha1.SatelliteEphemeris{}).
+		Watches(&ntnv1alpha1.GroundStationLifecycle{},
+			handler.EnqueueRequestsFromMapFunc(r.groundStationToEphemeris),
+		).
 		Named("satelliteephemeris").
 		Complete(r)
+}
+
+// groundStationToEphemeris maps a GroundStationLifecycle change to all
+// SatelliteEphemeris resources that reference it in passPrediction.groundStations.
+func (r *SatelliteEphemerisReconciler) groundStationToEphemeris(
+	ctx context.Context, obj client.Object,
+) []reconcile.Request {
+	gs, ok := obj.(*ntnv1alpha1.GroundStationLifecycle)
+	if !ok {
+		return nil
+	}
+
+	log := logf.FromContext(ctx)
+
+	var ephList ntnv1alpha1.SatelliteEphemerisList
+	if err := r.List(ctx, &ephList, client.InNamespace(gs.Namespace)); err != nil {
+		log.Error(err, "Failed to list SatelliteEphemeris for ground station mapper")
+		return nil
+	}
+
+	var requests []reconcile.Request
+	for _, eph := range ephList.Items {
+		if eph.Spec.PassPrediction == nil {
+			continue
+		}
+		if slices.Contains(eph.Spec.PassPrediction.GroundStations, gs.Name) {
+			requests = append(requests, reconcile.Request{
+				NamespacedName: types.NamespacedName{
+					Name:      eph.Name,
+					Namespace: eph.Namespace,
+				},
+			})
+		}
+	}
+	return requests
 }
