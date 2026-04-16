@@ -1,0 +1,35 @@
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: manager-role
+rules:
+- apiGroups:
+  - ntn.operators.dev
+  resources:
+  - groundstationlifecycles
+  - satelliteephemeris
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - ntn.operators.dev
+  resources:
+  - groundstationlifecycles/finalizers
+  - satelliteephemeris/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - ntn.operators.dev
+  resources:
+  - groundstationlifecycles/status
+  - satelliteephemeris/status
+  verbs:
+  - get
+  - patch
+  - update

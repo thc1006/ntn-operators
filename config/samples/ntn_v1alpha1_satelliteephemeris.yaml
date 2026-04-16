@@ -1,0 +1,9 @@
+apiVersion: ntn.operators.dev/v1alpha1
+kind: SatelliteEphemeris
+metadata:
+  labels:
+    app.kubernetes.io/name: ntn-operators
+    app.kubernetes.io/managed-by: kustomize
+  name: satelliteephemeris-sample
+spec:
+  # TODO(user): Add fields here

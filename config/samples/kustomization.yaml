@@ -1,0 +1,5 @@
+## Append samples of your project ##
+resources:
+- ntn_v1alpha1_satelliteephemeris.yaml
+- ntn_v1alpha1_groundstationlifecycle.yaml
+# +kubebuilder:scaffold:manifestskustomizesamples
