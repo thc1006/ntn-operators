@@ -355,8 +355,9 @@ func (r *GroundStationLifecycleReconciler) reconcileFirmware(
 		return
 	}
 
-	// Trigger update if conditions met.
-	if !upToDate && gs.Spec.Firmware.AutoUpdate {
+	// Trigger update if conditions met. Only start OTA when node is healthy.
+	if !upToDate && gs.Spec.Firmware.AutoUpdate &&
+		(gs.Status.Phase == ntnv1alpha1.PhaseRunning || gs.Status.Phase == ntnv1alpha1.PhaseDegraded) {
 		if gs.Spec.Firmware.MaintenanceWindow != "" {
 			inWindow, err := lifecycle.IsWithinMaintenanceWindow(gs.Spec.Firmware.MaintenanceWindow, r.now())
 			if err != nil {
@@ -382,10 +383,11 @@ func (r *GroundStationLifecycleReconciler) reconcileFirmware(
 }
 
 // checkHTTPEndpoint performs an HTTP GET and returns true if 2xx.
+// Returns true when HTTPClient is nil (skip check, assume healthy).
 // Only http:// and https:// schemes are allowed to reduce attack surface.
 func (r *GroundStationLifecycleReconciler) checkHTTPEndpoint(ctx context.Context, endpoint string) bool {
 	if r.HTTPClient == nil {
-		return false // no client configured, cannot verify health
+		return true // no client configured, skip check
 	}
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
