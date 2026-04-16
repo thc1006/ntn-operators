@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"time"
 
@@ -150,6 +151,9 @@ func (r *GroundStationLifecycleReconciler) reconcileHealth(
 			Message:            nodeErr.Error(),
 			ObservedGeneration: gs.Generation,
 		})
+		// Clear stale conditions that depend on node presence.
+		meta.RemoveStatusCondition(&gs.Status.Conditions, ntnv1alpha1.ConditionAntennaReady)
+		meta.RemoveStatusCondition(&gs.Status.Conditions, ntnv1alpha1.ConditionRFLinkHealthy)
 		gs.Status.Phase = ntnv1alpha1.PhaseOffline
 		return
 	}
@@ -162,6 +166,9 @@ func (r *GroundStationLifecycleReconciler) reconcileHealth(
 			Message:            fmt.Sprintf("No node with label %s=%s found", groundStationLabel, gs.Name),
 			ObservedGeneration: gs.Generation,
 		})
+		// Clear stale conditions that depend on node presence.
+		meta.RemoveStatusCondition(&gs.Status.Conditions, ntnv1alpha1.ConditionAntennaReady)
+		meta.RemoveStatusCondition(&gs.Status.Conditions, ntnv1alpha1.ConditionRFLinkHealthy)
 		if gs.Status.Phase == "" || gs.Status.Phase == ntnv1alpha1.PhaseProvisioning {
 			gs.Status.Phase = ntnv1alpha1.PhaseProvisioning
 		} else {
@@ -241,6 +248,9 @@ func (r *GroundStationLifecycleReconciler) reconcileHealth(
 			Message:            rfMsg,
 			ObservedGeneration: gs.Generation,
 		})
+	} else {
+		// Endpoint not configured; remove stale RFLinkHealthy condition.
+		meta.RemoveStatusCondition(&gs.Status.Conditions, ntnv1alpha1.ConditionRFLinkHealthy)
 	}
 }
 
@@ -250,7 +260,11 @@ func (r *GroundStationLifecycleReconciler) reconcileFirmware(
 	gs *ntnv1alpha1.GroundStationLifecycle,
 	node *corev1.Node,
 ) {
-	if gs.Spec.Firmware == nil || node == nil {
+	if gs.Spec.Firmware == nil {
+		meta.RemoveStatusCondition(&gs.Status.Conditions, ntnv1alpha1.ConditionFirmwareUpToDate)
+		return
+	}
+	if node == nil {
 		return
 	}
 
@@ -342,7 +356,10 @@ func (r *GroundStationLifecycleReconciler) checkHTTPEndpoint(ctx context.Context
 	if err != nil {
 		return false
 	}
-	defer func() { _ = resp.Body.Close() }()
+	defer func() {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+	}()
 	return resp.StatusCode >= 200 && resp.StatusCode < 300
 }
 

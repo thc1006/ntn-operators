@@ -200,6 +200,41 @@ var _ = Describe("GroundStationLifecycle Controller", func() {
 		})
 	})
 
+	Context("When multiple nodes match the same label", func() {
+		BeforeEach(func() {
+			createGS(false, false)
+			createNode(true)
+			// Create a second node with the same label.
+			node2 := &corev1.Node{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:   "edge-node-02",
+					Labels: map[string]string{groundStationLabel: gsName},
+				},
+			}
+			Expect(k8sClient.Create(context.Background(), node2)).To(Succeed())
+		})
+		AfterEach(func() {
+			deleteGS()
+			deleteNode()
+			node2 := &corev1.Node{}
+			if err := k8sClient.Get(context.Background(), types.NamespacedName{Name: "edge-node-02"}, node2); err == nil {
+				Expect(k8sClient.Delete(context.Background(), node2)).To(Succeed())
+			}
+		})
+
+		It("should set phase=Offline due to ambiguous mapping", func() {
+			_, err := reconcileGS(newReconciler(nil))
+			Expect(err).NotTo(HaveOccurred())
+
+			gs := getGS()
+			Expect(gs.Status.Phase).To(Equal(ntnv1alpha1.PhaseOffline))
+			cond := meta.FindStatusCondition(gs.Status.Conditions, ntnv1alpha1.ConditionK8sNodeReady)
+			Expect(cond).NotTo(BeNil())
+			Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+			Expect(cond.Reason).To(Equal("APIError"))
+		})
+	})
+
 	Context("When node is NotReady", func() {
 		BeforeEach(func() {
 			createGS(false, false)
