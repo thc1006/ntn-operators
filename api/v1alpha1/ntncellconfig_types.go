@@ -78,10 +78,16 @@ type NTNParams struct {
 // Earth-Fixed coordinates. For GEO satellites, velocity fields should be 0.
 type EphemerisECEF struct {
 	// posX is the X position of the satellite (-67108864 to 67108863).
+	// +kubebuilder:validation:Minimum=-67108864
+	// +kubebuilder:validation:Maximum=67108863
 	PosX int `json:"posX"`
-	// posY is the Y position of the satellite.
+	// posY is the Y position of the satellite (-67108864 to 67108863).
+	// +kubebuilder:validation:Minimum=-67108864
+	// +kubebuilder:validation:Maximum=67108863
 	PosY int `json:"posY"`
-	// posZ is the Z position of the satellite.
+	// posZ is the Z position of the satellite (-67108864 to 67108863).
+	// +kubebuilder:validation:Minimum=-67108864
+	// +kubebuilder:validation:Maximum=67108863
 	PosZ int `json:"posZ"`
 	// velX is the X velocity of the satellite (0 for GEO).
 	// +kubebuilder:default=0

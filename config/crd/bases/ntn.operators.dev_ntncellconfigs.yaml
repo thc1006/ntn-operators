@@ -98,12 +98,20 @@ spec:
                       posX:
                         description: posX is the X position of the satellite (-67108864
                           to 67108863).
+                        maximum: 67108863
+                        minimum: -67108864
                         type: integer
                       posY:
-                        description: posY is the Y position of the satellite.
+                        description: posY is the Y position of the satellite (-67108864
+                          to 67108863).
+                        maximum: 67108863
+                        minimum: -67108864
                         type: integer
                       posZ:
-                        description: posZ is the Z position of the satellite.
+                        description: posZ is the Z position of the satellite (-67108864
+                          to 67108863).
+                        maximum: 67108863
+                        minimum: -67108864
                         type: integer
                       velX:
                         default: 0

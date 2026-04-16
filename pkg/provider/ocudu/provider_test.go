@@ -48,8 +48,12 @@ func geoSpec() *ntnv1alpha1.NTNCellConfigSpec {
 func newTestProvider(t *testing.T) *Provider {
 	t.Helper()
 	scheme := runtime.NewScheme()
-	_ = corev1.AddToScheme(scheme)
-	_ = ntnv1alpha1.AddToScheme(scheme)
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme(corev1): %v", err)
+	}
+	if err := ntnv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme(ntnv1alpha1): %v", err)
+	}
 
 	// Pre-create the target namespace.
 	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "ntn-system"}}

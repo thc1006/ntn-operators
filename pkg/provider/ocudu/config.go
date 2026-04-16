@@ -60,6 +60,8 @@ cu_cp:
     rrc_procedure_guard_time_ms: {{ .RrcGuardTimeMs }}
 `
 
+var parsedTemplate = template.Must(template.New("ocudu-ntn").Parse(configTemplate))
+
 type configData struct {
 	PayloadType          string
 	Koffset              int
@@ -118,13 +120,8 @@ func GenerateConfig(spec *ntnv1alpha1.NTNCellConfigSpec) ([]byte, error) {
 		}
 	}
 
-	tmpl, err := template.New("ocudu-ntn").Parse(configTemplate)
-	if err != nil {
-		return nil, fmt.Errorf("parsing config template: %w", err)
-	}
-
 	var buf bytes.Buffer
-	if err := tmpl.Execute(&buf, data); err != nil {
+	if err := parsedTemplate.Execute(&buf, data); err != nil {
 		return nil, fmt.Errorf("executing config template: %w", err)
 	}
 
