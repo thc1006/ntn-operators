@@ -59,6 +59,8 @@ func (r *NTNCellConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 
 	// Step 2: Guard against nil provider.
 	if r.Provider == nil {
+		cc.Status.AppliedKoffset = 0
+		cc.Status.ConfigMapRef = ""
 		meta.SetStatusCondition(&cc.Status.Conditions, metav1.Condition{
 			Type:               ntnv1alpha1.ConditionConfigApplied,
 			Status:             metav1.ConditionFalse,
@@ -74,6 +76,8 @@ func (r *NTNCellConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 
 	// Step 3: Validate provider type.
 	if cc.Spec.Provider.Type != "ocudu" {
+		cc.Status.AppliedKoffset = 0
+		cc.Status.ConfigMapRef = ""
 		meta.SetStatusCondition(&cc.Status.Conditions, metav1.Condition{
 			Type:               ntnv1alpha1.ConditionConfigApplied,
 			Status:             metav1.ConditionFalse,
@@ -100,6 +104,8 @@ func (r *NTNCellConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 
 	if err := r.Provider.ApplyCellConfig(ctx, spec); err != nil {
 		log.Error(err, "Failed to apply cell config")
+		cc.Status.AppliedKoffset = 0
+		cc.Status.ConfigMapRef = ""
 		meta.SetStatusCondition(&cc.Status.Conditions, metav1.Condition{
 			Type:               ntnv1alpha1.ConditionConfigApplied,
 			Status:             metav1.ConditionFalse,
@@ -154,7 +160,7 @@ func (r *NTNCellConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	}
 
 	log.Info("NTN cell configuration applied successfully")
-	return ctrl.Result{}, nil
+	return ctrl.Result{RequeueAfter: 5 * time.Minute}, nil
 }
 
 // SetupWithManager sets up the controller with the Manager.

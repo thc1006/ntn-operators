@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -92,7 +93,7 @@ var _ = Describe("NTNCellConfig Controller", func() {
 				NamespacedName: typeNamespacedName,
 			})
 			Expect(err).NotTo(HaveOccurred())
-			Expect(result).NotTo(BeNil())
+			Expect(result.RequeueAfter).To(Equal(5 * time.Minute))
 
 			// Provider should have been called.
 			Expect(mock.ApplyCalls).To(Equal(1))
@@ -143,6 +144,41 @@ var _ = Describe("NTNCellConfig Controller", func() {
 			})
 			Expect(err).NotTo(HaveOccurred())
 			Expect(result).To(Equal(reconcile.Result{}))
+			Expect(mock.ApplyCalls).To(Equal(0))
+		})
+	})
+
+	Context("When provider type is unsupported", func() {
+		BeforeEach(func() {
+			cr := &ntnv1alpha1.NTNCellConfig{
+				ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: namespace},
+				Spec: ntnv1alpha1.NTNCellConfigSpec{
+					Provider: ntnv1alpha1.ProviderRef{Type: "aalyria"},
+					NTN: ntnv1alpha1.NTNParams{
+						EphemerisECEF: ntnv1alpha1.EphemerisECEF{PosX: 1, PosY: 2, PosZ: 3},
+					},
+				},
+			}
+			Expect(k8sClient.Create(context.Background(), cr)).To(Succeed())
+		})
+		AfterEach(func() { deleteCR() })
+
+		It("should set ConfigApplied=False with UnsupportedProvider", func() {
+			mock := &provider.MockProvider{}
+			reconciler := newReconciler(mock)
+
+			_, err := reconciler.Reconcile(context.Background(), reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			updated := &ntnv1alpha1.NTNCellConfig{}
+			Expect(k8sClient.Get(context.Background(), typeNamespacedName, updated)).To(Succeed())
+
+			cond := meta.FindStatusCondition(updated.Status.Conditions, ntnv1alpha1.ConditionConfigApplied)
+			Expect(cond).NotTo(BeNil())
+			Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+			Expect(cond.Reason).To(Equal("UnsupportedProvider"))
 			Expect(mock.ApplyCalls).To(Equal(0))
 		})
 	})

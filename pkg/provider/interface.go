@@ -27,9 +27,9 @@ import (
 // respective controllers (not via Provider).
 //
 // Implementations:
-//   - OCUDU: generates geo_ntn.yml ConfigMap via Helm values / O1 NETCONF
-//   - OAI: generates OAI NTN config via oai-operators Helm
-//   - Aalyria: applies config via Spacetime gRPC API (pin v21.0)
+//   - OCUDU: generates geo_ntn.yml and writes to a ConfigMap (future: Helm values overlay / O1 NETCONF)
+//   - OAI: generates OAI NTN config via oai-operators Helm (planned)
+//   - Aalyria: applies config via Spacetime gRPC API, pin v21.0 (planned)
 type NTNProvider interface {
 	// ApplyCellConfig applies NTN radio parameters to the backend.
 	// Returns an error if the configuration could not be applied.
