@@ -20,18 +20,21 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// EphemerisSource defines where to fetch TLE/ephemeris data from.
+// EphemerisSource defines where to fetch GP (General Perturbations) data from.
+// Supports CelesTrak OMM JSON and Space-Track.org OMM JSON formats.
 type EphemerisSource struct {
 	// type is the source type. Supported: "CelesTrak", "SpaceTrack".
 	// +kubebuilder:validation:Enum=CelesTrak;SpaceTrack
 	Type string `json:"type"`
 
-	// url is the endpoint to fetch TLE data from.
-	// For CelesTrak: https://celestrak.org/NORAD/elements/gp.php?GROUP=oneweb
+	// url is the endpoint to fetch GP data from.
+	// For CelesTrak: https://celestrak.org/NORAD/elements/gp.php?GROUP=oneweb&FORMAT=JSON
+	// For SpaceTrack: https://www.space-track.org/basicspacedata/query/class/gp/...
 	// +kubebuilder:validation:MinLength=1
 	URL string `json:"url"`
 
-	// refreshInterval is how often to re-fetch TLE data.
+	// refreshInterval is how often to re-fetch GP data.
+	// CelesTrak updates every 2 hours; setting this below 2h wastes bandwidth.
 	// +kubebuilder:default="4h"
 	RefreshInterval metav1.Duration `json:"refreshInterval"`
 
@@ -70,6 +73,7 @@ type PassPredictionSpec struct {
 
 	// minElevation is the minimum elevation angle in degrees (string, e.g., "10").
 	// +kubebuilder:default="10"
+	// +kubebuilder:validation:Pattern=`^-?[0-9]+\.?[0-9]*$`
 	MinElevation string `json:"minElevation,omitempty"`
 
 	// horizon is how far into the future to predict passes.
@@ -107,12 +111,13 @@ type PassWindow struct {
 	LOS metav1.Time `json:"los"`
 
 	// maxElevation is the peak elevation angle during the pass in degrees (string, e.g., "72.5").
+	// +kubebuilder:validation:Pattern=`^-?[0-9]+\.?[0-9]*$`
 	MaxElevation string `json:"maxElevation"`
 }
 
 // SatelliteEphemerisStatus defines the observed state of SatelliteEphemeris.
 type SatelliteEphemerisStatus struct {
-	// lastUpdated is when the TLE data was last successfully fetched.
+	// lastUpdated is when the GP data was last successfully fetched.
 	// +optional
 	LastUpdated *metav1.Time `json:"lastUpdated,omitempty"`
 
@@ -131,14 +136,23 @@ type SatelliteEphemerisStatus struct {
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
 
+// Condition types for SatelliteEphemeris.
+const (
+	ConditionGPDataFetched   = "GPDataFetched"
+	ConditionGPDataParsed    = "GPDataParsed"
+	ConditionPassesPredicted = "PassesPredicted"
+)
+
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
+// +kubebuilder:resource:shortName=sateph
 // +kubebuilder:printcolumn:name="Satellites",type=integer,JSONPath=`.status.satelliteCount`
 // +kubebuilder:printcolumn:name="Last Updated",type=date,JSONPath=`.status.lastUpdated`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
-// SatelliteEphemeris manages TLE fetching, orbital propagation, and
-// pass prediction for a set of satellites against ground stations.
+// SatelliteEphemeris manages GP data fetching (OMM JSON from CelesTrak/SpaceTrack),
+// orbital propagation (SGP4 via akhenakh/sgp4), and pass prediction for a set of
+// satellites against ground stations.
 type SatelliteEphemeris struct {
 	metav1.TypeMeta `json:",inline"`
 
