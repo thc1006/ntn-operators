@@ -22,7 +22,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: bin/k8s
-          key: envtest-${{ hashFiles('Makefile') }}
+          key: envtest-${{ runner.os }}-${{ hashFiles('Makefile', 'go.mod', 'go.sum') }}
 
       - name: Running Tests
         run: make test

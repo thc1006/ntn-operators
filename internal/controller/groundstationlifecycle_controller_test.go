@@ -369,6 +369,13 @@ var _ = Describe("GroundStationLifecycle Controller", func() {
 			Expect(fwCond).NotTo(BeNil())
 			Expect(fwCond.Status).To(Equal(metav1.ConditionTrue))
 			Expect(fwCond.Reason).To(Equal("UpdateCompleted"))
+
+			// Third reconcile: remains stable, does not re-trigger OTA.
+			_, err = reconcileGS(reconciler)
+			Expect(err).NotTo(HaveOccurred())
+			gs = getGS()
+			Expect(gs.Status.Phase).To(Equal(ntnv1alpha1.PhaseRunning))
+			Expect(gs.Status.FirmwareVersion).To(Equal("2.3.1"))
 		})
 	})
 

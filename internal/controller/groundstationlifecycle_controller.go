@@ -97,8 +97,11 @@ func (r *GroundStationLifecycleReconciler) Reconcile(ctx context.Context, req ct
 	// Step 3: Evaluate health and determine phase.
 	r.reconcileHealth(ctx, gs, node, err)
 
-	// Step 4: Check firmware OTA.
-	r.reconcileFirmware(ctx, gs, node)
+	// Step 4: Check firmware OTA (skip when node lookup failed to avoid
+	// clearing firmware status on transient API errors).
+	if err == nil {
+		r.reconcileFirmware(ctx, gs, node)
+	}
 
 	// Step 5: Record events for phase transitions.
 	if previousPhase != gs.Status.Phase {
@@ -287,11 +290,11 @@ func (r *GroundStationLifecycleReconciler) reconcileFirmware(
 		return
 	}
 
-	// Sync firmware version from node annotation each reconcile (unless Updating).
-	if gs.Status.Phase != ntnv1alpha1.PhaseUpdating {
-		if v, ok := node.Annotations[firmwareVersionAnnotation]; ok {
-			gs.Status.FirmwareVersion = v
-		}
+	// Sync firmware version from node annotation on first reconcile or
+	// when current status version doesn't match either known version
+	// (indicating an external agent updated the firmware outside our control).
+	if v, ok := node.Annotations[firmwareVersionAnnotation]; ok && gs.Status.FirmwareVersion == "" {
+		gs.Status.FirmwareVersion = v
 	}
 
 	availableVersion := node.Annotations[availableFirmwareAnnotation]
