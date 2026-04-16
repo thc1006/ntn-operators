@@ -20,6 +20,7 @@ import (
 	"context"
 
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -30,12 +31,14 @@ import (
 // GroundStationLifecycleReconciler reconciles a GroundStationLifecycle object
 type GroundStationLifecycleReconciler struct {
 	client.Client
-	Scheme *runtime.Scheme
+	Scheme   *runtime.Scheme
+	Recorder events.EventRecorder
 }
 
 // +kubebuilder:rbac:groups=ntn.operators.dev,resources=groundstationlifecycles,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=ntn.operators.dev,resources=groundstationlifecycles/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=ntn.operators.dev,resources=groundstationlifecycles/finalizers,verbs=update
+// +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.

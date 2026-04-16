@@ -8,7 +8,7 @@ Kubernetes-native management framework for Non-Terrestrial Networks (NTN).
 
 A set of Kubernetes CRDs and Controllers for declaratively managing satellite-terrestrial integrated networks:
 
-- **SatelliteEphemeris** — TLE auto-update, SGP4 pass prediction
+- **SatelliteEphemeris** — GP data auto-update (OMM JSON from CelesTrak/SpaceTrack), SGP4 pass prediction
 - **GroundStationLifecycle** — Edge station health monitoring, OTA firmware, GitOps config
 - **NTNCellConfig** — NTN base station beam/frequency configuration
 - **NTNSlice** — Terrestrial↔satellite failover policy, QoS mapping, billing CDR generation

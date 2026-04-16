@@ -4,6 +4,17 @@ metadata:
   labels:
     app.kubernetes.io/name: ntn-operators
     app.kubernetes.io/managed-by: kustomize
-  name: satelliteephemeris-sample
+  name: oneweb-constellation
 spec:
-  # TODO(user): Add fields here
+  source:
+    type: CelesTrak
+    url: https://celestrak.org/NORAD/elements/gp.php?GROUP=oneweb&FORMAT=JSON
+    refreshInterval: 4h
+  satellites:
+    constellation: oneweb
+  passPrediction:
+    groundStations:
+      - gs-taipei-01
+      - gs-hsinchu-01
+    minElevation: "10"
+    horizon: 24h

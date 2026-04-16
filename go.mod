@@ -3,6 +3,7 @@ module github.com/thc1006/ntn-operators
 go 1.25.3
 
 require (
+	github.com/akhenakh/sgp4 v0.0.0-20260314155803-8ee03fc877eb
 	github.com/onsi/ginkgo/v2 v2.27.2
 	github.com/onsi/gomega v1.38.2
 	k8s.io/apimachinery v0.35.0

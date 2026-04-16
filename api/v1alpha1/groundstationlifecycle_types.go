@@ -164,6 +164,7 @@ const (
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
+// +kubebuilder:resource:shortName=gs
 // +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
 // +kubebuilder:printcolumn:name="Vendor",type=string,JSONPath=`.spec.hardware.vendor`
 // +kubebuilder:printcolumn:name="K8s",type=string,JSONPath=`.status.k8sVersion`

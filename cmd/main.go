@@ -21,6 +21,9 @@ import (
 	"flag"
 	"os"
 
+	"net/http"
+	"time"
+
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
@@ -37,6 +40,7 @@ import (
 
 	ntnv1alpha1 "github.com/thc1006/ntn-operators/api/v1alpha1"
 	"github.com/thc1006/ntn-operators/internal/controller"
+	"github.com/thc1006/ntn-operators/pkg/ephemeris"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -178,16 +182,20 @@ func main() {
 		os.Exit(1)
 	}
 
+	gpHTTPClient := &http.Client{Timeout: 30 * time.Second}
 	if err := (&controller.SatelliteEphemerisReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:   mgr.GetClient(),
+		Scheme:   mgr.GetScheme(),
+		Recorder: mgr.GetEventRecorder("satelliteephemeris-controller"),
+		Fetcher:  ephemeris.NewCelesTrakFetcher(gpHTTPClient),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "SatelliteEphemeris")
 		os.Exit(1)
 	}
 	if err := (&controller.GroundStationLifecycleReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:   mgr.GetClient(),
+		Scheme:   mgr.GetScheme(),
+		Recorder: mgr.GetEventRecorder("groundstationlifecycle-controller"),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "GroundStationLifecycle")
 		os.Exit(1)
