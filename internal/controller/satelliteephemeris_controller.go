@@ -104,6 +104,13 @@ func (r *SatelliteEphemerisReconciler) Reconcile(ctx context.Context, req ctrl.R
 			Message:            fmt.Sprintf("GP data unchanged from %s (304)", eph.Spec.Source.Type),
 			ObservedGeneration: eph.Generation,
 		})
+		meta.SetStatusCondition(&eph.Status.Conditions, metav1.Condition{
+			Type:               ntnv1alpha1.ConditionGPDataParsed,
+			Status:             metav1.ConditionTrue,
+			Reason:             "CachedOMMs",
+			Message:            "Using cached OMM data from previous fetch",
+			ObservedGeneration: eph.Generation,
+		})
 	} else {
 		log.Info("Fetched GP data successfully", "satelliteCount", result.SatelliteCount)
 		eph.Status.SatelliteCount = result.SatelliteCount
@@ -142,8 +149,9 @@ func (r *SatelliteEphemerisReconciler) Reconcile(ctx context.Context, req ctrl.R
 			}
 		}
 	} else {
-		// Pass prediction not configured; clear any stale pass windows.
+		// Pass prediction not configured; clear stale pass windows and condition.
 		eph.Status.NextPassWindows = nil
+		meta.RemoveStatusCondition(&eph.Status.Conditions, ntnv1alpha1.ConditionPassesPredicted)
 	}
 
 	if err := r.Status().Update(ctx, eph); err != nil {
