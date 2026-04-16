@@ -27,4 +27,13 @@ resources:
   kind: GroundStationLifecycle
   path: github.com/thc1006/ntn-operators/api/v1alpha1
   version: v1alpha1
+- api:
+    crdVersion: v1
+    namespaced: true
+  controller: true
+  domain: operators.dev
+  group: ntn
+  kind: NTNCellConfig
+  path: github.com/thc1006/ntn-operators/api/v1alpha1
+  version: v1alpha1
 version: "3"

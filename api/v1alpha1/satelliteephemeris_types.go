@@ -83,7 +83,7 @@ type PassPredictionSpec struct {
 
 // SatelliteEphemerisSpec defines the desired state of SatelliteEphemeris.
 type SatelliteEphemerisSpec struct {
-	// source defines where to fetch TLE/ephemeris data.
+	// source defines where to fetch GP (General Perturbations) data.
 	// +required
 	Source EphemerisSource `json:"source"`
 

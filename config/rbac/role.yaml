@@ -7,6 +7,17 @@ rules:
 - apiGroups:
   - ""
   resources:
+  - configmaps
+  verbs:
+  - create
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - ""
+  resources:
   - events
   verbs:
   - create
@@ -23,6 +34,7 @@ rules:
   - ntn.operators.dev
   resources:
   - groundstationlifecycles
+  - ntncellconfigs
   - satelliteephemeris
   verbs:
   - create
@@ -36,6 +48,7 @@ rules:
   - ntn.operators.dev
   resources:
   - groundstationlifecycles/finalizers
+  - ntncellconfigs/finalizers
   - satelliteephemeris/finalizers
   verbs:
   - update
@@ -43,6 +56,7 @@ rules:
   - ntn.operators.dev
   resources:
   - groundstationlifecycles/status
+  - ntncellconfigs/status
   - satelliteephemeris/status
   verbs:
   - get
