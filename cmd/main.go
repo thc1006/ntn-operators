@@ -193,9 +193,10 @@ func main() {
 		os.Exit(1)
 	}
 	if err := (&controller.GroundStationLifecycleReconciler{
-		Client:   mgr.GetClient(),
-		Scheme:   mgr.GetScheme(),
-		Recorder: mgr.GetEventRecorder("groundstationlifecycle-controller"),
+		Client:     mgr.GetClient(),
+		Scheme:     mgr.GetScheme(),
+		Recorder:   mgr.GetEventRecorder("groundstationlifecycle-controller"),
+		HTTPClient: &http.Client{Timeout: 5 * time.Second},
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "GroundStationLifecycle")
 		os.Exit(1)
