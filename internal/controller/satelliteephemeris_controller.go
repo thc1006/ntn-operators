@@ -327,8 +327,11 @@ func (r *SatelliteEphemerisReconciler) GroundStationToEphemeris(
 		return nil
 	}
 
+	log := logf.FromContext(ctx)
+
 	var ephList ntnv1alpha1.SatelliteEphemerisList
 	if err := r.List(ctx, &ephList, client.InNamespace(gs.Namespace)); err != nil {
+		log.Error(err, "Failed to list SatelliteEphemeris for ground station mapper")
 		return nil
 	}
 
