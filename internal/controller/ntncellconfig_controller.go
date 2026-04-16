@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -68,15 +69,36 @@ func (r *NTNCellConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		if err := r.Status().Update(ctx, cc); err != nil {
 			return ctrl.Result{}, err
 		}
+		return ctrl.Result{RequeueAfter: time.Minute}, nil
+	}
+
+	// Step 3: Validate provider type.
+	if cc.Spec.Provider.Type != "ocudu" {
+		meta.SetStatusCondition(&cc.Status.Conditions, metav1.Condition{
+			Type:               ntnv1alpha1.ConditionConfigApplied,
+			Status:             metav1.ConditionFalse,
+			Reason:             "UnsupportedProvider",
+			Message:            fmt.Sprintf("Provider type %q is not yet supported; only 'ocudu' is available", cc.Spec.Provider.Type),
+			ObservedGeneration: cc.Generation,
+		})
+		if err := r.Status().Update(ctx, cc); err != nil {
+			return ctrl.Result{}, err
+		}
 		return ctrl.Result{}, nil
 	}
 
-	// Step 3: Apply configuration via provider.
-	log.Info("Applying NTN cell configuration",
-		"provider", cc.Spec.Provider.Type,
-		"koffset", cc.Spec.NTN.CellSpecificKoffset)
+	// Step 4: Default namespace to CR namespace if not set.
+	spec := cc.Spec.DeepCopy()
+	if spec.Provider.Namespace == "" {
+		spec.Provider.Namespace = cc.Namespace
+	}
 
-	if err := r.Provider.ApplyCellConfig(ctx, &cc.Spec); err != nil {
+	// Step 5: Apply configuration via provider.
+	log.Info("Applying NTN cell configuration",
+		"provider", spec.Provider.Type,
+		"koffset", spec.NTN.CellSpecificKoffset)
+
+	if err := r.Provider.ApplyCellConfig(ctx, spec); err != nil {
 		log.Error(err, "Failed to apply cell config")
 		meta.SetStatusCondition(&cc.Status.Conditions, metav1.Condition{
 			Type:               ntnv1alpha1.ConditionConfigApplied,
@@ -91,10 +113,10 @@ func (r *NTNCellConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		if r.Recorder != nil {
 			r.Recorder.Eventf(cc, nil, "Warning", "ApplyFailed", "ApplyFailed", "%s", err.Error())
 		}
-		return ctrl.Result{}, nil
+		return ctrl.Result{RequeueAfter: time.Minute}, nil
 	}
 
-	// Step 4: Get applied status from provider.
+	// Step 6: Get applied status from provider.
 	status, err := r.Provider.GetCellStatus(ctx)
 	if err != nil {
 		log.Error(err, "Failed to get cell status")
@@ -103,12 +125,12 @@ func (r *NTNCellConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		cc.Status.ConfigMapRef = status.ConfigMapRef
 	}
 
-	// Step 5: Set success condition.
+	// Step 7: Set success condition.
 	meta.SetStatusCondition(&cc.Status.Conditions, metav1.Condition{
 		Type:               ntnv1alpha1.ConditionConfigApplied,
 		Status:             metav1.ConditionTrue,
 		Reason:             "Applied",
-		Message:            fmt.Sprintf("NTN config applied via %s provider", cc.Spec.Provider.Type),
+		Message:            fmt.Sprintf("NTN config applied via %s provider", spec.Provider.Type),
 		ObservedGeneration: cc.Generation,
 	})
 
@@ -118,7 +140,7 @@ func (r *NTNCellConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 
 	if r.Recorder != nil {
 		r.Recorder.Eventf(cc, nil, "Normal", "ConfigApplied", "ConfigApplied",
-			"Applied NTN config (koffset=%d) via %s", cc.Spec.NTN.CellSpecificKoffset, cc.Spec.Provider.Type)
+			"Applied NTN config (koffset=%d) via %s", spec.NTN.CellSpecificKoffset, spec.Provider.Type)
 	}
 
 	log.Info("NTN cell configuration applied successfully")

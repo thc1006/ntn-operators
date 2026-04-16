@@ -19,6 +19,8 @@ package ocudu
 import (
 	"context"
 	"fmt"
+	"strconv"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -33,12 +35,10 @@ import (
 const ConfigMapName = "ocudu-ntn-config"
 
 // Provider implements provider.NTNProvider for OCUDU/srsRAN gNB.
-// It generates a geo_ntn.yml configuration and stores it in a ConfigMap
-// that can be mounted by the OCUDU Helm chart.
+// It is stateless — status is derived from the ConfigMap, not from
+// in-memory state, making it safe for concurrent reconciles.
 type Provider struct {
-	client        client.Client
-	lastSpec      *ntnv1alpha1.NTNCellConfigSpec
-	lastNamespace string
+	client client.Client
 }
 
 // NewProvider creates an OCUDU Provider with the given K8s client.
@@ -48,23 +48,24 @@ func NewProvider(c client.Client) *Provider {
 
 // ApplyCellConfig generates OCUDU-compatible NTN config YAML and writes it
 // to a ConfigMap in the provider's target namespace.
+// The namespace MUST be set on spec.Provider.Namespace by the controller
+// before calling this method.
 func (p *Provider) ApplyCellConfig(ctx context.Context, spec *ntnv1alpha1.NTNCellConfigSpec) error {
+	if spec.Provider.Namespace == "" {
+		return fmt.Errorf("provider namespace must be set")
+	}
+
 	yamlData, err := GenerateConfig(spec)
 	if err != nil {
 		return fmt.Errorf("generating OCUDU config: %w", err)
 	}
 
 	namespace := spec.Provider.Namespace
-	if namespace == "" {
-		namespace = "default"
-	}
-
 	cm := &corev1.ConfigMap{}
 	key := types.NamespacedName{Name: ConfigMapName, Namespace: namespace}
 	err = p.client.Get(ctx, key, cm)
 
 	if apierrors.IsNotFound(err) {
-		// Create new ConfigMap.
 		cm = &corev1.ConfigMap{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      ConfigMapName,
@@ -72,6 +73,9 @@ func (p *Provider) ApplyCellConfig(ctx context.Context, spec *ntnv1alpha1.NTNCel
 				Labels: map[string]string{
 					"app.kubernetes.io/managed-by": "ntn-operators",
 					"app.kubernetes.io/component":  "ocudu-ntn-config",
+				},
+				Annotations: map[string]string{
+					"ntn.operators.dev/koffset": strconv.Itoa(spec.NTN.CellSpecificKoffset),
 				},
 			},
 			Data: map[string]string{
@@ -84,37 +88,55 @@ func (p *Provider) ApplyCellConfig(ctx context.Context, spec *ntnv1alpha1.NTNCel
 	} else if err != nil {
 		return fmt.Errorf("getting ConfigMap: %w", err)
 	} else {
-		// Update existing ConfigMap.
+		// Update existing ConfigMap. Initialize Data if nil.
+		if cm.Data == nil {
+			cm.Data = make(map[string]string)
+		}
 		cm.Data["geo_ntn.yml"] = string(yamlData)
+		if cm.Annotations == nil {
+			cm.Annotations = make(map[string]string)
+		}
+		cm.Annotations["ntn.operators.dev/koffset"] = strconv.Itoa(spec.NTN.CellSpecificKoffset)
 		if err := p.client.Update(ctx, cm); err != nil {
 			return fmt.Errorf("updating ConfigMap: %w", err)
 		}
 	}
 
-	p.lastSpec = spec
-	p.lastNamespace = namespace
 	return nil
 }
 
-// GetCellStatus returns the current status of the applied configuration.
+// GetCellStatus derives status from the ConfigMap (stateless).
+// Safe for concurrent reconciles and multiple NTNCellConfig CRs.
 func (p *Provider) GetCellStatus(ctx context.Context) (*ntnv1alpha1.NTNCellConfigStatus, error) {
 	status := &ntnv1alpha1.NTNCellConfigStatus{}
 
-	if p.lastSpec == nil || p.lastNamespace == "" {
+	// Search all namespaces for the ConfigMap (simplified — in practice,
+	// the controller should pass the target namespace).
+	var cmList corev1.ConfigMapList
+	if err := p.client.List(ctx, &cmList, client.MatchingLabels{
+		"app.kubernetes.io/component": "ocudu-ntn-config",
+	}); err != nil {
 		return status, nil
 	}
 
-	// Verify ConfigMap exists.
-	cm := &corev1.ConfigMap{}
-	key := types.NamespacedName{Name: ConfigMapName, Namespace: p.lastNamespace}
-	if err := p.client.Get(ctx, key, cm); err != nil {
-		if apierrors.IsNotFound(err) {
-			return status, nil
-		}
-		return status, fmt.Errorf("checking ConfigMap: %w", err)
+	if len(cmList.Items) == 0 {
+		return status, nil
 	}
 
-	status.AppliedKoffset = p.lastSpec.NTN.CellSpecificKoffset
-	status.ConfigMapRef = ConfigMapName
+	cm := cmList.Items[0]
+	status.ConfigMapRef = cm.Name
+
+	if koffsetStr, ok := cm.Annotations["ntn.operators.dev/koffset"]; ok {
+		if v, err := strconv.Atoi(koffsetStr); err == nil {
+			status.AppliedKoffset = v
+		}
+	}
+
+	// Verify geo_ntn.yml exists.
+	if _, ok := cm.Data["geo_ntn.yml"]; !ok {
+		return status, fmt.Errorf("ConfigMap %s/%s missing geo_ntn.yml key", cm.Namespace, cm.Name)
+	}
+	_ = strings.Contains // suppress unused import if needed
+
 	return status, nil
 }

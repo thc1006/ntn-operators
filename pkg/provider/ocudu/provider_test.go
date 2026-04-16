@@ -18,6 +18,7 @@ package ocudu
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -108,7 +109,10 @@ func TestApplyCellConfig_UpdatesExistingConfigMap(t *testing.T) {
 
 	// Verify updated.
 	var cm corev1.ConfigMap
-	_ = p.client.Get(ctx, types.NamespacedName{Name: ConfigMapName, Namespace: "ntn-system"}, &cm)
+	err = p.client.Get(ctx, types.NamespacedName{Name: ConfigMapName, Namespace: "ntn-system"}, &cm)
+	if err != nil {
+		t.Fatalf("Get ConfigMap after update: %v", err)
+	}
 	if !contains(cm.Data["geo_ntn.yml"], "cell_specific_koffset: 500") {
 		t.Error("ConfigMap should have updated koffset=500")
 	}
@@ -146,19 +150,18 @@ func TestGetCellStatus_NoConfigMap(t *testing.T) {
 	}
 }
 
-func contains(s, substr string) bool {
-	return len(s) > 0 && len(substr) > 0 && containsStr(s, substr)
-}
+func TestApplyCellConfig_EmptyNamespace(t *testing.T) {
+	p := newTestProvider(t)
+	ctx := context.Background()
 
-func containsStr(s, substr string) bool {
-	return len(s) >= len(substr) && searchStr(s, substr)
-}
-
-func searchStr(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
+	spec := geoSpec()
+	spec.Provider.Namespace = ""
+	err := p.ApplyCellConfig(ctx, spec)
+	if err == nil {
+		t.Fatal("expected error for empty namespace")
 	}
-	return false
+}
+
+func contains(s, substr string) bool {
+	return strings.Contains(s, substr)
 }
