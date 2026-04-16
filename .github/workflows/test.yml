@@ -18,7 +18,11 @@ jobs:
         with:
           go-version-file: go.mod
 
+      - name: Cache envtest binaries
+        uses: actions/cache@v4
+        with:
+          path: bin/k8s
+          key: envtest-${{ hashFiles('Makefile') }}
+
       - name: Running Tests
-        run: |
-          go mod tidy
-          make test
+        run: make test
