@@ -23,46 +23,50 @@ import (
 	"github.com/akhenakh/sgp4"
 )
 
-// issOMM is a realistic ISS OMM for testing (matches akhenakh/sgp4 test data).
-var issOMM = sgp4.OMM{
-	ObjectName:         "ISS (ZARYA)",
-	ObjectID:           "1998-067A",
-	EpochStr:           "2025-09-04T02:26:38.098656",
-	MeanMotion:         15.49554387,
-	Eccentricity:       0.000588,
-	Inclination:        51.6381,
-	RAOfAscNode:        276.7884,
-	ArgOfPericenter:    282.5765,
-	MeanAnomaly:        192.7824,
-	EphemerisType:      0,
-	ClassificationType: "U",
-	NoradCatID:         25544,
-	ElementSetNo:       999,
-	RevAtEpoch:         47189,
-	BStar:              0.00025892,
-	MeanMotionDot:      0.00019394,
-	MeanMotionDDot:     0,
+// issOMM creates a realistic ISS OMM with epoch set to now for deterministic tests.
+func issOMM() sgp4.OMM {
+	return sgp4.OMM{
+		ObjectName:         "ISS (ZARYA)",
+		ObjectID:           "1998-067A",
+		EpochStr:           time.Now().UTC().Format("2006-01-02T15:04:05.000000"),
+		MeanMotion:         15.49554387,
+		Eccentricity:       0.000588,
+		Inclination:        51.6381,
+		RAOfAscNode:        276.7884,
+		ArgOfPericenter:    282.5765,
+		MeanAnomaly:        192.7824,
+		EphemerisType:      0,
+		ClassificationType: "U",
+		NoradCatID:         25544,
+		ElementSetNo:       999,
+		RevAtEpoch:         47189,
+		BStar:              0.00025892,
+		MeanMotionDot:      0.00019394,
+		MeanMotionDDot:     0,
+	}
 }
 
-// onewebOMM is a OneWeb satellite OMM for testing.
-var onewebOMM = sgp4.OMM{
-	ObjectName:         "ONEWEB-0012",
-	ObjectID:           "2019-010A",
-	EpochStr:           "2026-04-15T22:27:22.252608",
-	MeanMotion:         13.1659366,
-	Eccentricity:       0.00021061,
-	Inclination:        87.9064,
-	RAOfAscNode:        241.1509,
-	ArgOfPericenter:    110.8263,
-	MeanAnomaly:        249.3093,
-	EphemerisType:      0,
-	ClassificationType: "U",
-	NoradCatID:         44057,
-	ElementSetNo:       999,
-	RevAtEpoch:         34337,
-	BStar:              -0.00034023158,
-	MeanMotionDot:      -1.17e-6,
-	MeanMotionDDot:     0,
+// onewebOMM creates a OneWeb satellite OMM with epoch set to now.
+func onewebOMM() sgp4.OMM {
+	return sgp4.OMM{
+		ObjectName:         "ONEWEB-0012",
+		ObjectID:           "2019-010A",
+		EpochStr:           time.Now().UTC().Format("2006-01-02T15:04:05.000000"),
+		MeanMotion:         13.1659366,
+		Eccentricity:       0.00021061,
+		Inclination:        87.9064,
+		RAOfAscNode:        241.1509,
+		ArgOfPericenter:    110.8263,
+		MeanAnomaly:        249.3093,
+		EphemerisType:      0,
+		ClassificationType: "U",
+		NoradCatID:         44057,
+		ElementSetNo:       999,
+		RevAtEpoch:         34337,
+		BStar:              -0.00034023158,
+		MeanMotionDot:      -1.17e-6,
+		MeanMotionDDot:     0,
+	}
 }
 
 var taipeiStation = GroundStation{
@@ -81,7 +85,7 @@ var montrealStation = GroundStation{
 
 func TestPredictPasses_SingleSatellite(t *testing.T) {
 	passes, err := PredictPasses(
-		[]sgp4.OMM{issOMM},
+		[]sgp4.OMM{issOMM()},
 		[]GroundStation{montrealStation},
 		0, // all passes above horizon
 		24*time.Hour,
@@ -111,7 +115,7 @@ func TestPredictPasses_SingleSatellite(t *testing.T) {
 
 func TestPredictPasses_MinElevationFilter(t *testing.T) {
 	allPasses, err := PredictPasses(
-		[]sgp4.OMM{issOMM},
+		[]sgp4.OMM{issOMM()},
 		[]GroundStation{montrealStation},
 		0, // no filter
 		24*time.Hour,
@@ -122,7 +126,7 @@ func TestPredictPasses_MinElevationFilter(t *testing.T) {
 	}
 
 	filteredPasses, err := PredictPasses(
-		[]sgp4.OMM{issOMM},
+		[]sgp4.OMM{issOMM()},
 		[]GroundStation{montrealStation},
 		30, // high threshold
 		24*time.Hour,
@@ -144,7 +148,7 @@ func TestPredictPasses_MinElevationFilter(t *testing.T) {
 }
 
 func TestPredictPasses_NoradFilter(t *testing.T) {
-	omms := []sgp4.OMM{issOMM, onewebOMM}
+	omms := []sgp4.OMM{issOMM(), onewebOMM()}
 
 	// Filter to ISS only.
 	passes, err := PredictPasses(
@@ -167,7 +171,7 @@ func TestPredictPasses_NoradFilter(t *testing.T) {
 
 func TestPredictPasses_MultipleStations(t *testing.T) {
 	passes, err := PredictPasses(
-		[]sgp4.OMM{issOMM},
+		[]sgp4.OMM{issOMM()},
 		[]GroundStation{montrealStation, taipeiStation},
 		0,
 		24*time.Hour,
@@ -197,7 +201,7 @@ func TestPredictPasses_EmptyInputs(t *testing.T) {
 	}
 
 	// No stations.
-	passes, err = PredictPasses([]sgp4.OMM{issOMM}, nil, 0, 24*time.Hour, nil)
+	passes, err = PredictPasses([]sgp4.OMM{issOMM()}, nil, 0, 24*time.Hour, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -208,7 +212,7 @@ func TestPredictPasses_EmptyInputs(t *testing.T) {
 
 func TestPredictPasses_NoradFilterMatchesNone(t *testing.T) {
 	passes, err := PredictPasses(
-		[]sgp4.OMM{issOMM},
+		[]sgp4.OMM{issOMM()},
 		[]GroundStation{montrealStation},
 		0,
 		24*time.Hour,
@@ -224,7 +228,7 @@ func TestPredictPasses_NoradFilterMatchesNone(t *testing.T) {
 
 func TestPredictPasses_SortedByAOS(t *testing.T) {
 	passes, err := PredictPasses(
-		[]sgp4.OMM{issOMM},
+		[]sgp4.OMM{issOMM()},
 		[]GroundStation{montrealStation},
 		0,
 		48*time.Hour,

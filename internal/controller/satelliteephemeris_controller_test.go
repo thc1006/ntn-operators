@@ -51,25 +51,27 @@ func (m *mockGPFetcher) Fetch(_ context.Context, _ string) (ephemeris.GPFetchRes
 	return m.result, m.err
 }
 
-// ISS OMM for pass prediction tests.
-var testISSOMM = sgp4.OMM{
-	ObjectName:         "ISS (ZARYA)",
-	ObjectID:           "1998-067A",
-	EpochStr:           "2025-09-04T02:26:38.098656",
-	MeanMotion:         15.49554387,
-	Eccentricity:       0.000588,
-	Inclination:        51.6381,
-	RAOfAscNode:        276.7884,
-	ArgOfPericenter:    282.5765,
-	MeanAnomaly:        192.7824,
-	EphemerisType:      0,
-	ClassificationType: "U",
-	NoradCatID:         25544,
-	ElementSetNo:       999,
-	RevAtEpoch:         47189,
-	BStar:              0.00025892,
-	MeanMotionDot:      0.00019394,
-	MeanMotionDDot:     0,
+// testISSOMM creates an ISS OMM with epoch set to now for deterministic tests.
+func testISSOMM() sgp4.OMM {
+	return sgp4.OMM{
+		ObjectName:         "ISS (ZARYA)",
+		ObjectID:           "1998-067A",
+		EpochStr:           time.Now().UTC().Format("2006-01-02T15:04:05.000000"),
+		MeanMotion:         15.49554387,
+		Eccentricity:       0.000588,
+		Inclination:        51.6381,
+		RAOfAscNode:        276.7884,
+		ArgOfPericenter:    282.5765,
+		MeanAnomaly:        192.7824,
+		EphemerisType:      0,
+		ClassificationType: "U",
+		NoradCatID:         25544,
+		ElementSetNo:       999,
+		RevAtEpoch:         47189,
+		BStar:              0.00025892,
+		MeanMotionDot:      0.00019394,
+		MeanMotionDDot:     0,
+	}
 }
 
 var _ = Describe("SatelliteEphemeris Controller", func() {
@@ -360,7 +362,7 @@ var _ = Describe("SatelliteEphemeris Controller", func() {
 		It("should compute pass windows and set PassesPredicted condition", func() {
 			mock := &mockGPFetcher{
 				result: ephemeris.GPFetchResult{
-					OMMs:           []sgp4.OMM{testISSOMM},
+					OMMs:           []sgp4.OMM{testISSOMM()},
 					SatelliteCount: 1,
 					FetchedAt:      time.Now(),
 				},
@@ -404,7 +406,7 @@ var _ = Describe("SatelliteEphemeris Controller", func() {
 		It("should set PredictionFailed condition but still update fetch status", func() {
 			mock := &mockGPFetcher{
 				result: ephemeris.GPFetchResult{
-					OMMs:           []sgp4.OMM{testISSOMM},
+					OMMs:           []sgp4.OMM{testISSOMM()},
 					SatelliteCount: 1,
 					FetchedAt:      time.Now(),
 				},
@@ -438,7 +440,7 @@ var _ = Describe("SatelliteEphemeris Controller", func() {
 		It("should skip pass prediction", func() {
 			mock := &mockGPFetcher{
 				result: ephemeris.GPFetchResult{
-					OMMs:           []sgp4.OMM{testISSOMM},
+					OMMs:           []sgp4.OMM{testISSOMM()},
 					SatelliteCount: 1,
 					FetchedAt:      time.Now(),
 				},

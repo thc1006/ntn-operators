@@ -3,6 +3,7 @@ module github.com/thc1006/ntn-operators
 go 1.25.3
 
 require (
+	github.com/akhenakh/sgp4 v0.0.0-20260314155803-8ee03fc877eb
 	github.com/onsi/ginkgo/v2 v2.27.2
 	github.com/onsi/gomega v1.38.2
 	k8s.io/apimachinery v0.35.0
@@ -13,7 +14,6 @@ require (
 require (
 	cel.dev/expr v0.24.0 // indirect
 	github.com/Masterminds/semver/v3 v3.4.0 // indirect
-	github.com/akhenakh/sgp4 v0.0.0-20260314155803-8ee03fc877eb // indirect
 	github.com/antlr4-go/antlr/v4 v4.13.0 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/blang/semver/v4 v4.0.0 // indirect

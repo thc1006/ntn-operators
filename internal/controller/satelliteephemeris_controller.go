@@ -48,7 +48,6 @@ type SatelliteEphemerisReconciler struct {
 // +kubebuilder:rbac:groups=ntn.operators.dev,resources=satelliteephemeris/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=ntn.operators.dev,resources=satelliteephemeris/finalizers,verbs=update
 // +kubebuilder:rbac:groups=ntn.operators.dev,resources=groundstationlifecycles,verbs=get;list;watch
-// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
 // Reconcile fetches GP data, computes pass predictions, and updates status.
@@ -66,8 +65,10 @@ func (r *SatelliteEphemerisReconciler) Reconcile(ctx context.Context, req ctrl.R
 	if effectiveInterval < minRefreshInterval {
 		log.Info("RefreshInterval below minimum, clamping to 2h", "configured", effectiveInterval, "effective", minRefreshInterval)
 		effectiveInterval = minRefreshInterval
-		r.Recorder.Eventf(eph, nil, "Warning", "RefreshIntervalClamped", "RefreshIntervalClamped",
-			"refreshInterval %s is below minimum 2h; using 2h", eph.Spec.Source.RefreshInterval.Duration)
+		if r.Recorder != nil {
+			r.Recorder.Eventf(eph, nil, "Warning", "RefreshIntervalClamped", "RefreshIntervalClamped",
+				"refreshInterval %s is below minimum 2h; using 2h", eph.Spec.Source.RefreshInterval.Duration)
+		}
 	}
 
 	// Step 3: Guard against nil fetcher.
@@ -93,36 +94,35 @@ func (r *SatelliteEphemerisReconciler) Reconcile(ctx context.Context, req ctrl.R
 		return r.handleFetchError(ctx, eph, fetchErr, effectiveInterval)
 	}
 
+	// Step 6: Update status with new data (skip on 304).
 	if result.NotModified {
 		log.Info("GP data unchanged (304 Not Modified)")
-		return ctrl.Result{RequeueAfter: effectiveInterval}, nil
+	} else {
+		log.Info("Fetched GP data successfully", "satelliteCount", result.SatelliteCount)
+		eph.Status.SatelliteCount = result.SatelliteCount
+		eph.Status.LastUpdated = &metav1.Time{Time: result.FetchedAt}
+
+		meta.SetStatusCondition(&eph.Status.Conditions, metav1.Condition{
+			Type:               ntnv1alpha1.ConditionGPDataFetched,
+			Status:             metav1.ConditionTrue,
+			Reason:             "FetchSucceeded",
+			Message:            fmt.Sprintf("Fetched %d satellites from %s", result.SatelliteCount, eph.Spec.Source.Type),
+			ObservedGeneration: eph.Generation,
+		})
+		meta.SetStatusCondition(&eph.Status.Conditions, metav1.Condition{
+			Type:               ntnv1alpha1.ConditionGPDataParsed,
+			Status:             metav1.ConditionTrue,
+			Reason:             "ParseSucceeded",
+			Message:            "OMM JSON parsed successfully",
+			ObservedGeneration: eph.Generation,
+		})
 	}
-
-	// Step 6: Update status with new data.
-	log.Info("Fetched GP data successfully", "satelliteCount", result.SatelliteCount)
-
-	eph.Status.SatelliteCount = result.SatelliteCount
-	eph.Status.LastUpdated = &metav1.Time{Time: result.FetchedAt}
-
-	meta.SetStatusCondition(&eph.Status.Conditions, metav1.Condition{
-		Type:               ntnv1alpha1.ConditionGPDataFetched,
-		Status:             metav1.ConditionTrue,
-		Reason:             "FetchSucceeded",
-		Message:            fmt.Sprintf("Fetched %d satellites from %s", result.SatelliteCount, eph.Spec.Source.Type),
-		ObservedGeneration: eph.Generation,
-	})
-	meta.SetStatusCondition(&eph.Status.Conditions, metav1.Condition{
-		Type:               ntnv1alpha1.ConditionGPDataParsed,
-		Status:             metav1.ConditionTrue,
-		Reason:             "ParseSucceeded",
-		Message:            "OMM JSON parsed successfully",
-		ObservedGeneration: eph.Generation,
-	})
 
 	// Step 7: Compute pass predictions if configured.
 	if eph.Spec.PassPrediction != nil && len(eph.Spec.PassPrediction.GroundStations) > 0 {
 		if err := r.predictPasses(ctx, eph, result); err != nil {
 			log.Error(err, "Pass prediction failed")
+			eph.Status.NextPassWindows = nil // clear stale pass data
 			meta.SetStatusCondition(&eph.Status.Conditions, metav1.Condition{
 				Type:               ntnv1alpha1.ConditionPassesPredicted,
 				Status:             metav1.ConditionFalse,
@@ -130,7 +130,9 @@ func (r *SatelliteEphemerisReconciler) Reconcile(ctx context.Context, req ctrl.R
 				Message:            err.Error(),
 				ObservedGeneration: eph.Generation,
 			})
-			r.Recorder.Eventf(eph, nil, "Warning", "PredictionFailed", "PredictionFailed", "%s", err.Error())
+			if r.Recorder != nil {
+				r.Recorder.Eventf(eph, nil, "Warning", "PredictionFailed", "PredictionFailed", "%s", err.Error())
+			}
 		}
 	}
 
@@ -138,7 +140,9 @@ func (r *SatelliteEphemerisReconciler) Reconcile(ctx context.Context, req ctrl.R
 		return ctrl.Result{}, err
 	}
 
-	r.Recorder.Eventf(eph, nil, "Normal", "GPDataFetched", "GPDataFetched", "Fetched %d satellites", result.SatelliteCount)
+	if r.Recorder != nil {
+		r.Recorder.Eventf(eph, nil, "Normal", "GPDataFetched", "GPDataFetched", "Fetched %d satellites", result.SatelliteCount)
+	}
 
 	return ctrl.Result{RequeueAfter: effectiveInterval}, nil
 }
@@ -229,7 +233,9 @@ func (r *SatelliteEphemerisReconciler) predictPasses(
 		ObservedGeneration: eph.Generation,
 	})
 
-	r.Recorder.Eventf(eph, nil, "Normal", "PassesPredicted", "PassesPredicted", "Computed %d passes over %d ground stations", len(windows), len(stations))
+	if r.Recorder != nil {
+		r.Recorder.Eventf(eph, nil, "Normal", "PassesPredicted", "PassesPredicted", "Computed %d passes over %d ground stations", len(windows), len(stations))
+	}
 
 	return nil
 }
@@ -261,7 +267,9 @@ func (r *SatelliteEphemerisReconciler) handleFetchError(
 		return ctrl.Result{}, err
 	}
 
-	r.Recorder.Eventf(eph, nil, "Warning", reason, reason, "%s", fetchErr.Error())
+	if r.Recorder != nil {
+		r.Recorder.Eventf(eph, nil, "Warning", reason, reason, "%s", fetchErr.Error())
+	}
 
 	return ctrl.Result{RequeueAfter: requeueAfter}, nil
 }

@@ -52,11 +52,15 @@ type GPFetcher interface {
 }
 
 // CelesTrakFetcher implements GPFetcher for CelesTrak OMM JSON endpoints.
-// It caches ETags per URL to avoid redundant downloads.
+// It caches ETags and OMM data per URL to avoid redundant downloads.
+// On HTTP 304 Not Modified, cached OMMs are returned so callers can
+// re-derive time-dependent data (e.g., pass predictions) even when
+// upstream data has not changed.
 type CelesTrakFetcher struct {
 	httpClient *http.Client
 	mu         sync.Mutex
-	etagCache  map[string]string // url -> last ETag
+	etagCache  map[string]string     // url -> last ETag
+	ommCache   map[string][]sgp4.OMM // url -> last parsed OMMs
 }
 
 // NewCelesTrakFetcher creates a new fetcher with the given HTTP client.
@@ -67,6 +71,7 @@ func NewCelesTrakFetcher(httpClient *http.Client) *CelesTrakFetcher {
 	return &CelesTrakFetcher{
 		httpClient: httpClient,
 		etagCache:  make(map[string]string),
+		ommCache:   make(map[string][]sgp4.OMM),
 	}
 }
 
@@ -99,9 +104,14 @@ func (f *CelesTrakFetcher) Fetch(ctx context.Context, url string) (GPFetchResult
 
 	switch resp.StatusCode {
 	case http.StatusNotModified:
+		f.mu.Lock()
+		cached := f.ommCache[url]
+		f.mu.Unlock()
 		return GPFetchResult{
-			FetchedAt:   now,
-			NotModified: true,
+			OMMs:           cached,
+			SatelliteCount: len(cached),
+			FetchedAt:      now,
+			NotModified:    true,
 		}, nil
 
 	case http.StatusOK:
@@ -115,12 +125,13 @@ func (f *CelesTrakFetcher) Fetch(ctx context.Context, url string) (GPFetchResult
 			return GPFetchResult{}, fmt.Errorf("parsing OMM JSON: %w", err)
 		}
 
-		// Cache the new ETag if present.
+		// Cache the new ETag and OMMs.
+		f.mu.Lock()
 		if newETag := resp.Header.Get("ETag"); newETag != "" {
-			f.mu.Lock()
 			f.etagCache[url] = newETag
-			f.mu.Unlock()
 		}
+		f.ommCache[url] = omms
+		f.mu.Unlock()
 
 		return GPFetchResult{
 			OMMs:           omms,
