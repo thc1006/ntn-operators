@@ -117,13 +117,23 @@ func (r *NTNCellConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	}
 
 	// Step 6: Get applied status from provider.
-	status, err := r.Provider.GetCellStatus(ctx)
+	status, err := r.Provider.GetCellStatus(ctx, spec.Provider.Namespace)
 	if err != nil {
-		log.Error(err, "Failed to get cell status")
-	} else {
-		cc.Status.AppliedKoffset = status.AppliedKoffset
-		cc.Status.ConfigMapRef = status.ConfigMapRef
+		log.Error(err, "Failed to get cell status after apply")
+		meta.SetStatusCondition(&cc.Status.Conditions, metav1.Condition{
+			Type:               ntnv1alpha1.ConditionConfigApplied,
+			Status:             metav1.ConditionUnknown,
+			Reason:             "StatusCheckFailed",
+			Message:            fmt.Sprintf("Config applied but status verification failed: %v", err),
+			ObservedGeneration: cc.Generation,
+		})
+		if err := r.Status().Update(ctx, cc); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: time.Minute}, nil
 	}
+	cc.Status.AppliedKoffset = status.AppliedKoffset
+	cc.Status.ConfigMapRef = status.ConfigMapRef
 
 	// Step 7: Set success condition.
 	meta.SetStatusCondition(&cc.Status.Conditions, metav1.Condition{

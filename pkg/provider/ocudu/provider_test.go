@@ -123,9 +123,12 @@ func TestGetCellStatus_ReturnsAppliedConfig(t *testing.T) {
 	ctx := context.Background()
 
 	spec := geoSpec()
-	_ = p.ApplyCellConfig(ctx, spec)
+	err := p.ApplyCellConfig(ctx, spec)
+	if err != nil {
+		t.Fatalf("ApplyCellConfig: %v", err)
+	}
 
-	status, err := p.GetCellStatus(ctx)
+	status, err := p.GetCellStatus(ctx, "ntn-system")
 	if err != nil {
 		t.Fatalf("GetCellStatus error: %v", err)
 	}
@@ -141,7 +144,7 @@ func TestGetCellStatus_NoConfigMap(t *testing.T) {
 	p := newTestProvider(t)
 	ctx := context.Background()
 
-	status, err := p.GetCellStatus(ctx)
+	status, err := p.GetCellStatus(ctx, "ntn-system")
 	if err != nil {
 		t.Fatalf("GetCellStatus should not error: %v", err)
 	}

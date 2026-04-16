@@ -35,6 +35,7 @@ type NTNProvider interface {
 	// Returns an error if the configuration could not be applied.
 	ApplyCellConfig(ctx context.Context, spec *ntnv1alpha1.NTNCellConfigSpec) error
 
-	// GetCellStatus returns the current applied configuration status.
-	GetCellStatus(ctx context.Context) (*ntnv1alpha1.NTNCellConfigStatus, error)
+	// GetCellStatus returns the current applied configuration status
+	// for the given namespace.
+	GetCellStatus(ctx context.Context, namespace string) (*ntnv1alpha1.NTNCellConfigStatus, error)
 }

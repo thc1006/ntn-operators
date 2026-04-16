@@ -20,7 +20,6 @@ import (
 	"context"
 	"fmt"
 	"strconv"
-	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -35,8 +34,7 @@ import (
 const ConfigMapName = "ocudu-ntn-config"
 
 // Provider implements provider.NTNProvider for OCUDU/srsRAN gNB.
-// It is stateless — status is derived from the ConfigMap, not from
-// in-memory state, making it safe for concurrent reconciles.
+// It is stateless — status is derived from the ConfigMap.
 type Provider struct {
 	client client.Client
 }
@@ -48,8 +46,6 @@ func NewProvider(c client.Client) *Provider {
 
 // ApplyCellConfig generates OCUDU-compatible NTN config YAML and writes it
 // to a ConfigMap in the provider's target namespace.
-// The namespace MUST be set on spec.Provider.Namespace by the controller
-// before calling this method.
 func (p *Provider) ApplyCellConfig(ctx context.Context, spec *ntnv1alpha1.NTNCellConfigSpec) error {
 	if spec.Provider.Namespace == "" {
 		return fmt.Errorf("provider namespace must be set")
@@ -88,7 +84,6 @@ func (p *Provider) ApplyCellConfig(ctx context.Context, spec *ntnv1alpha1.NTNCel
 	} else if err != nil {
 		return fmt.Errorf("getting ConfigMap: %w", err)
 	} else {
-		// Update existing ConfigMap. Initialize Data if nil.
 		if cm.Data == nil {
 			cm.Data = make(map[string]string)
 		}
@@ -105,25 +100,19 @@ func (p *Provider) ApplyCellConfig(ctx context.Context, spec *ntnv1alpha1.NTNCel
 	return nil
 }
 
-// GetCellStatus derives status from the ConfigMap (stateless).
-// Safe for concurrent reconciles and multiple NTNCellConfig CRs.
-func (p *Provider) GetCellStatus(ctx context.Context) (*ntnv1alpha1.NTNCellConfigStatus, error) {
+// GetCellStatus derives status by reading the ConfigMap in the given namespace.
+func (p *Provider) GetCellStatus(ctx context.Context, namespace string) (*ntnv1alpha1.NTNCellConfigStatus, error) {
 	status := &ntnv1alpha1.NTNCellConfigStatus{}
 
-	// Search all namespaces for the ConfigMap (simplified — in practice,
-	// the controller should pass the target namespace).
-	var cmList corev1.ConfigMapList
-	if err := p.client.List(ctx, &cmList, client.MatchingLabels{
-		"app.kubernetes.io/component": "ocudu-ntn-config",
-	}); err != nil {
-		return status, nil
+	cm := &corev1.ConfigMap{}
+	key := types.NamespacedName{Name: ConfigMapName, Namespace: namespace}
+	if err := p.client.Get(ctx, key, cm); err != nil {
+		if apierrors.IsNotFound(err) {
+			return status, nil
+		}
+		return status, fmt.Errorf("reading ConfigMap %s/%s: %w", namespace, ConfigMapName, err)
 	}
 
-	if len(cmList.Items) == 0 {
-		return status, nil
-	}
-
-	cm := cmList.Items[0]
 	status.ConfigMapRef = cm.Name
 
 	if koffsetStr, ok := cm.Annotations["ntn.operators.dev/koffset"]; ok {
@@ -132,11 +121,9 @@ func (p *Provider) GetCellStatus(ctx context.Context) (*ntnv1alpha1.NTNCellConfi
 		}
 	}
 
-	// Verify geo_ntn.yml exists.
 	if _, ok := cm.Data["geo_ntn.yml"]; !ok {
-		return status, fmt.Errorf("ConfigMap %s/%s missing geo_ntn.yml key", cm.Namespace, cm.Name)
+		return status, fmt.Errorf("ConfigMap %s/%s missing geo_ntn.yml key", namespace, ConfigMapName)
 	}
-	_ = strings.Contains // suppress unused import if needed
 
 	return status, nil
 }
