@@ -82,10 +82,10 @@ func (r *GroundStationLifecycleReconciler) Reconcile(ctx context.Context, req ct
 	}
 
 	// Step 3: Evaluate health and determine phase.
-	r.reconcileHealth(gs, node, err)
+	r.reconcileHealth(ctx, gs, node, err)
 
 	// Step 4: Check firmware OTA.
-	r.reconcileFirmware(gs, node)
+	r.reconcileFirmware(ctx, gs, node)
 
 	// Step 5: Record events for phase transitions.
 	if previousPhase != gs.Status.Phase {
@@ -130,6 +130,7 @@ func (r *GroundStationLifecycleReconciler) findMatchingNode(ctx context.Context,
 
 // reconcileHealth evaluates node conditions and sets phase + conditions on the GS status.
 func (r *GroundStationLifecycleReconciler) reconcileHealth(
+	ctx context.Context,
 	gs *ntnv1alpha1.GroundStationLifecycle,
 	node *corev1.Node,
 	nodeErr error,
@@ -212,7 +213,7 @@ func (r *GroundStationLifecycleReconciler) reconcileHealth(
 
 	// Optional HTTP health endpoint.
 	if gs.Spec.Monitoring != nil && gs.Spec.Monitoring.Endpoint != "" {
-		healthy := r.checkHTTPEndpoint(gs.Spec.Monitoring.Endpoint)
+		healthy := r.checkHTTPEndpoint(ctx, gs.Spec.Monitoring.Endpoint)
 		rfStatus := metav1.ConditionTrue
 		rfReason := "EndpointHealthy"
 		rfMsg := "Monitoring endpoint returned 2xx"
@@ -236,6 +237,7 @@ func (r *GroundStationLifecycleReconciler) reconcileHealth(
 
 // reconcileFirmware checks if OTA update should proceed.
 func (r *GroundStationLifecycleReconciler) reconcileFirmware(
+	_ context.Context,
 	gs *ntnv1alpha1.GroundStationLifecycle,
 	node *corev1.Node,
 ) {
@@ -292,8 +294,14 @@ func (r *GroundStationLifecycleReconciler) reconcileFirmware(
 	if !upToDate && gs.Spec.Firmware.AutoUpdate {
 		if gs.Spec.Firmware.MaintenanceWindow != "" {
 			inWindow, err := lifecycle.IsWithinMaintenanceWindow(gs.Spec.Firmware.MaintenanceWindow, r.now())
-			if err != nil || !inWindow {
-				return // not in window or parse error
+			if err != nil {
+				log := logf.Log.WithName("groundstationlifecycle")
+				log.Error(err, "Invalid maintenance window format, skipping OTA",
+					"window", gs.Spec.Firmware.MaintenanceWindow)
+				return
+			}
+			if !inWindow {
+				return // outside maintenance window
 			}
 		}
 		gs.Status.Phase = ntnv1alpha1.PhaseUpdating
@@ -305,11 +313,15 @@ func (r *GroundStationLifecycleReconciler) reconcileFirmware(
 }
 
 // checkHTTPEndpoint performs an HTTP GET and returns true if 2xx.
-func (r *GroundStationLifecycleReconciler) checkHTTPEndpoint(endpoint string) bool {
+func (r *GroundStationLifecycleReconciler) checkHTTPEndpoint(ctx context.Context, endpoint string) bool {
 	if r.HTTPClient == nil {
 		return true // no client configured, assume healthy
 	}
-	resp, err := r.HTTPClient.Get(endpoint)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return false
+	}
+	resp, err := r.HTTPClient.Do(req)
 	if err != nil {
 		return false
 	}
