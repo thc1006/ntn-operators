@@ -47,6 +47,9 @@ func NewProvider(c client.Client) *Provider {
 // ApplyCellConfig generates OCUDU-compatible NTN config YAML and writes it
 // to a ConfigMap in the provider's target namespace.
 func (p *Provider) ApplyCellConfig(ctx context.Context, spec *ntnv1alpha1.NTNCellConfigSpec) error {
+	if spec == nil {
+		return fmt.Errorf("spec must not be nil")
+	}
 	if spec.Provider.Namespace == "" {
 		return fmt.Errorf("provider namespace must be set")
 	}
@@ -103,6 +106,10 @@ func (p *Provider) ApplyCellConfig(ctx context.Context, spec *ntnv1alpha1.NTNCel
 // GetCellStatus derives status by reading the ConfigMap in the given namespace.
 func (p *Provider) GetCellStatus(ctx context.Context, namespace string) (*ntnv1alpha1.NTNCellConfigStatus, error) {
 	status := &ntnv1alpha1.NTNCellConfigStatus{}
+
+	if namespace == "" {
+		return status, fmt.Errorf("namespace must not be empty")
+	}
 
 	cm := &corev1.ConfigMap{}
 	key := types.NamespacedName{Name: ConfigMapName, Namespace: namespace}

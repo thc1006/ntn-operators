@@ -82,6 +82,10 @@ type configData struct {
 // an NTNCellConfigSpec. The output matches the geo_ntn.yml format used
 // by srsRAN/OCUDU gNB.
 func GenerateConfig(spec *ntnv1alpha1.NTNCellConfigSpec) ([]byte, error) {
+	if spec == nil {
+		return nil, fmt.Errorf("spec must not be nil")
+	}
+
 	payloadType := spec.NTN.PayloadType
 	if payloadType == "" {
 		payloadType = "transparent"
