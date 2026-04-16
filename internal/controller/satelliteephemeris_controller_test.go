@@ -481,7 +481,7 @@ var _ = Describe("SatelliteEphemeris Controller", func() {
 			Expect(k8sClient.Get(context.Background(),
 				types.NamespacedName{Name: gsName, Namespace: namespace}, gs)).To(Succeed())
 
-			requests := reconciler.GroundStationToEphemeris(context.Background(), gs)
+			requests := reconciler.groundStationToEphemeris(context.Background(), gs)
 			Expect(requests).To(HaveLen(1))
 			Expect(requests[0].Name).To(Equal(resourceName))
 		})
@@ -501,7 +501,7 @@ var _ = Describe("SatelliteEphemeris Controller", func() {
 			}
 			Expect(k8sClient.Create(context.Background(), unreferenced)).To(Succeed())
 
-			requests := reconciler.GroundStationToEphemeris(context.Background(), unreferenced)
+			requests := reconciler.groundStationToEphemeris(context.Background(), unreferenced)
 			Expect(requests).To(BeEmpty())
 
 			Expect(k8sClient.Delete(context.Background(), unreferenced)).To(Succeed())

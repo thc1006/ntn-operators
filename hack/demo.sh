@@ -36,7 +36,14 @@ kubectl apply -f config/samples/ntn_v1alpha1_satelliteephemeris.yaml
 echo ""
 
 echo "5. Waiting for reconciliation..."
-sleep 15
+for i in $(seq 1 30); do
+    count=$(kubectl get sateph oneweb-constellation -o jsonpath='{.status.satelliteCount}' 2>/dev/null || echo "")
+    if [ -n "$count" ] && [ "$count" != "0" ]; then
+        echo "   Reconciled after $((i * 2))s (satelliteCount=$count)"
+        break
+    fi
+    sleep 2
+done
 
 echo ""
 echo "=== Results ==="

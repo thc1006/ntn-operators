@@ -270,6 +270,8 @@ var _ = Describe("Manager", Ordered, func() {
 
 		// +kubebuilder:scaffold:e2e-webhooks-checks
 
+		// NOTE: filepath.Join paths are relative to repo root, which is the CWD
+		// when invoked via `make test-e2e` (consistent with scaffold tests above).
 		It("should reconcile SatelliteEphemeris and populate status", func() {
 			By("creating a GroundStationLifecycle resource")
 			cmd := exec.Command("kubectl", "apply", "-f",

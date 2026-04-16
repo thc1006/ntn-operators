@@ -311,15 +311,15 @@ func (r *SatelliteEphemerisReconciler) SetupWithManager(mgr ctrl.Manager) error 
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&ntnv1alpha1.SatelliteEphemeris{}).
 		Watches(&ntnv1alpha1.GroundStationLifecycle{},
-			handler.EnqueueRequestsFromMapFunc(r.GroundStationToEphemeris),
+			handler.EnqueueRequestsFromMapFunc(r.groundStationToEphemeris),
 		).
 		Named("satelliteephemeris").
 		Complete(r)
 }
 
-// GroundStationToEphemeris maps a GroundStationLifecycle change to all
+// groundStationToEphemeris maps a GroundStationLifecycle change to all
 // SatelliteEphemeris resources that reference it in passPrediction.groundStations.
-func (r *SatelliteEphemerisReconciler) GroundStationToEphemeris(
+func (r *SatelliteEphemerisReconciler) groundStationToEphemeris(
 	ctx context.Context, obj client.Object,
 ) []reconcile.Request {
 	gs, ok := obj.(*ntnv1alpha1.GroundStationLifecycle)
