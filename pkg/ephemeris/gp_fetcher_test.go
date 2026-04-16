@@ -19,6 +19,7 @@ package ephemeris
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -165,7 +166,7 @@ func TestFetch_ETagCaching_NewData(t *testing.T) {
 	version.Store(1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		currentV := version.Load()
-		currentETag := `"v` + string('0'+currentV) + `"`
+		currentETag := fmt.Sprintf(`"v%d"`, currentV)
 		if r.Header.Get("If-None-Match") == currentETag {
 			w.WriteHeader(http.StatusNotModified)
 			return

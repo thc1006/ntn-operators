@@ -223,7 +223,7 @@ func (r *SatelliteEphemerisReconciler) predictPasses(
 	}
 
 	// Run pass prediction.
-	passes, err := ephemeris.PredictPasses(fetchResult.OMMs, stations, minEl, horizon, noradFilter, time.Time{})
+	passes, err := ephemeris.PredictPasses(fetchResult.OMMs, stations, minEl, horizon, noradFilter, fetchResult.FetchedAt)
 	if err != nil {
 		return fmt.Errorf("computing passes: %w", err)
 	}

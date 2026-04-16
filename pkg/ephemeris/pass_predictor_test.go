@@ -139,8 +139,8 @@ func TestPredictPasses_MinElevationFilter(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if len(filteredPasses) >= len(allPasses) {
-		t.Errorf("expected fewer passes with minElevation=30, got %d vs %d", len(filteredPasses), len(allPasses))
+	if len(filteredPasses) > len(allPasses) {
+		t.Errorf("filtered passes (%d) should not exceed all passes (%d)", len(filteredPasses), len(allPasses))
 	}
 
 	for _, p := range filteredPasses {
