@@ -76,4 +76,4 @@ echo "--- Events ---"
 kubectl describe sateph oneweb-constellation | grep -A10 "^Events:" || true
 echo ""
 echo "Press Ctrl+C to stop the demo."
-wait "$CONTROLLER_PID"
+wait "$CONTROLLER_PID" || true
