@@ -11,16 +11,16 @@ make install
 echo ""
 
 echo "2. Starting controller (background)..."
-make run &
+setsid make run &
 CONTROLLER_PID=$!
 sleep 5
-echo "   Controller PID: $CONTROLLER_PID"
+echo "   Controller process group PID: $CONTROLLER_PID"
 echo ""
 
 cleanup() {
     echo ""
     echo "=== Cleaning up ==="
-    kill "$CONTROLLER_PID" 2>/dev/null || true
+    kill -- -"$CONTROLLER_PID" 2>/dev/null || true
     kubectl delete -f config/samples/ntn_v1alpha1_satelliteephemeris.yaml --ignore-not-found 2>/dev/null
     kubectl delete -f config/samples/ntn_v1alpha1_groundstationlifecycle.yaml --ignore-not-found 2>/dev/null
     echo "Done."
@@ -73,7 +73,7 @@ if len(data) > 5:
 " 2>/dev/null || echo "(no passes yet)"
 echo ""
 echo "--- Events ---"
-kubectl describe sateph oneweb-constellation | grep -A10 "^Events:"
+kubectl describe sateph oneweb-constellation | grep -A10 "^Events:" || true
 echo ""
 echo "Press Ctrl+C to stop the demo."
 wait "$CONTROLLER_PID"

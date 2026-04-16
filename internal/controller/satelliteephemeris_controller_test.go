@@ -500,11 +500,12 @@ var _ = Describe("SatelliteEphemeris Controller", func() {
 				},
 			}
 			Expect(k8sClient.Create(context.Background(), unreferenced)).To(Succeed())
+			DeferCleanup(func() {
+				_ = k8sClient.Delete(context.Background(), unreferenced)
+			})
 
 			requests := reconciler.groundStationToEphemeris(context.Background(), unreferenced)
 			Expect(requests).To(BeEmpty())
-
-			Expect(k8sClient.Delete(context.Background(), unreferenced)).To(Succeed())
 		})
 	})
 })
