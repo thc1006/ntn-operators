@@ -41,6 +41,7 @@ import (
 	ntnv1alpha1 "github.com/thc1006/ntn-operators/api/v1alpha1"
 	"github.com/thc1006/ntn-operators/internal/controller"
 	"github.com/thc1006/ntn-operators/pkg/ephemeris"
+	"github.com/thc1006/ntn-operators/pkg/provider/ocudu"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -199,6 +200,16 @@ func main() {
 		HTTPClient: &http.Client{Timeout: 5 * time.Second},
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "GroundStationLifecycle")
+		os.Exit(1)
+	}
+	ocuduProvider := ocudu.NewProvider(mgr.GetClient())
+	if err := (&controller.NTNCellConfigReconciler{
+		Client:   mgr.GetClient(),
+		Scheme:   mgr.GetScheme(),
+		Recorder: mgr.GetEventRecorder("ntncellconfig-controller"),
+		Provider: ocuduProvider,
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "Failed to create controller", "controller", "NTNCellConfig")
 		os.Exit(1)
 	}
 	// +kubebuilder:scaffold:builder

@@ -94,7 +94,8 @@ spec:
                     type: array
                 type: object
               source:
-                description: source defines where to fetch TLE/ephemeris data.
+                description: source defines where to fetch GP (General Perturbations)
+                  data.
                 properties:
                   credentials:
                     description: |-
