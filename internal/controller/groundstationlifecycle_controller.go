@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -47,6 +48,17 @@ const (
 	// availableFirmwareAnnotation is the Node annotation for available firmware version.
 	availableFirmwareAnnotation = "ntn.operators.dev/available-firmware-version"
 )
+
+// ambiguousNodeError is returned when multiple Nodes match the same ground station label.
+type ambiguousNodeError struct {
+	count  int
+	gsName string
+}
+
+func (e *ambiguousNodeError) Error() string {
+	return fmt.Sprintf("ambiguous node mapping: %d nodes have label %s=%s",
+		e.count, groundStationLabel, e.gsName)
+}
 
 // GroundStationLifecycleReconciler reconciles a GroundStationLifecycle object
 type GroundStationLifecycleReconciler struct {
@@ -129,8 +141,7 @@ func (r *GroundStationLifecycleReconciler) findMatchingNode(ctx context.Context,
 	case 1:
 		return &nodeList.Items[0], nil
 	default:
-		return nil, fmt.Errorf("ambiguous node mapping: %d nodes have label %s=%s",
-			len(nodeList.Items), groundStationLabel, gsName)
+		return nil, &ambiguousNodeError{count: len(nodeList.Items), gsName: gsName}
 	}
 }
 
@@ -144,10 +155,15 @@ func (r *GroundStationLifecycleReconciler) reconcileHealth(
 	now := r.now()
 
 	if nodeErr != nil {
+		reason := "APIError"
+		var ambErr *ambiguousNodeError
+		if errors.As(nodeErr, &ambErr) {
+			reason = "AmbiguousNodeMapping"
+		}
 		meta.SetStatusCondition(&gs.Status.Conditions, metav1.Condition{
 			Type:               ntnv1alpha1.ConditionK8sNodeReady,
 			Status:             metav1.ConditionFalse,
-			Reason:             "APIError",
+			Reason:             reason,
 			Message:            nodeErr.Error(),
 			ObservedGeneration: gs.Generation,
 		})
@@ -211,13 +227,14 @@ func (r *GroundStationLifecycleReconciler) reconcileHealth(
 		ObservedGeneration: gs.Generation,
 	})
 
-	// Determine phase.
+	// Determine phase. Updating is preserved over Degraded so firmware
+	// completion can proceed even under transient resource pressure.
 	if !nodeReady {
 		gs.Status.Phase = ntnv1alpha1.PhaseOffline
-	} else if memPressure || diskPressure || pidPressure {
-		gs.Status.Phase = ntnv1alpha1.PhaseDegraded
 	} else if gs.Status.Phase == ntnv1alpha1.PhaseUpdating {
 		// Preserve Updating phase during firmware update.
+	} else if memPressure || diskPressure || pidPressure {
+		gs.Status.Phase = ntnv1alpha1.PhaseDegraded
 	} else {
 		gs.Status.Phase = ntnv1alpha1.PhaseRunning
 	}
@@ -307,6 +324,18 @@ func (r *GroundStationLifecycleReconciler) reconcileFirmware(
 
 	// Handle update completion (Updating → Running).
 	if gs.Status.Phase == ntnv1alpha1.PhaseUpdating {
+		if availableVersion == "" {
+			// Available version disappeared during update; keep current version.
+			meta.SetStatusCondition(&gs.Status.Conditions, metav1.Condition{
+				Type:               ntnv1alpha1.ConditionFirmwareUpToDate,
+				Status:             metav1.ConditionUnknown,
+				Reason:             "UpdateInterrupted",
+				Message:            "Available firmware version annotation removed during update",
+				ObservedGeneration: gs.Generation,
+			})
+			gs.Status.Phase = ntnv1alpha1.PhaseRunning
+			return
+		}
 		gs.Status.FirmwareVersion = availableVersion
 		meta.SetStatusCondition(&gs.Status.Conditions, metav1.Condition{
 			Type:               ntnv1alpha1.ConditionFirmwareUpToDate,
@@ -350,11 +379,13 @@ func (r *GroundStationLifecycleReconciler) reconcileFirmware(
 }
 
 // checkHTTPEndpoint performs an HTTP GET and returns true if 2xx.
-// Only http:// and https:// schemes are allowed to mitigate SSRF risk.
+// Only http:// and https:// schemes are allowed to reduce attack surface.
 func (r *GroundStationLifecycleReconciler) checkHTTPEndpoint(ctx context.Context, endpoint string) bool {
 	if r.HTTPClient == nil {
 		return false // no client configured, cannot verify health
 	}
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return false

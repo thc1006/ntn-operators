@@ -235,7 +235,7 @@ var _ = Describe("GroundStationLifecycle Controller", func() {
 			cond := meta.FindStatusCondition(gs.Status.Conditions, ntnv1alpha1.ConditionK8sNodeReady)
 			Expect(cond).NotTo(BeNil())
 			Expect(cond.Status).To(Equal(metav1.ConditionFalse))
-			Expect(cond.Reason).To(Equal("APIError"))
+			Expect(cond.Reason).To(Equal("AmbiguousNodeMapping"))
 		})
 	})
 
