@@ -176,9 +176,11 @@ func (r *NTNCellConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		Name:      ocudu.ConfigMapNameFor(cc.Name),
 	}
 	if err := r.Get(ctx, cmKey, cm); err == nil {
-		if err := controllerutil.SetControllerReference(cc, cm, r.Scheme); err == nil {
-			if err := r.Update(ctx, cm); err != nil {
-				log.Error(err, "Failed to set OwnerReference on ConfigMap")
+		if !metav1.IsControlledBy(cm, cc) {
+			if err := controllerutil.SetControllerReference(cc, cm, r.Scheme); err == nil {
+				if err := r.Update(ctx, cm); err != nil {
+					log.Error(err, "Failed to set OwnerReference on ConfigMap")
+				}
 			}
 		}
 	}

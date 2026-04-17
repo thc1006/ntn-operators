@@ -175,11 +175,12 @@ func (r *NTNSliceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 func (r *NTNSliceReconciler) applyQoSStatus(ns *ntnv1alpha1.NTNSlice, activePath string) {
 	if ns.Spec.QoSMapping == nil {
 		ns.Status.AppliedQoS = ""
+		meta.RemoveStatusCondition(&ns.Status.Conditions, ntnv1alpha1.ConditionQoSApplied)
 		return
 	}
 	qos := ns.Spec.QoSMapping
 	switch activePath {
-	case "satellite":
+	case string(slice.PathSatellite):
 		ns.Status.AppliedQoS = fmt.Sprintf("QCI=%s, maxLatency=%s", qos.SatelliteQCI, qos.MaxLatencyBudget.Duration)
 	default:
 		ns.Status.AppliedQoS = fmt.Sprintf("5QI=%d, maxLatency=%s", qos.Terrestrial5QI, qos.MaxLatencyBudget.Duration)
@@ -197,6 +198,7 @@ func (r *NTNSliceReconciler) applyQoSStatus(ns *ntnv1alpha1.NTNSlice, activePath
 func (r *NTNSliceReconciler) applySecurityStatus(ns *ntnv1alpha1.NTNSlice) {
 	if ns.Spec.Security == nil {
 		ns.Status.AppliedEncryption = ""
+		meta.RemoveStatusCondition(&ns.Status.Conditions, ntnv1alpha1.ConditionSecured)
 		return
 	}
 	ns.Status.AppliedEncryption = ns.Spec.Security.EncryptionLevel
@@ -215,10 +217,11 @@ func (r *NTNSliceReconciler) applySecurityStatus(ns *ntnv1alpha1.NTNSlice) {
 func (r *NTNSliceReconciler) applyBillingStatus(ns *ntnv1alpha1.NTNSlice, activePath string) {
 	if ns.Spec.Billing == nil {
 		ns.Status.BillingMode = ""
+		meta.RemoveStatusCondition(&ns.Status.Conditions, ntnv1alpha1.ConditionBillingActive)
 		return
 	}
 	switch activePath {
-	case "satellite":
+	case string(slice.PathSatellite):
 		ns.Status.BillingMode = ns.Spec.Billing.SatelliteRate
 	default:
 		ns.Status.BillingMode = ns.Spec.Billing.TerrestrialRate
