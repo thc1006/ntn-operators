@@ -37,7 +37,7 @@ type MockProvider struct {
 	StatusValue *ntnv1alpha1.NTNCellConfigStatus
 }
 
-func (m *MockProvider) ApplyCellConfig(_ context.Context, spec *ntnv1alpha1.NTNCellConfigSpec) error {
+func (m *MockProvider) ApplyCellConfig(_ context.Context, _ string, spec *ntnv1alpha1.NTNCellConfigSpec) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.ApplyCalls++
@@ -45,7 +45,7 @@ func (m *MockProvider) ApplyCellConfig(_ context.Context, spec *ntnv1alpha1.NTNC
 	return m.ApplyErr
 }
 
-func (m *MockProvider) GetCellStatus(_ context.Context, _ string) (*ntnv1alpha1.NTNCellConfigStatus, error) {
+func (m *MockProvider) GetCellStatus(_ context.Context, _, _ string) (*ntnv1alpha1.NTNCellConfigStatus, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.StatusCalls++

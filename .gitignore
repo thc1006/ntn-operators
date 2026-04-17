@@ -16,3 +16,9 @@ vendor/
 # Test
 cover.out
 *.test
+main
+
+# Generated kustomize output (regenerate with: make build-installer)
+dist/install.yaml
+cover_ctrl.out
+.claude/

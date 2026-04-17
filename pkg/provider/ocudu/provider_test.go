@@ -69,7 +69,7 @@ func TestApplyCellConfig_CreatesConfigMap(t *testing.T) {
 	p := newTestProvider(t)
 	ctx := context.Background()
 
-	err := p.ApplyCellConfig(ctx, geoSpec())
+	err := p.ApplyCellConfig(ctx, "test-cr", geoSpec())
 	if err != nil {
 		t.Fatalf("ApplyCellConfig error: %v", err)
 	}
@@ -77,7 +77,7 @@ func TestApplyCellConfig_CreatesConfigMap(t *testing.T) {
 	// Verify ConfigMap was created.
 	var cm corev1.ConfigMap
 	err = p.client.Get(ctx, types.NamespacedName{
-		Name:      ConfigMapName,
+		Name:      ConfigMapNameFor("test-cr"),
 		Namespace: "ntn-system",
 	}, &cm)
 	if err != nil {
@@ -99,21 +99,21 @@ func TestApplyCellConfig_UpdatesExistingConfigMap(t *testing.T) {
 
 	// First apply.
 	spec := geoSpec()
-	err := p.ApplyCellConfig(ctx, spec)
+	err := p.ApplyCellConfig(ctx, "test-cr", spec)
 	if err != nil {
 		t.Fatalf("first apply: %v", err)
 	}
 
 	// Update koffset and re-apply.
 	spec.NTN.CellSpecificKoffset = 500
-	err = p.ApplyCellConfig(ctx, spec)
+	err = p.ApplyCellConfig(ctx, "test-cr", spec)
 	if err != nil {
 		t.Fatalf("second apply: %v", err)
 	}
 
 	// Verify updated.
 	var cm corev1.ConfigMap
-	err = p.client.Get(ctx, types.NamespacedName{Name: ConfigMapName, Namespace: "ntn-system"}, &cm)
+	err = p.client.Get(ctx, types.NamespacedName{Name: ConfigMapNameFor("test-cr"), Namespace: "ntn-system"}, &cm)
 	if err != nil {
 		t.Fatalf("Get ConfigMap after update: %v", err)
 	}
@@ -127,20 +127,20 @@ func TestGetCellStatus_ReturnsAppliedConfig(t *testing.T) {
 	ctx := context.Background()
 
 	spec := geoSpec()
-	err := p.ApplyCellConfig(ctx, spec)
+	err := p.ApplyCellConfig(ctx, "test-cr", spec)
 	if err != nil {
 		t.Fatalf("ApplyCellConfig: %v", err)
 	}
 
-	status, err := p.GetCellStatus(ctx, "ntn-system")
+	status, err := p.GetCellStatus(ctx, "test-cr", "ntn-system")
 	if err != nil {
 		t.Fatalf("GetCellStatus error: %v", err)
 	}
 	if status.AppliedKoffset != 150 {
 		t.Errorf("expected appliedKoffset=150, got %d", status.AppliedKoffset)
 	}
-	if status.ConfigMapRef != ConfigMapName {
-		t.Errorf("expected configMapRef=%s, got %s", ConfigMapName, status.ConfigMapRef)
+	if status.ConfigMapRef != ConfigMapNameFor("test-cr") {
+		t.Errorf("expected configMapRef=%s, got %s", ConfigMapNameFor("test-cr"), status.ConfigMapRef)
 	}
 }
 
@@ -148,7 +148,7 @@ func TestGetCellStatus_NoConfigMap(t *testing.T) {
 	p := newTestProvider(t)
 	ctx := context.Background()
 
-	status, err := p.GetCellStatus(ctx, "ntn-system")
+	status, err := p.GetCellStatus(ctx, "test-cr", "ntn-system")
 	if err != nil {
 		t.Fatalf("GetCellStatus should not error: %v", err)
 	}
@@ -163,7 +163,7 @@ func TestApplyCellConfig_EmptyNamespace(t *testing.T) {
 
 	spec := geoSpec()
 	spec.Provider.Namespace = ""
-	err := p.ApplyCellConfig(ctx, spec)
+	err := p.ApplyCellConfig(ctx, "test-cr", spec)
 	if err == nil {
 		t.Fatal("expected error for empty namespace")
 	}

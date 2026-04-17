@@ -31,6 +31,7 @@ type EphemerisSource struct {
 	// For CelesTrak: https://celestrak.org/NORAD/elements/gp.php?GROUP=oneweb&FORMAT=JSON
 	// For SpaceTrack: https://www.space-track.org/basicspacedata/query/class/gp/...
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:Pattern=`^https?://`
 	URL string `json:"url"`
 
 	// refreshInterval is how often to re-fetch GP data.

@@ -28,6 +28,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	ntnv1alpha1 "github.com/thc1006/ntn-operators/api/v1alpha1"
@@ -69,6 +70,11 @@ var _ = Describe("NTNCellConfig Controller", func() {
 			return
 		}
 		Expect(err).NotTo(HaveOccurred())
+		// Remove finalizer if present (otherwise CR stays in Terminating).
+		if controllerutil.ContainsFinalizer(cr, "ntn.operators.dev/configmap-cleanup") {
+			controllerutil.RemoveFinalizer(cr, "ntn.operators.dev/configmap-cleanup")
+			Expect(k8sClient.Update(context.Background(), cr)).To(Succeed())
+		}
 		Expect(k8sClient.Delete(context.Background(), cr)).To(Succeed())
 	}
 
@@ -81,6 +87,18 @@ var _ = Describe("NTNCellConfig Controller", func() {
 		}
 	}
 
+	// reconcileWithFinalizer runs reconcile twice: first adds the finalizer, second does actual work.
+	reconcileWithFinalizer := func(reconciler *NTNCellConfigReconciler) (reconcile.Result, error) {
+		req := reconcile.Request{NamespacedName: typeNamespacedName}
+		// First reconcile: adds finalizer and requeues.
+		result, err := reconciler.Reconcile(context.Background(), req)
+		if err != nil || result.RequeueAfter != time.Second {
+			return result, err
+		}
+		// Second reconcile: actual logic.
+		return reconciler.Reconcile(context.Background(), req)
+	}
+
 	Context("When provider succeeds", func() {
 		BeforeEach(func() { createCR() })
 		AfterEach(func() { deleteCR() })
@@ -89,9 +107,7 @@ var _ = Describe("NTNCellConfig Controller", func() {
 			mock := &provider.MockProvider{}
 			reconciler := newReconciler(mock)
 
-			result, err := reconciler.Reconcile(context.Background(), reconcile.Request{
-				NamespacedName: typeNamespacedName,
-			})
+			result, err := reconcileWithFinalizer(reconciler)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(result.RequeueAfter).To(Equal(5 * time.Minute))
 
@@ -119,9 +135,7 @@ var _ = Describe("NTNCellConfig Controller", func() {
 			mock := &provider.MockProvider{ApplyErr: errors.New("connection refused")}
 			reconciler := newReconciler(mock)
 
-			_, err := reconciler.Reconcile(context.Background(), reconcile.Request{
-				NamespacedName: typeNamespacedName,
-			})
+			_, err := reconcileWithFinalizer(reconciler)
 			Expect(err).NotTo(HaveOccurred()) // graceful, not a reconciler error
 
 			updated := &ntnv1alpha1.NTNCellConfig{}
@@ -167,9 +181,7 @@ var _ = Describe("NTNCellConfig Controller", func() {
 			mock := &provider.MockProvider{}
 			reconciler := newReconciler(mock)
 
-			_, err := reconciler.Reconcile(context.Background(), reconcile.Request{
-				NamespacedName: typeNamespacedName,
-			})
+			_, err := reconcileWithFinalizer(reconciler)
 			Expect(err).NotTo(HaveOccurred())
 
 			updated := &ntnv1alpha1.NTNCellConfig{}
@@ -190,9 +202,7 @@ var _ = Describe("NTNCellConfig Controller", func() {
 		It("should set ConfigApplied=False with InternalError", func() {
 			reconciler := newReconciler(nil)
 
-			_, err := reconciler.Reconcile(context.Background(), reconcile.Request{
-				NamespacedName: typeNamespacedName,
-			})
+			_, err := reconcileWithFinalizer(reconciler)
 			Expect(err).NotTo(HaveOccurred())
 
 			updated := &ntnv1alpha1.NTNCellConfig{}
@@ -202,6 +212,159 @@ var _ = Describe("NTNCellConfig Controller", func() {
 			Expect(cond).NotTo(BeNil())
 			Expect(cond.Status).To(Equal(metav1.ConditionFalse))
 			Expect(cond.Reason).To(Equal("InternalError"))
+		})
+	})
+
+	Context("When provider.namespace differs from CR namespace", func() {
+		BeforeEach(func() {
+			cr := &ntnv1alpha1.NTNCellConfig{
+				ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: namespace},
+				Spec: ntnv1alpha1.NTNCellConfigSpec{
+					Provider: ntnv1alpha1.ProviderRef{Type: "ocudu", Namespace: "other-ns"},
+					NTN: ntnv1alpha1.NTNParams{
+						CellSpecificKoffset: 150,
+						EphemerisECEF:       ntnv1alpha1.EphemerisECEF{PosX: 1, PosY: 2, PosZ: 3},
+						PayloadType:         "transparent",
+					},
+				},
+			}
+			Expect(k8sClient.Create(context.Background(), cr)).To(Succeed())
+		})
+		AfterEach(func() { deleteCR() })
+
+		It("should override namespace to CR namespace and succeed", func() {
+			mock := &provider.MockProvider{}
+			reconciler := newReconciler(mock)
+
+			result, err := reconcileWithFinalizer(reconciler)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(Equal(5 * time.Minute))
+
+			// Provider should have been called with CR namespace, not "other-ns".
+			Expect(mock.ApplyCalls).To(Equal(1))
+			Expect(mock.LastSpec.Provider.Namespace).To(Equal(namespace))
+		})
+	})
+
+	Context("When CR is deleted with finalizer", func() {
+		It("should clean up ConfigMap and remove finalizer", func() {
+			// Create CR and reconcile to add finalizer.
+			cr := &ntnv1alpha1.NTNCellConfig{
+				ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: namespace},
+				Spec:       geoSpec(),
+			}
+			Expect(k8sClient.Create(context.Background(), cr)).To(Succeed())
+
+			mock := &provider.MockProvider{}
+			reconciler := newReconciler(mock)
+
+			// First reconcile: adds finalizer.
+			_, err := reconciler.Reconcile(context.Background(), reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			// Second reconcile: applies config (creates ConfigMap).
+			_, err = reconciler.Reconcile(context.Background(), reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			// Delete the CR (triggers finalizer).
+			Expect(k8sClient.Delete(context.Background(), cr)).To(Succeed())
+
+			// Reconcile should handle deletion and remove finalizer.
+			_, err = reconciler.Reconcile(context.Background(), reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			// CR should be fully deleted now.
+			deleted := &ntnv1alpha1.NTNCellConfig{}
+			err = k8sClient.Get(context.Background(), typeNamespacedName, deleted)
+			Expect(apierrors.IsNotFound(err)).To(BeTrue())
+		})
+	})
+
+	Context("When CR is deleted but ConfigMap already gone", func() {
+		It("should remove finalizer without error (NotFound path)", func() {
+			cr := &ntnv1alpha1.NTNCellConfig{
+				ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: namespace},
+				Spec:       geoSpec(),
+			}
+			Expect(k8sClient.Create(context.Background(), cr)).To(Succeed())
+
+			mock := &provider.MockProvider{}
+			reconciler := newReconciler(mock)
+
+			// First reconcile: adds finalizer only.
+			_, err := reconciler.Reconcile(context.Background(), reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			// Don't do second reconcile (so no ConfigMap is created).
+			// Delete the CR directly.
+			updated := &ntnv1alpha1.NTNCellConfig{}
+			Expect(k8sClient.Get(context.Background(), typeNamespacedName, updated)).To(Succeed())
+			Expect(k8sClient.Delete(context.Background(), updated)).To(Succeed())
+
+			// Reconcile handles deletion — ConfigMap doesn't exist (NotFound).
+			_, err = reconciler.Reconcile(context.Background(), reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			deleted := &ntnv1alpha1.NTNCellConfig{}
+			err = k8sClient.Get(context.Background(), typeNamespacedName, deleted)
+			Expect(apierrors.IsNotFound(err)).To(BeTrue())
+		})
+	})
+
+	Context("When GetCellStatus fails", func() {
+		BeforeEach(func() { createCR() })
+		AfterEach(func() { deleteCR() })
+
+		It("should set ConfigApplied=Unknown with StatusCheckFailed", func() {
+			mock := &provider.MockProvider{StatusErr: errors.New("status unavailable")}
+			reconciler := newReconciler(mock)
+
+			_, err := reconcileWithFinalizer(reconciler)
+			Expect(err).NotTo(HaveOccurred())
+
+			updated := &ntnv1alpha1.NTNCellConfig{}
+			Expect(k8sClient.Get(context.Background(), typeNamespacedName, updated)).To(Succeed())
+
+			cond := meta.FindStatusCondition(updated.Status.Conditions, ntnv1alpha1.ConditionConfigApplied)
+			Expect(cond).NotTo(BeNil())
+			Expect(cond.Status).To(Equal(metav1.ConditionUnknown))
+			Expect(cond.Reason).To(Equal("StatusCheckFailed"))
+		})
+	})
+
+	Context("When reconciling a CR that already has a finalizer", func() {
+		It("should skip finalizer step and proceed directly", func() {
+			cr := &ntnv1alpha1.NTNCellConfig{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       resourceName,
+					Namespace:  namespace,
+					Finalizers: []string{"ntn.operators.dev/configmap-cleanup"},
+				},
+				Spec: geoSpec(),
+			}
+			Expect(k8sClient.Create(context.Background(), cr)).To(Succeed())
+			defer deleteCR()
+
+			mock := &provider.MockProvider{}
+			reconciler := newReconciler(mock)
+
+			// Single reconcile should do the actual work (finalizer already present).
+			result, err := reconciler.Reconcile(context.Background(), reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(Equal(5 * time.Minute))
+			Expect(mock.ApplyCalls).To(Equal(1))
 		})
 	})
 })

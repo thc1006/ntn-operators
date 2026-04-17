@@ -1,0 +1,27 @@
+apiVersion: v2
+name: ntn-operators
+description: Kubernetes Operators for Non-Terrestrial Network (NTN) management — satellite ephemeris, ground station lifecycle, cell configuration, and slice failover.
+type: application
+
+version: 0.1.0
+appVersion: "0.1.0"
+
+keywords:
+  - kubernetes
+  - operator
+  - ntn
+  - satellite
+  - 5g
+  - non-terrestrial-network
+  - srsran
+
+home: https://github.com/thc1006/ntn-operators
+sources:
+  - https://github.com/thc1006/ntn-operators
+
+maintainers:
+  - name: thc1006
+    url: https://github.com/thc1006
+
+annotations:
+  kubebuilder.io/generated-by: kubebuilder

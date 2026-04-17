@@ -6,6 +6,10 @@ cliVersion: 4.13.1
 domain: operators.dev
 layout:
 - go.kubebuilder.io/v4
+plugins:
+  helm.kubebuilder.io/v2-alpha:
+    manifests: dist/install.yaml
+    output: dist
 projectName: ntn-operators
 repo: github.com/thc1006/ntn-operators
 resources:

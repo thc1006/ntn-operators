@@ -32,10 +32,10 @@ import (
 //   - Aalyria: applies config via Spacetime gRPC API, pin v21.0 (planned)
 type NTNProvider interface {
 	// ApplyCellConfig applies NTN radio parameters to the backend.
-	// Returns an error if the configuration could not be applied.
-	ApplyCellConfig(ctx context.Context, spec *ntnv1alpha1.NTNCellConfigSpec) error
+	// crName is the NTNCellConfig CR name (used to scope resources like ConfigMaps).
+	ApplyCellConfig(ctx context.Context, crName string, spec *ntnv1alpha1.NTNCellConfigSpec) error
 
 	// GetCellStatus returns the current applied configuration status
-	// for the given namespace.
-	GetCellStatus(ctx context.Context, namespace string) (*ntnv1alpha1.NTNCellConfigStatus, error)
+	// for the given CR name and namespace.
+	GetCellStatus(ctx context.Context, crName, namespace string) (*ntnv1alpha1.NTNCellConfigStatus, error)
 }

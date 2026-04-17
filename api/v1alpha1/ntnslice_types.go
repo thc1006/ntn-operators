@@ -164,10 +164,8 @@ type NTNSliceStatus struct {
 
 // Condition types for NTNSlice.
 const (
-	ConditionPathActive       = "PathActive"
-	ConditionFailoverReady    = "FailoverReady"
-	ConditionSatelliteInPass  = "SatelliteInPass"
-	ConditionTerrestrialReady = "TerrestrialReady"
+	ConditionPathActive    = "PathActive"
+	ConditionFailoverReady = "FailoverReady"
 )
 
 // +kubebuilder:object:root=true

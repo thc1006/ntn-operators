@@ -29,8 +29,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
+	corev1 "k8s.io/api/core/v1"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+
 	ntnv1alpha1 "github.com/thc1006/ntn-operators/api/v1alpha1"
 	"github.com/thc1006/ntn-operators/pkg/provider"
+	"github.com/thc1006/ntn-operators/pkg/provider/ocudu"
 )
 
 // NTNCellConfigReconciler reconciles a NTNCellConfig object
@@ -44,7 +48,7 @@ type NTNCellConfigReconciler struct {
 // +kubebuilder:rbac:groups=ntn.operators.dev,resources=ntncellconfigs,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=ntn.operators.dev,resources=ntncellconfigs/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=ntn.operators.dev,resources=ntncellconfigs/finalizers,verbs=update
-// +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch
+// +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
 // Reconcile applies NTN cell configuration to the specified provider backend.
@@ -57,7 +61,48 @@ func (r *NTNCellConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	// Step 2: Guard against nil provider.
+	// Step 2: Handle finalizer for ConfigMap cleanup on deletion.
+	finalizerName := "ntn.operators.dev/configmap-cleanup"
+	if cc.DeletionTimestamp != nil {
+		if controllerutil.ContainsFinalizer(cc, finalizerName) {
+			// Delete the ConfigMap.
+			cm := &corev1.ConfigMap{}
+			cmKey := client.ObjectKey{
+				Namespace: cc.Namespace,
+				Name:      ocudu.ConfigMapNameFor(cc.Name),
+			}
+			if err := r.Get(ctx, cmKey, cm); err != nil {
+				if client.IgnoreNotFound(err) != nil {
+					// Transient error (not NotFound) — requeue to retry.
+					log.Error(err, "Failed to get ConfigMap during finalization")
+					return ctrl.Result{}, err
+				}
+				// NotFound — ConfigMap already gone, proceed to remove finalizer.
+			} else {
+				if err := r.Delete(ctx, cm); client.IgnoreNotFound(err) != nil {
+					log.Error(err, "Failed to delete ConfigMap during finalization")
+					return ctrl.Result{}, err
+				}
+				log.Info("Deleted ConfigMap during finalization", "configmap", cmKey)
+			}
+			controllerutil.RemoveFinalizer(cc, finalizerName)
+			if err := r.Update(ctx, cc); err != nil {
+				return ctrl.Result{}, err
+			}
+		}
+		return ctrl.Result{}, nil
+	}
+
+	// Add finalizer if not present, then requeue to reconcile with latest resourceVersion.
+	if !controllerutil.ContainsFinalizer(cc, finalizerName) {
+		controllerutil.AddFinalizer(cc, finalizerName)
+		if err := r.Update(ctx, cc); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: time.Second}, nil
+	}
+
+	// Step 3: Guard against nil provider.
 	if r.Provider == nil {
 		cc.Status.AppliedKoffset = 0
 		cc.Status.ConfigMapRef = ""
@@ -91,18 +136,20 @@ func (r *NTNCellConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, nil
 	}
 
-	// Step 4: Default namespace to CR namespace if not set.
+	// Step 4: Force provider namespace to CR namespace (prevents cross-namespace writes).
 	spec := cc.Spec.DeepCopy()
-	if spec.Provider.Namespace == "" {
-		spec.Provider.Namespace = cc.Namespace
+	if spec.Provider.Namespace != "" && spec.Provider.Namespace != cc.Namespace {
+		log.Info("Overriding provider.namespace to match CR namespace for security",
+			"specified", spec.Provider.Namespace, "enforced", cc.Namespace)
 	}
+	spec.Provider.Namespace = cc.Namespace
 
 	// Step 5: Apply configuration via provider.
 	log.Info("Applying NTN cell configuration",
 		"provider", spec.Provider.Type,
 		"koffset", spec.NTN.CellSpecificKoffset)
 
-	if err := r.Provider.ApplyCellConfig(ctx, spec); err != nil {
+	if err := r.Provider.ApplyCellConfig(ctx, cc.Name, spec); err != nil {
 		log.Error(err, "Failed to apply cell config")
 		cc.Status.AppliedKoffset = 0
 		cc.Status.ConfigMapRef = ""
@@ -122,8 +169,22 @@ func (r *NTNCellConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{RequeueAfter: time.Minute}, nil
 	}
 
+	// Step 5b: Ensure OwnerReference on ConfigMap for garbage collection.
+	cm := &corev1.ConfigMap{}
+	cmKey := client.ObjectKey{
+		Namespace: cc.Namespace,
+		Name:      ocudu.ConfigMapNameFor(cc.Name),
+	}
+	if err := r.Get(ctx, cmKey, cm); err == nil {
+		if err := controllerutil.SetControllerReference(cc, cm, r.Scheme); err == nil {
+			if err := r.Update(ctx, cm); err != nil {
+				log.Error(err, "Failed to set OwnerReference on ConfigMap")
+			}
+		}
+	}
+
 	// Step 6: Get applied status from provider.
-	status, err := r.Provider.GetCellStatus(ctx, spec.Provider.Namespace)
+	status, err := r.Provider.GetCellStatus(ctx, cc.Name, spec.Provider.Namespace)
 	if err != nil {
 		log.Error(err, "Failed to get cell status after apply")
 		meta.SetStatusCondition(&cc.Status.Conditions, metav1.Condition{
