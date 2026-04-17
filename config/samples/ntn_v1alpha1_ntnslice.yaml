@@ -1,0 +1,34 @@
+apiVersion: ntn.operators.dev/v1alpha1
+kind: NTNSlice
+metadata:
+  labels:
+    app.kubernetes.io/name: ntn-operators
+    app.kubernetes.io/managed-by: kustomize
+  name: enterprise-resilient-slice
+spec:
+  tenant: acme-corp
+  terrestrialPath:
+    provider: chunghwa-telecom
+    apn: internet
+    priority: primary
+  satellitePath:
+    provider: oneweb
+    ephemerisRef: oneweb-constellation
+    priority: failover
+  failoverPolicy:
+    triggers:
+      - "rsrp < -120"
+      - "latency > 200"
+      - "packetLoss > 5"
+    switchbackDelay: 60s
+    sessionContinuity: true
+  qosMapping:
+    terrestrial5QI: 9
+    satelliteQCI: best-effort
+    maxLatencyBudget: 150ms
+  security:
+    encryptionLevel: AES-256
+    authOnHandover: re-authenticate
+  billing:
+    terrestrialRate: per-volume
+    satelliteRate: per-minute

@@ -1,0 +1,264 @@
+/*
+Copyright 2026.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package slice
+
+import (
+	"fmt"
+	"math"
+	"strconv"
+	"strings"
+	"time"
+)
+
+// PathType represents the active network path.
+type PathType string
+
+const (
+	PathTerrestrial PathType = "terrestrial"
+	PathSatellite   PathType = "satellite"
+	PathUnavailable PathType = "unavailable"
+)
+
+// Decision represents the failover engine's recommendation.
+type Decision string
+
+const (
+	DecisionStay       Decision = "stay"
+	DecisionFailover   Decision = "failover"
+	DecisionSwitchback Decision = "switchback"
+)
+
+// FailoverResult is the output of the failover evaluation.
+type FailoverResult struct {
+	Decision   Decision
+	Reason     string
+	TargetPath PathType
+}
+
+// Metrics represents the current network path quality.
+// In production these come from UPF/Prometheus; for now they are
+// simulated via CR annotations.
+type Metrics struct {
+	RSRP              float64 // dBm, e.g., -110
+	LatencyMs         float64 // ms, e.g., 50
+	PacketLossPercent float64 // percent, e.g., 2.5
+}
+
+// Trigger represents a parsed failover trigger expression.
+type Trigger struct {
+	Metric   string // rsrp, terrestrialRSRP, latency, terrestrialLatency, packetLoss, terrestrialPacketLoss
+	Operator string // <, >, <=, >=
+	Value    float64
+}
+
+// ParseTrigger parses a trigger string like "rsrp < -120" into a Trigger.
+func ParseTrigger(s string) (Trigger, error) {
+	s = strings.TrimSpace(s)
+	// Try each operator (longest first to avoid partial match).
+	for _, op := range []string{"<=", ">=", "<", ">"} {
+		parts := strings.SplitN(s, op, 2)
+		if len(parts) == 2 {
+			metric := strings.TrimSpace(parts[0])
+			valueStr := strings.TrimSpace(parts[1])
+			value, err := strconv.ParseFloat(valueStr, 64)
+			if err != nil {
+				return Trigger{}, fmt.Errorf("invalid trigger value %q: %w", valueStr, err)
+			}
+			if math.IsNaN(value) || math.IsInf(value, 0) {
+				return Trigger{}, fmt.Errorf("non-finite trigger value %q in %q", valueStr, s)
+			}
+			if metric == "" {
+				return Trigger{}, fmt.Errorf("empty metric in trigger %q", s)
+			}
+			validMetrics := map[string]bool{
+				"rsrp": true, "terrestrialRSRP": true,
+				"latency": true, "terrestrialLatency": true,
+				"packetLoss": true, "terrestrialPacketLoss": true,
+			}
+			if !validMetrics[metric] {
+				return Trigger{}, fmt.Errorf("unknown metric %q in trigger %q", metric, s)
+			}
+			return Trigger{Metric: metric, Operator: op, Value: value}, nil
+		}
+	}
+	return Trigger{}, fmt.Errorf("invalid trigger format %q: expected 'metric operator value'", s)
+}
+
+// Evaluate checks if a trigger condition is met given the current metrics.
+func (t Trigger) Evaluate(m Metrics) bool {
+	var actual float64
+	switch t.Metric {
+	case "rsrp", "terrestrialRSRP":
+		actual = m.RSRP
+	case "latency", "terrestrialLatency":
+		actual = m.LatencyMs
+	case "packetLoss", "terrestrialPacketLoss":
+		actual = m.PacketLossPercent
+	default:
+		return false
+	}
+
+	switch t.Operator {
+	case "<":
+		return actual < t.Value
+	case ">":
+		return actual > t.Value
+	case "<=":
+		return actual <= t.Value
+	case ">=":
+		return actual >= t.Value
+	default:
+		return false
+	}
+}
+
+// EvaluateFailover determines whether to failover, stay, or switchback.
+//
+// Parameters:
+//   - currentPath: the currently active path
+//   - triggers: raw trigger expressions from spec (e.g., "rsrp < -120")
+//   - metrics: current terrestrial path quality
+//   - satelliteAvailable: whether a satellite pass window is active
+//   - switchbackDelay: minimum time before switching back
+//   - lastFailover: when the last failover occurred (zero if never)
+//   - now: current time (injectable for testing)
+func EvaluateFailover(
+	currentPath PathType,
+	triggers []string,
+	metrics Metrics,
+	satelliteAvailable bool,
+	switchbackDelay time.Duration,
+	lastFailover time.Time,
+	now time.Time,
+) FailoverResult {
+	// Parse and evaluate all triggers (OR logic).
+	anyTriggered := false
+	parseErrors := 0
+	for _, triggerStr := range triggers {
+		trigger, err := ParseTrigger(triggerStr)
+		if err != nil {
+			parseErrors++
+			continue
+		}
+		if trigger.Evaluate(metrics) {
+			anyTriggered = true
+			break
+		}
+	}
+
+	// Normalize unknown currentPath to terrestrial.
+	if currentPath != PathTerrestrial && currentPath != PathSatellite && currentPath != PathUnavailable {
+		currentPath = PathTerrestrial
+	}
+
+	// Surface trigger parse errors.
+	parseSuffix := ""
+	if parseErrors > 0 {
+		if parseErrors == len(triggers) {
+			return FailoverResult{
+				Decision:   DecisionStay,
+				Reason:     fmt.Sprintf("All %d trigger expressions are invalid", parseErrors),
+				TargetPath: currentPath,
+			}
+		}
+		parseSuffix = fmt.Sprintf(" (%d of %d triggers had parse errors)", parseErrors, len(triggers))
+	}
+
+	switch currentPath {
+	case PathTerrestrial:
+		if !anyTriggered {
+			return FailoverResult{
+				Decision:   DecisionStay,
+				Reason:     "Terrestrial path healthy" + parseSuffix,
+				TargetPath: PathTerrestrial,
+			}
+		}
+		if !satelliteAvailable {
+			return FailoverResult{
+				Decision:   DecisionStay,
+				Reason:     "Terrestrial degraded but no satellite pass available" + parseSuffix,
+				TargetPath: PathTerrestrial,
+			}
+		}
+		return FailoverResult{
+			Decision:   DecisionFailover,
+			Reason:     "Terrestrial path degraded, satellite pass available" + parseSuffix,
+			TargetPath: PathSatellite,
+		}
+
+	case PathSatellite:
+		// If satellite pass ended, must switch back regardless.
+		if !satelliteAvailable {
+			if anyTriggered {
+				return FailoverResult{
+					Decision:   DecisionSwitchback,
+					Reason:     "Satellite pass ended, falling back to degraded terrestrial" + parseSuffix,
+					TargetPath: PathTerrestrial,
+				}
+			}
+			return FailoverResult{
+				Decision:   DecisionSwitchback,
+				Reason:     "Satellite pass ended, terrestrial recovered" + parseSuffix,
+				TargetPath: PathTerrestrial,
+			}
+		}
+		if anyTriggered {
+			// Terrestrial still degraded, stay on satellite.
+			return FailoverResult{
+				Decision:   DecisionStay,
+				Reason:     "Terrestrial still degraded, staying on satellite" + parseSuffix,
+				TargetPath: PathSatellite,
+			}
+		}
+		// Terrestrial recovered — check switchback delay.
+		if !lastFailover.IsZero() && now.Sub(lastFailover) < switchbackDelay {
+			return FailoverResult{
+				Decision: DecisionStay,
+				Reason: fmt.Sprintf("Terrestrial recovered but switchback delay not elapsed (%s remaining)%s",
+					switchbackDelay-now.Sub(lastFailover), parseSuffix),
+				TargetPath: PathSatellite,
+			}
+		}
+		return FailoverResult{
+			Decision:   DecisionSwitchback,
+			Reason:     "Terrestrial recovered, switchback delay elapsed" + parseSuffix,
+			TargetPath: PathTerrestrial,
+		}
+
+	default:
+		// Unknown or unavailable path — try terrestrial first.
+		if !anyTriggered {
+			return FailoverResult{
+				Decision:   DecisionSwitchback,
+				Reason:     "Initializing on terrestrial path" + parseSuffix,
+				TargetPath: PathTerrestrial,
+			}
+		}
+		if satelliteAvailable {
+			return FailoverResult{
+				Decision:   DecisionFailover,
+				Reason:     "Terrestrial unavailable, using satellite" + parseSuffix,
+				TargetPath: PathSatellite,
+			}
+		}
+		return FailoverResult{
+			Decision:   DecisionStay,
+			Reason:     "Both paths degraded" + parseSuffix,
+			TargetPath: PathUnavailable,
+		}
+	}
+}
