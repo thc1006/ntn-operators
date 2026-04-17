@@ -117,8 +117,8 @@ kubectl get gs
 
 # Check NTN cell configuration
 kubectl get ntncellconfigs
-# NAME                PROVIDER   CONFIG MAP               AGE
-# ntn-cell-geo-demo   ocudu      ocudu-ntn-ntn-cell-...   5m
+# NAME                PROVIDER   KOFFSET   PAYLOAD       AGE
+# ntn-cell-geo-demo   ocudu      150       transparent   5m
 
 # Check NTN slice failover
 kubectl get ntnslices

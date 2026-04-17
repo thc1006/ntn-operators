@@ -63,7 +63,15 @@ $CONTAINER_TOOL build -t "$IMG" .
 echo ""
 
 echo "   Loading image into Kind..."
-kind load docker-image "$IMG" --name "$CLUSTER_NAME"
+if [ "$CONTAINER_TOOL" = "docker" ]; then
+    kind load docker-image "$IMG" --name "$CLUSTER_NAME"
+else
+    # nerdctl/podman: export to tarball then load via archive
+    TMPTAR="$(mktemp /tmp/ntn-image-XXXXXX.tar)"
+    $CONTAINER_TOOL save -o "$TMPTAR" "$IMG"
+    kind load image-archive "$TMPTAR" --name "$CLUSTER_NAME"
+    rm -f "$TMPTAR"
+fi
 echo ""
 
 # ── 3. Install CRDs ──────────────────────────────────────────
