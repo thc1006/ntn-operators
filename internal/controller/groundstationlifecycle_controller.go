@@ -135,9 +135,15 @@ func (r *GroundStationLifecycleReconciler) healthCheckInterval(gs *ntnv1alpha1.G
 	return 30 * time.Second
 }
 
+// maxLabelValueLen is the Kubernetes label value length limit.
+const maxLabelValueLen = 63
+
 // findMatchingNode finds a Node labeled ntn.operators.dev/groundstation=<namespace>.<name>.
 func (r *GroundStationLifecycleReconciler) findMatchingNode(ctx context.Context, namespace, gsName string) (*corev1.Node, error) {
 	labelValue := namespace + "." + gsName
+	if len(labelValue) > maxLabelValueLen {
+		return nil, fmt.Errorf("label value %q exceeds %d-character Kubernetes limit (namespace.name = %d chars)", labelValue, maxLabelValueLen, len(labelValue))
+	}
 	var nodeList corev1.NodeList
 	if err := r.List(ctx, &nodeList, client.MatchingLabels{groundStationLabel: labelValue}); err != nil {
 		return nil, fmt.Errorf("listing nodes: %w", err)
@@ -194,7 +200,7 @@ func (r *GroundStationLifecycleReconciler) reconcileHealth(
 			Type:               ntnv1alpha1.ConditionK8sNodeReady,
 			Status:             metav1.ConditionFalse,
 			Reason:             "NodeNotFound",
-			Message:            fmt.Sprintf("No node with label %s=%s found", groundStationLabel, gs.Name),
+			Message:            fmt.Sprintf("No node with label %s=%s found", groundStationLabel, gs.Namespace+"."+gs.Name),
 			ObservedGeneration: gs.Generation,
 		})
 		meta.SetStatusCondition(&gs.Status.Conditions, metav1.Condition{

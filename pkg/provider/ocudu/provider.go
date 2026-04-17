@@ -33,9 +33,17 @@ import (
 // ConfigMapPrefix is the prefix for ConfigMap names. Final name = prefix + CR name.
 const ConfigMapPrefix = "ocudu-ntn-"
 
+// maxK8sNameLen is the maximum length for a Kubernetes object name.
+const maxK8sNameLen = 253
+
 // ConfigMapNameFor returns the ConfigMap name for a given NTNCellConfig CR name.
+// If the resulting name exceeds K8s limits, it is truncated to fit.
 func ConfigMapNameFor(crName string) string {
-	return ConfigMapPrefix + crName
+	name := ConfigMapPrefix + crName
+	if len(name) > maxK8sNameLen {
+		name = name[:maxK8sNameLen]
+	}
+	return name
 }
 
 // Provider implements provider.NTNProvider for OCUDU/srsRAN gNB.

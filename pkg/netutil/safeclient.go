@@ -86,6 +86,9 @@ func NewSafeHTTPClient(timeout time.Duration) *http.Client {
 			if err != nil {
 				return nil, fmt.Errorf("DNS resolution failed for %q: %w", host, err)
 			}
+			if len(ips) == 0 {
+				return nil, fmt.Errorf("DNS resolution for %q returned no addresses", host)
+			}
 
 			// Validate ALL resolved IPs before connecting.
 			for _, ipAddr := range ips {
@@ -94,18 +97,37 @@ func NewSafeHTTPClient(timeout time.Duration) *http.Client {
 				}
 			}
 
-			// Connect to the first valid IP (same as net.Dialer default).
-			return dialer.DialContext(ctx, network, net.JoinHostPort(ips[0].IP.String(), port))
+			// Try each resolved IP until one connects (handles dual-stack).
+			var lastErr error
+			for _, ipAddr := range ips {
+				conn, dialErr := dialer.DialContext(ctx, network, net.JoinHostPort(ipAddr.IP.String(), port))
+				if dialErr == nil {
+					return conn, nil
+				}
+				lastErr = dialErr
+			}
+			return nil, fmt.Errorf("all resolved IPs for %q failed to connect: %w", host, lastErr)
 		},
 	}
 
 	return &http.Client{
 		Timeout:   timeout,
 		Transport: transport,
-		// Don't follow redirects to potentially internal URLs.
+		// Validate redirect targets against private IP ranges (defense in depth).
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if len(via) >= 3 {
 				return fmt.Errorf("too many redirects")
+			}
+			// Resolve the redirect target and reject private IPs.
+			host := req.URL.Hostname()
+			ips, err := net.DefaultResolver.LookupIPAddr(req.Context(), host)
+			if err != nil {
+				return fmt.Errorf("cannot resolve redirect target %q: %w", host, err)
+			}
+			for _, ipAddr := range ips {
+				if IsPrivateIP(ipAddr.IP) {
+					return fmt.Errorf("%w: redirect to %s resolves to %s", ErrPrivateIP, host, ipAddr.IP)
+				}
 			}
 			return nil
 		},

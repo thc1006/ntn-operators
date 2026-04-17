@@ -48,7 +48,7 @@ type NTNCellConfigReconciler struct {
 // +kubebuilder:rbac:groups=ntn.operators.dev,resources=ntncellconfigs,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=ntn.operators.dev,resources=ntncellconfigs/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=ntn.operators.dev,resources=ntncellconfigs/finalizers,verbs=update
-// +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch
+// +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
 // Reconcile applies NTN cell configuration to the specified provider backend.
@@ -71,7 +71,14 @@ func (r *NTNCellConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 				Namespace: cc.Namespace,
 				Name:      ocudu.ConfigMapNameFor(cc.Name),
 			}
-			if err := r.Get(ctx, cmKey, cm); err == nil {
+			if err := r.Get(ctx, cmKey, cm); err != nil {
+				if client.IgnoreNotFound(err) != nil {
+					// Transient error (not NotFound) — requeue to retry.
+					log.Error(err, "Failed to get ConfigMap during finalization")
+					return ctrl.Result{}, err
+				}
+				// NotFound — ConfigMap already gone, proceed to remove finalizer.
+			} else {
 				if err := r.Delete(ctx, cm); err != nil {
 					log.Error(err, "Failed to delete ConfigMap during finalization")
 					return ctrl.Result{}, err
@@ -86,12 +93,13 @@ func (r *NTNCellConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, nil
 	}
 
-	// Add finalizer if not present.
+	// Add finalizer if not present, then requeue to reconcile with latest resourceVersion.
 	if !controllerutil.ContainsFinalizer(cc, finalizerName) {
 		controllerutil.AddFinalizer(cc, finalizerName)
 		if err := r.Update(ctx, cc); err != nil {
 			return ctrl.Result{}, err
 		}
+		return ctrl.Result{Requeue: true}, nil
 	}
 
 	// Step 3: Guard against nil provider.

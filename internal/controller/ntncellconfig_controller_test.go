@@ -87,6 +87,18 @@ var _ = Describe("NTNCellConfig Controller", func() {
 		}
 	}
 
+	// reconcileWithFinalizer runs reconcile twice: first adds the finalizer, second does actual work.
+	reconcileWithFinalizer := func(reconciler *NTNCellConfigReconciler) (reconcile.Result, error) {
+		req := reconcile.Request{NamespacedName: typeNamespacedName}
+		// First reconcile: adds finalizer and requeues.
+		result, err := reconciler.Reconcile(context.Background(), req)
+		if err != nil || !result.Requeue {
+			return result, err
+		}
+		// Second reconcile: actual logic.
+		return reconciler.Reconcile(context.Background(), req)
+	}
+
 	Context("When provider succeeds", func() {
 		BeforeEach(func() { createCR() })
 		AfterEach(func() { deleteCR() })
@@ -95,9 +107,7 @@ var _ = Describe("NTNCellConfig Controller", func() {
 			mock := &provider.MockProvider{}
 			reconciler := newReconciler(mock)
 
-			result, err := reconciler.Reconcile(context.Background(), reconcile.Request{
-				NamespacedName: typeNamespacedName,
-			})
+			result, err := reconcileWithFinalizer(reconciler)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(result.RequeueAfter).To(Equal(5 * time.Minute))
 
@@ -125,9 +135,7 @@ var _ = Describe("NTNCellConfig Controller", func() {
 			mock := &provider.MockProvider{ApplyErr: errors.New("connection refused")}
 			reconciler := newReconciler(mock)
 
-			_, err := reconciler.Reconcile(context.Background(), reconcile.Request{
-				NamespacedName: typeNamespacedName,
-			})
+			_, err := reconcileWithFinalizer(reconciler)
 			Expect(err).NotTo(HaveOccurred()) // graceful, not a reconciler error
 
 			updated := &ntnv1alpha1.NTNCellConfig{}
@@ -173,9 +181,7 @@ var _ = Describe("NTNCellConfig Controller", func() {
 			mock := &provider.MockProvider{}
 			reconciler := newReconciler(mock)
 
-			_, err := reconciler.Reconcile(context.Background(), reconcile.Request{
-				NamespacedName: typeNamespacedName,
-			})
+			_, err := reconcileWithFinalizer(reconciler)
 			Expect(err).NotTo(HaveOccurred())
 
 			updated := &ntnv1alpha1.NTNCellConfig{}
@@ -196,9 +202,7 @@ var _ = Describe("NTNCellConfig Controller", func() {
 		It("should set ConfigApplied=False with InternalError", func() {
 			reconciler := newReconciler(nil)
 
-			_, err := reconciler.Reconcile(context.Background(), reconcile.Request{
-				NamespacedName: typeNamespacedName,
-			})
+			_, err := reconcileWithFinalizer(reconciler)
 			Expect(err).NotTo(HaveOccurred())
 
 			updated := &ntnv1alpha1.NTNCellConfig{}
