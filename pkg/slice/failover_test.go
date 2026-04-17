@@ -170,6 +170,28 @@ func TestEvaluateFailover_OnSatellite_TerrestrialStillDegraded_Stay(t *testing.T
 	}
 }
 
+func TestEvaluateFailover_OnSatellite_PassEnds_SwitchBack(t *testing.T) {
+	result := EvaluateFailover(
+		PathSatellite, triggers,
+		Metrics{RSRP: -130, LatencyMs: 20, PacketLossPercent: 0.1}, // terrestrial still bad
+		false, // satellite pass ended
+		60*time.Second, now.Add(-90*time.Second), now,
+	)
+	if result.Decision != DecisionSwitchback {
+		t.Errorf("expected Switchback (pass ended), got %s: %s", result.Decision, result.Reason)
+	}
+	if result.TargetPath != PathTerrestrial {
+		t.Errorf("expected terrestrial fallback, got %s", result.TargetPath)
+	}
+}
+
+func TestParseTrigger_UnknownMetric(t *testing.T) {
+	_, err := ParseTrigger("packeLoss > 5") // typo
+	if err == nil {
+		t.Fatal("expected error for unknown metric")
+	}
+}
+
 func TestEvaluateFailover_MultipleTriggers_ORLogic(t *testing.T) {
 	// Only latency triggers, RSRP and packetLoss are fine.
 	result := EvaluateFailover(

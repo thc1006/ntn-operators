@@ -22,6 +22,7 @@ import (
 	"strconv"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -109,7 +110,7 @@ func (r *NTNSliceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	)
 
 	// Step 5: Apply decision.
-	previousPath := ns.Status.ActivePathType
+	previousPath := string(currentPath)
 	ns.Status.ActivePathType = string(result.TargetPath)
 
 	switch result.Decision {
@@ -201,6 +202,10 @@ func (r *NTNSliceReconciler) checkSatelliteAvailability(
 	eph := &ntnv1alpha1.SatelliteEphemeris{}
 	key := client.ObjectKey{Namespace: ns.Namespace, Name: ns.Spec.SatellitePath.EphemerisRef}
 	if err := r.Get(ctx, key, eph); err != nil {
+		if !apierrors.IsNotFound(err) {
+			log := logf.FromContext(ctx)
+			log.Error(err, "Failed to get SatelliteEphemeris", "ref", ns.Spec.SatellitePath.EphemerisRef)
+		}
 		return false
 	}
 

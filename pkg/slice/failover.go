@@ -80,6 +80,14 @@ func ParseTrigger(s string) (Trigger, error) {
 			if metric == "" {
 				return Trigger{}, fmt.Errorf("empty metric in trigger %q", s)
 			}
+			validMetrics := map[string]bool{
+				"rsrp": true, "terrestrialRSRP": true,
+				"latency": true, "terrestrialLatency": true,
+				"packetLoss": true, "terrestrialPacketLoss": true,
+			}
+			if !validMetrics[metric] {
+				return Trigger{}, fmt.Errorf("unknown metric %q in trigger %q", metric, s)
+			}
 			return Trigger{Metric: metric, Operator: op, Value: value}, nil
 		}
 	}
@@ -181,6 +189,21 @@ func EvaluateFailover(
 		}
 
 	case PathSatellite:
+		// If satellite pass ended, must switch back regardless.
+		if !satelliteAvailable {
+			if anyTriggered {
+				return FailoverResult{
+					Decision:   DecisionSwitchback,
+					Reason:     "Satellite pass ended, falling back to degraded terrestrial",
+					TargetPath: PathTerrestrial,
+				}
+			}
+			return FailoverResult{
+				Decision:   DecisionSwitchback,
+				Reason:     "Satellite pass ended, terrestrial recovered",
+				TargetPath: PathTerrestrial,
+			}
+		}
 		if anyTriggered {
 			// Terrestrial still degraded, stay on satellite.
 			return FailoverResult{
