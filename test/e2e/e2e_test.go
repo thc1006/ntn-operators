@@ -273,6 +273,140 @@ var _ = Describe("Manager", Ordered, func() {
 		// NOTE: filepath.Join paths are relative to repo root, which is the CWD
 		// when invoked via `make test-e2e` (consistent with scaffold tests above).
 		// Resources are created in the default namespace (samples have no namespace set).
+
+		It("should apply all 4 CRD samples and verify multi-CRD workflow", func() {
+			const testNS = "default"
+
+			By("creating both GroundStationLifecycle resources")
+			cmd := exec.Command("kubectl", "apply", "-n", testNS, "-f",
+				filepath.Join("config", "samples", "ntn_v1alpha1_groundstationlifecycle.yaml"))
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			cmd = exec.Command("kubectl", "apply", "-n", testNS, "-f",
+				filepath.Join("config", "samples", "ntn_v1alpha1_groundstationlifecycle_hsinchu.yaml"))
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			DeferCleanup(func() {
+				cmd := exec.Command("kubectl", "delete", "-n", testNS, "gs", "gs-taipei-01", "gs-hsinchu-01", "--ignore-not-found")
+				_, _ = utils.Run(cmd)
+			})
+
+			By("creating a SatelliteEphemeris resource")
+			cmd = exec.Command("kubectl", "apply", "-n", testNS, "-f",
+				filepath.Join("config", "samples", "ntn_v1alpha1_satelliteephemeris.yaml"))
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			DeferCleanup(func() {
+				cmd := exec.Command("kubectl", "delete", "-n", testNS, "sateph", "oneweb-constellation", "--ignore-not-found")
+				_, _ = utils.Run(cmd)
+			})
+
+			By("creating NTNCellConfig resource")
+			cmd = exec.Command("kubectl", "apply", "-n", testNS, "-f",
+				filepath.Join("config", "samples", "ntn_v1alpha1_ntncellconfig.yaml"))
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			DeferCleanup(func() {
+				cmd := exec.Command("kubectl", "delete", "-n", testNS, "ntncellconfigs", "ntn-cell-geo-demo", "--ignore-not-found")
+				_, _ = utils.Run(cmd)
+			})
+
+			By("creating NTNSlice resource")
+			cmd = exec.Command("kubectl", "apply", "-n", testNS, "-f",
+				filepath.Join("config", "samples", "ntn_v1alpha1_ntnslice.yaml"))
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			DeferCleanup(func() {
+				cmd := exec.Command("kubectl", "delete", "-n", testNS, "ntnslices", "enterprise-resilient-slice", "--ignore-not-found")
+				_, _ = utils.Run(cmd)
+			})
+
+			By("verifying SatelliteEphemeris has satellite count")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "sateph", "oneweb-constellation",
+					"-n", testNS, "-o", "jsonpath={.status.satelliteCount}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).NotTo(BeEmpty())
+				g.Expect(output).NotTo(Equal("0"))
+			}, 2*time.Minute, 5*time.Second).Should(Succeed())
+
+			By("verifying NTNCellConfig has ConfigApplied=True")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "ntncellconfigs", "ntn-cell-geo-demo",
+					"-n", testNS, "-o", "jsonpath={.status.conditions[?(@.type=='ConfigApplied')].status}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("True"))
+			}, 2*time.Minute, 5*time.Second).Should(Succeed())
+
+			By("verifying NTNCellConfig generated a ConfigMap")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "ntncellconfigs", "ntn-cell-geo-demo",
+					"-n", testNS, "-o", "jsonpath={.status.configMapRef}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).NotTo(BeEmpty())
+			}, 2*time.Minute, 5*time.Second).Should(Succeed())
+
+			By("verifying NTNSlice has activePathType=terrestrial")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "ntnslices", "enterprise-resilient-slice",
+					"-n", testNS, "-o", "jsonpath={.status.activePathType}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("terrestrial"))
+			}, 2*time.Minute, 5*time.Second).Should(Succeed())
+
+			By("verifying NTNSlice has PathActive=True condition")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "ntnslices", "enterprise-resilient-slice",
+					"-n", testNS, "-o", "jsonpath={.status.conditions[?(@.type=='PathActive')].status}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("True"))
+			}, 2*time.Minute, 5*time.Second).Should(Succeed())
+
+			By("verifying GroundStation gs-taipei-01 has a phase")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "gs", "gs-taipei-01",
+					"-n", testNS, "-o", "jsonpath={.status.phase}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).NotTo(BeEmpty())
+			}, 2*time.Minute, 5*time.Second).Should(Succeed())
+		})
+
+		It("should handle NTNCellConfig deletion gracefully", func() {
+			const testNS = "default"
+
+			By("creating NTNCellConfig")
+			cmd := exec.Command("kubectl", "apply", "-n", testNS, "-f",
+				filepath.Join("config", "samples", "ntn_v1alpha1_ntncellconfig.yaml"))
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("waiting for ConfigApplied=True")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "ntncellconfigs", "ntn-cell-geo-demo",
+					"-n", testNS, "-o", "jsonpath={.status.conditions[?(@.type=='ConfigApplied')].status}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("True"))
+			}, 2*time.Minute, 5*time.Second).Should(Succeed())
+
+			By("deleting NTNCellConfig (triggers finalizer)")
+			cmd = exec.Command("kubectl", "delete", "-n", testNS, "ntncellconfigs", "ntn-cell-geo-demo", "--timeout=60s")
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "NTNCellConfig deletion should complete (finalizer cleanup)")
+
+			By("verifying ConfigMap was cleaned up")
+			cmd = exec.Command("kubectl", "get", "configmap", "ocudu-ntn-ntn-cell-geo-demo",
+				"-n", testNS, "-o", "name")
+			output, _ := utils.Run(cmd)
+			Expect(output).To(BeEmpty(), "ConfigMap should be deleted by finalizer")
+		})
+
 		It("should reconcile SatelliteEphemeris and populate status", func() {
 			const testNS = "default"
 
