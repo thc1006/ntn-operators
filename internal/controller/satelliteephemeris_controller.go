@@ -78,22 +78,7 @@ func (r *SatelliteEphemerisReconciler) Reconcile(ctx context.Context, req ctrl.R
 		}
 	}
 
-	// Step 3: Guard against nil fetcher.
-	if r.Fetcher == nil {
-		meta.SetStatusCondition(&eph.Status.Conditions, metav1.Condition{
-			Type:               ntnv1alpha1.ConditionGPDataFetched,
-			Status:             metav1.ConditionFalse,
-			Reason:             "InternalError",
-			Message:            "GP data fetcher is not configured",
-			ObservedGeneration: eph.Generation,
-		})
-		if err := r.Status().Update(ctx, eph); err != nil {
-			return ctrl.Result{}, err
-		}
-		return ctrl.Result{RequeueAfter: time.Minute}, nil
-	}
-
-	// Step 4: Select fetcher and load credentials if needed.
+	// Step 3: Select fetcher and load credentials if needed.
 	fetcher, fetcherErr := r.fetcherForSource(ctx, eph)
 	if fetcherErr != nil {
 		meta.SetStatusCondition(&eph.Status.Conditions, metav1.Condition{

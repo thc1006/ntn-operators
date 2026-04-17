@@ -328,7 +328,7 @@ var _ = Describe("SatelliteEphemeris Controller", func() {
 		BeforeEach(func() { createResource() })
 		AfterEach(func() { deleteResource() })
 
-		It("should set InternalError condition and requeue", func() {
+		It("should set FetcherSetupFailed condition and requeue", func() {
 			reconciler := newReconciler(nil)
 
 			result, err := reconciler.Reconcile(context.Background(), reconcile.Request{
@@ -343,7 +343,7 @@ var _ = Describe("SatelliteEphemeris Controller", func() {
 			cond := meta.FindStatusCondition(updated.Status.Conditions, ntnv1alpha1.ConditionGPDataFetched)
 			Expect(cond).NotTo(BeNil())
 			Expect(cond.Status).To(Equal(metav1.ConditionFalse))
-			Expect(cond.Reason).To(Equal("InternalError"))
+			Expect(cond.Reason).To(Equal("FetcherSetupFailed"))
 		})
 	})
 

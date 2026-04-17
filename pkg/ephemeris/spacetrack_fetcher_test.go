@@ -229,3 +229,89 @@ func TestSpaceTrackFetcher_ContextCancelled(t *testing.T) {
 		t.Fatal("expected context cancelled error")
 	}
 }
+
+func TestSpaceTrackFetcher_SessionExpiredAutoRetry(t *testing.T) {
+	var gpCallCount atomic.Int32
+	var loginCount atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == loginPath {
+			loginCount.Add(1)
+			http.SetCookie(w, &http.Cookie{Name: "chocolatechip", Value: "renewed", Path: "/"})
+			_, _ = fmt.Fprint(w, `""`)
+			return
+		}
+		call := gpCallCount.Add(1)
+		if call == 1 {
+			// First GP call: simulate expired session.
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+		// Second GP call (after re-login): success.
+		cookie, err := r.Cookie("chocolatechip")
+		if err != nil || cookie.Value != "renewed" {
+			http.Error(w, "no renewed cookie", http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, sampleOMMJSON)
+	}))
+	defer server.Close()
+
+	fetcher := NewSpaceTrackFetcher(&http.Client{}, server.URL)
+	fetcher.SetCredentials("u", "p")
+
+	// Force loggedIn=true so it skips initial login and goes straight to GP.
+	fetcher.mu.Lock()
+	fetcher.loggedIn = true
+	fetcher.activeUsername = "u"
+	fetcher.activePassword = "p"
+	fetcher.mu.Unlock()
+
+	result, err := fetcher.Fetch(context.Background(), server.URL+"/gp")
+	if err != nil {
+		t.Fatalf("expected auto-retry to succeed, got: %v", err)
+	}
+	if result.SatelliteCount != 1 {
+		t.Errorf("expected 1 satellite, got %d", result.SatelliteCount)
+	}
+	// Should have logged in once (re-login after 401) and made 2 GP calls.
+	if loginCount.Load() != 1 {
+		t.Errorf("expected 1 re-login, got %d", loginCount.Load())
+	}
+	if gpCallCount.Load() != 2 {
+		t.Errorf("expected 2 GP calls (fail + retry), got %d", gpCallCount.Load())
+	}
+}
+
+func TestSpaceTrackFetcher_CredentialsUnchangedNoRelogin(t *testing.T) {
+	var loginCount atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == loginPath {
+			loginCount.Add(1)
+			http.SetCookie(w, &http.Cookie{Name: "chocolatechip", Value: "s", Path: "/"})
+			_, _ = fmt.Fprint(w, `""`)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, sampleOMMJSON)
+	}))
+	defer server.Close()
+
+	fetcher := NewSpaceTrackFetcher(&http.Client{}, server.URL)
+	fetcher.SetCredentials("user", "pass")
+
+	// First fetch: login + GP.
+	if _, err := fetcher.Fetch(context.Background(), server.URL+"/gp"); err != nil {
+		t.Fatal(err)
+	}
+	// SetCredentials with SAME creds — should NOT force re-login.
+	fetcher.SetCredentials("user", "pass")
+
+	// Second fetch: should reuse session.
+	if _, err := fetcher.Fetch(context.Background(), server.URL+"/gp"); err != nil {
+		t.Fatal(err)
+	}
+	if loginCount.Load() != 1 {
+		t.Errorf("expected 1 login (same creds = no re-login), got %d", loginCount.Load())
+	}
+}

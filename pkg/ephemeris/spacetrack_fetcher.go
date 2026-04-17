@@ -31,16 +31,17 @@ import (
 )
 
 // SpaceTrackFetcher implements GPFetcher for Space-Track.org OMM JSON endpoints.
-// It manages cookie-based authentication and session reuse.
+// It manages cookie-based authentication with automatic session reuse and
+// retry on 401. Credentials are passed per-Fetch call so multiple CRs with
+// different Secrets don't interfere.
 type SpaceTrackFetcher struct {
 	httpClient *http.Client
 	baseURL    string // e.g., "https://www.space-track.org"
 
-	mu       sync.Mutex
-	username string
-	password string
-	loggedIn bool
-	ommCache sync.Map // url -> []sgp4.OMM (cached for NotModified)
+	mu             sync.Mutex
+	activeUsername string // credentials of the current session
+	activePassword string
+	loggedIn       bool
 }
 
 // NewSpaceTrackFetcher creates a SpaceTrack fetcher.
@@ -59,22 +60,27 @@ func NewSpaceTrackFetcher(httpClient *http.Client, baseURL string) *SpaceTrackFe
 }
 
 // SetCredentials sets the SpaceTrack login credentials.
+// Only triggers re-login if the credentials actually changed.
 func (f *SpaceTrackFetcher) SetCredentials(username, password string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.username = username
-	f.password = password
+	if f.activeUsername == username && f.activePassword == password {
+		return // no change
+	}
+	f.activeUsername = username
+	f.activePassword = password
 	f.loggedIn = false // force re-login on next fetch
 }
 
 // Fetch retrieves GP data from SpaceTrack. It handles authentication
 // automatically using cookie-based session management.
+// On HTTP 401, it automatically retries login once before failing.
 func (f *SpaceTrackFetcher) Fetch(ctx context.Context, gpURL string) (GPFetchResult, error) {
 	now := time.Now()
 
 	f.mu.Lock()
-	username := f.username
-	password := f.password
+	username := f.activeUsername
+	password := f.activePassword
 	loggedIn := f.loggedIn
 	f.mu.Unlock()
 
@@ -91,10 +97,19 @@ func (f *SpaceTrackFetcher) Fetch(ctx context.Context, gpURL string) (GPFetchRes
 
 	// Fetch GP data.
 	result, err := f.fetchGP(ctx, gpURL, now)
-	if err != nil {
-		return GPFetchResult{}, err
+	if err == nil {
+		return result, nil
 	}
-	return result, nil
+
+	// On 401, retry login once and re-fetch.
+	if isSessionExpired(err) {
+		if loginErr := f.login(ctx, username, password); loginErr != nil {
+			return GPFetchResult{}, fmt.Errorf("SpaceTrack re-login failed: %w", loginErr)
+		}
+		return f.fetchGP(ctx, gpURL, now)
+	}
+
+	return GPFetchResult{}, err
 }
 
 // login authenticates with SpaceTrack via POST to /ajaxauth/login.
@@ -130,6 +145,14 @@ func (f *SpaceTrackFetcher) login(ctx context.Context, username, password string
 	return nil
 }
 
+// errSessionExpired is a sentinel for 401 detection in retry logic.
+var errSessionExpired = fmt.Errorf("SpaceTrack session expired")
+
+// isSessionExpired checks if an error is a session expiry (401).
+func isSessionExpired(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "session expired")
+}
+
 // fetchGP performs the authenticated GP data request.
 func (f *SpaceTrackFetcher) fetchGP(ctx context.Context, gpURL string, now time.Time) (GPFetchResult, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, gpURL, nil)
@@ -159,8 +182,6 @@ func (f *SpaceTrackFetcher) fetchGP(ctx context.Context, gpURL string, now time.
 			return GPFetchResult{}, fmt.Errorf("parsing OMM JSON: %w", err)
 		}
 
-		f.ommCache.Store(gpURL, omms)
-
 		return GPFetchResult{
 			OMMs:           omms,
 			SatelliteCount: len(omms),
@@ -171,11 +192,11 @@ func (f *SpaceTrackFetcher) fetchGP(ctx context.Context, gpURL string, now time.
 		return GPFetchResult{}, ErrRateLimited
 
 	case http.StatusUnauthorized:
-		// Session expired — mark as not logged in for retry.
+		// Session expired — mark as not logged in.
 		f.mu.Lock()
 		f.loggedIn = false
 		f.mu.Unlock()
-		return GPFetchResult{}, fmt.Errorf("SpaceTrack session expired (HTTP 401)")
+		return GPFetchResult{}, fmt.Errorf("%w (HTTP 401)", errSessionExpired)
 
 	default:
 		return GPFetchResult{}, fmt.Errorf("%w: HTTP %d from %s", ErrBadResponse, resp.StatusCode, gpURL)
