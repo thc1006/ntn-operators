@@ -137,6 +137,82 @@ kubectl get ntnslices
 # enterprise-resilient-slice   acme-corp   terrestrial   0           5m
 ```
 
+## Examples
+
+### SatelliteEphemeris (CelesTrak)
+
+```yaml
+apiVersion: ntn.operators.dev/v1alpha1
+kind: SatelliteEphemeris
+metadata:
+  name: oneweb-constellation
+spec:
+  source:
+    type: CelesTrak
+    url: https://celestrak.org/NORAD/elements/gp.php?GROUP=oneweb&FORMAT=JSON
+    refreshInterval: 4h
+  satellites:
+    constellation: oneweb
+  passPrediction:
+    groundStations:
+      - gs-taipei-01
+      - gs-hsinchu-01
+    minElevation: "10"
+    horizon: 24h
+```
+
+### NTNCellConfig
+
+```yaml
+apiVersion: ntn.operators.dev/v1alpha1
+kind: NTNCellConfig
+metadata:
+  name: ntn-cell-geo-demo
+spec:
+  provider:
+    type: ocudu
+  ntn:
+    cellSpecificKoffset: 150
+    ephemerisECEF:
+      posX: 20922195
+      posY: 1967783
+      posZ: 19770302
+      velX: 0
+      velY: 0
+      velZ: 0
+    payloadType: transparent
+```
+
+### NTNSlice
+
+```yaml
+apiVersion: ntn.operators.dev/v1alpha1
+kind: NTNSlice
+metadata:
+  name: enterprise-resilient-slice
+spec:
+  tenant: acme-corp
+  terrestrialPath:
+    provider: chunghwa-telecom
+    priority: primary
+  satellitePath:
+    provider: oneweb
+    ephemerisRef: oneweb-constellation
+    priority: failover
+  failoverPolicy:
+    triggers:
+      - "rsrp < -120"
+      - "latency > 200"
+    switchbackDelay: 60s
+    sessionContinuity: true
+  qosMapping:
+    terrestrial5QI: 9
+    satelliteQCI: best-effort
+  security:
+    encryptionLevel: AES-256
+    authOnHandover: re-authenticate
+```
+
 ## Observability
 
 ### Prometheus Metrics
