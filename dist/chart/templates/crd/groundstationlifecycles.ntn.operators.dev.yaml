@@ -234,6 +234,12 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              firmwareUpdateStarted:
+                description: |-
+                  firmwareUpdateStarted is when the current firmware update began.
+                  Used for timeout detection.
+                format: date-time
+                type: string
               firmwareVersion:
                 description: firmwareVersion is the currently running firmware version.
                 type: string
