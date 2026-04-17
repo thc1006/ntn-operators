@@ -351,14 +351,25 @@ var _ = Describe("GroundStationLifecycle Controller", func() {
 			Expect(fwCond.Reason).To(Equal("UpdateAvailable"))
 		})
 
-		It("should complete update on next reconcile", func() {
+		It("should complete update on next reconcile after node agent confirms", func() {
 			reconciler := newReconciler(nil)
 			// First reconcile: triggers update.
 			_, err := reconcileGS(reconciler)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(getGS().Status.Phase).To(Equal(ntnv1alpha1.PhaseUpdating))
 
-			// Second reconcile: completes update.
+			// Second reconcile: node agent hasn't updated yet — stay in Updating.
+			_, err = reconcileGS(reconciler)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(getGS().Status.Phase).To(Equal(ntnv1alpha1.PhaseUpdating))
+
+			// Simulate node agent completing the firmware update.
+			node := &corev1.Node{}
+			Expect(k8sClient.Get(context.Background(), types.NamespacedName{Name: nodeName}, node)).To(Succeed())
+			node.Annotations[firmwareVersionAnnotation] = "2.3.1"
+			Expect(k8sClient.Update(context.Background(), node)).To(Succeed())
+
+			// Third reconcile: node reports new version — completes update.
 			_, err = reconcileGS(reconciler)
 			Expect(err).NotTo(HaveOccurred())
 

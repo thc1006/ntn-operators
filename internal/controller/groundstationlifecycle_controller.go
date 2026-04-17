@@ -400,6 +400,8 @@ func (r *GroundStationLifecycleReconciler) reconcileFirmware(
 	}
 
 	// Handle update completion (Updating → Running).
+	// Completion is determined by the node agent updating the firmware-version
+	// annotation to match the available version.
 	if gs.Status.Phase == ntnv1alpha1.PhaseUpdating {
 		if availableVersion == "" {
 			// Available version disappeared during update; keep current version.
@@ -411,22 +413,30 @@ func (r *GroundStationLifecycleReconciler) reconcileFirmware(
 				ObservedGeneration: gs.Generation,
 			})
 			gs.Status.Phase = ntnv1alpha1.PhaseRunning
+			gs.Status.FirmwareUpdateStarted = nil
 			return
 		}
-		gs.Status.FirmwareVersion = availableVersion
-		gs.Status.FirmwareUpdateStarted = nil
-		meta.SetStatusCondition(&gs.Status.Conditions, metav1.Condition{
-			Type:               ntnv1alpha1.ConditionFirmwareUpToDate,
-			Status:             metav1.ConditionTrue,
-			Reason:             "UpdateCompleted",
-			Message:            fmt.Sprintf("Firmware updated to %s", availableVersion),
-			ObservedGeneration: gs.Generation,
-		})
-		gs.Status.Phase = ntnv1alpha1.PhaseRunning
-		if r.Recorder != nil {
-			r.Recorder.Eventf(gs, nil, "Normal", "FirmwareUpdated", "FirmwareUpdated",
-				"Firmware updated to %s", availableVersion)
+		// Check if the node agent reports the firmware has been updated.
+		nodeReportedVersion := node.Annotations[firmwareVersionAnnotation]
+		if nodeReportedVersion == availableVersion {
+			// Node agent confirms update is complete.
+			gs.Status.FirmwareVersion = availableVersion
+			gs.Status.FirmwareUpdateStarted = nil
+			meta.SetStatusCondition(&gs.Status.Conditions, metav1.Condition{
+				Type:               ntnv1alpha1.ConditionFirmwareUpToDate,
+				Status:             metav1.ConditionTrue,
+				Reason:             "UpdateCompleted",
+				Message:            fmt.Sprintf("Firmware updated to %s", availableVersion),
+				ObservedGeneration: gs.Generation,
+			})
+			gs.Status.Phase = ntnv1alpha1.PhaseRunning
+			if r.Recorder != nil {
+				r.Recorder.Eventf(gs, nil, "Normal", "FirmwareUpdated", "FirmwareUpdated",
+					"Firmware updated to %s", availableVersion)
+			}
+			return
 		}
+		// Node agent hasn't reported completion yet — stay in Updating.
 		return
 	}
 
