@@ -184,11 +184,16 @@ func main() {
 	}
 
 	gpHTTPClient := netutil.NewSafeHTTPClient(30 * time.Second)
+	spaceTrackFetcher := ephemeris.NewSpaceTrackFetcher(
+		netutil.NewSafeHTTPClient(30*time.Second),
+		"https://www.space-track.org",
+	)
 	if err := (&controller.SatelliteEphemerisReconciler{
-		Client:   mgr.GetClient(),
-		Scheme:   mgr.GetScheme(),
-		Recorder: mgr.GetEventRecorder("satelliteephemeris-controller"),
-		Fetcher:  ephemeris.NewCelesTrakFetcher(gpHTTPClient),
+		Client:            mgr.GetClient(),
+		Scheme:            mgr.GetScheme(),
+		Recorder:          mgr.GetEventRecorder("satelliteephemeris-controller"),
+		Fetcher:           ephemeris.NewCelesTrakFetcher(gpHTTPClient),
+		SpaceTrackFetcher: spaceTrackFetcher,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "SatelliteEphemeris")
 		os.Exit(1)

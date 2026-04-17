@@ -23,6 +23,7 @@ import (
 	"slices"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -43,15 +44,17 @@ const minRefreshInterval = 2 * time.Hour
 // SatelliteEphemerisReconciler reconciles a SatelliteEphemeris object
 type SatelliteEphemerisReconciler struct {
 	client.Client
-	Scheme   *runtime.Scheme
-	Recorder events.EventRecorder
-	Fetcher  ephemeris.GPFetcher
+	Scheme            *runtime.Scheme
+	Recorder          events.EventRecorder
+	Fetcher           ephemeris.GPFetcher          // CelesTrak fetcher
+	SpaceTrackFetcher *ephemeris.SpaceTrackFetcher // SpaceTrack fetcher (nil = disabled)
 }
 
 // +kubebuilder:rbac:groups=ntn.operators.dev,resources=satelliteephemeris,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=ntn.operators.dev,resources=satelliteephemeris/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=ntn.operators.dev,resources=satelliteephemeris/finalizers,verbs=update
 // +kubebuilder:rbac:groups=ntn.operators.dev,resources=groundstationlifecycles,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
 // Reconcile fetches GP data, computes pass predictions, and updates status.
@@ -90,8 +93,24 @@ func (r *SatelliteEphemerisReconciler) Reconcile(ctx context.Context, req ctrl.R
 		return ctrl.Result{RequeueAfter: time.Minute}, nil
 	}
 
-	// Step 4: Fetch GP data.
-	result, fetchErr := r.Fetcher.Fetch(ctx, eph.Spec.Source.URL)
+	// Step 4: Select fetcher and load credentials if needed.
+	fetcher, fetcherErr := r.fetcherForSource(ctx, eph)
+	if fetcherErr != nil {
+		meta.SetStatusCondition(&eph.Status.Conditions, metav1.Condition{
+			Type:               ntnv1alpha1.ConditionGPDataFetched,
+			Status:             metav1.ConditionFalse,
+			Reason:             "FetcherSetupFailed",
+			Message:            fetcherErr.Error(),
+			ObservedGeneration: eph.Generation,
+		})
+		if err := r.Status().Update(ctx, eph); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: time.Minute}, nil
+	}
+
+	// Step 4b: Fetch GP data.
+	result, fetchErr := fetcher.Fetch(ctx, eph.Spec.Source.URL)
 
 	// Step 5: Handle fetch errors.
 	if fetchErr != nil {
@@ -301,6 +320,52 @@ func (r *SatelliteEphemerisReconciler) handleFetchError(
 	}
 
 	return ctrl.Result{RequeueAfter: requeueAfter}, nil
+}
+
+// fetcherForSource returns the appropriate GPFetcher for the source type.
+// For SpaceTrack, it also loads credentials from the referenced Secret.
+func (r *SatelliteEphemerisReconciler) fetcherForSource(
+	ctx context.Context, eph *ntnv1alpha1.SatelliteEphemeris,
+) (ephemeris.GPFetcher, error) {
+	switch eph.Spec.Source.Type {
+	case "CelesTrak":
+		if r.Fetcher == nil {
+			return nil, fmt.Errorf("CelesTrak fetcher is not configured")
+		}
+		return r.Fetcher, nil
+
+	case "SpaceTrack":
+		if r.SpaceTrackFetcher == nil {
+			return nil, fmt.Errorf("SpaceTrack fetcher is not configured")
+		}
+		// Load credentials from Secret.
+		creds := eph.Spec.Source.Credentials
+		if creds == nil {
+			return nil, fmt.Errorf("SpaceTrack requires credentials; set spec.source.credentials")
+		}
+		secret := &corev1.Secret{}
+		secretKey := types.NamespacedName{Namespace: eph.Namespace, Name: creds.Name}
+		if err := r.Get(ctx, secretKey, secret); err != nil {
+			return nil, fmt.Errorf("reading credentials Secret %q: %w", creds.Name, err)
+		}
+		key := creds.Key
+		if key == "" {
+			key = "password"
+		}
+		password, ok := secret.Data[key]
+		if !ok {
+			return nil, fmt.Errorf("secret %q does not contain key %q", creds.Name, key)
+		}
+		username, ok := secret.Data["username"]
+		if !ok {
+			return nil, fmt.Errorf("secret %q does not contain key %q", creds.Name, "username")
+		}
+		r.SpaceTrackFetcher.SetCredentials(string(username), string(password))
+		return r.SpaceTrackFetcher, nil
+
+	default:
+		return nil, fmt.Errorf("unsupported source type %q", eph.Spec.Source.Type)
+	}
 }
 
 // SetupWithManager sets up the controller with the Manager.
