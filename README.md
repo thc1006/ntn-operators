@@ -9,10 +9,10 @@ Kubernetes-native management framework for Non-Terrestrial Networks (NTN). Decla
 
 | CRD | Short Name | Description |
 |-----|-----------|-------------|
-| **SatelliteEphemeris** | `sateph` | Auto-fetches GP data (OMM JSON) from CelesTrak, runs SGP4 pass prediction |
-| **GroundStationLifecycle** | `gs` | Manages edge ground station nodes — health checks, firmware, K8s integration |
-| **NTNCellConfig** | `ntncc` | Configures NTN gNB cells via OCUDU/srsRAN provider (generates ConfigMap) |
-| **NTNSlice** | `nts` | Manages terrestrial-satellite slice failover, QoS mapping, session continuity |
+| **SatelliteEphemeris** | `sateph` | Auto-fetches GP data (OMM JSON) from CelesTrak or SpaceTrack, runs SGP4 pass prediction |
+| **GroundStationLifecycle** | `gs` | Manages edge ground station nodes — health checks, firmware OTA with timeout, K8s integration |
+| **NTNCellConfig** | `ntncc` | Configures NTN gNB cells via OCUDU/srsRAN provider (generates ConfigMap with OwnerReference) |
+| **NTNSlice** | `nts` | Manages terrestrial-satellite slice failover, QoS mapping, security policy, billing |
 
 ## Architecture
 
@@ -35,28 +35,38 @@ graph TB
             FE[Failover State Machine]
         end
 
+        subgraph "Observability"
+            PM[Prometheus Metrics]
+        end
+
         NC --> OP
         OP --> CM
         NS --> FE
+        SE & GS & NC & NS --> PM
     end
 
     CL[CelesTrak API] -.-> SE
+    ST[SpaceTrack API] -.-> SE
     ND[K8s Node] -.-> GS
     CM -.-> GNB[srsRAN gNB]
 ```
 
-**Provider pattern**: NTNCellConfig uses a pluggable provider interface (currently OCUDU/srsRAN). The provider generates backend-specific config and writes it to a ConfigMap that the gNB pod mounts.
+**Data sources**: SatelliteEphemeris supports CelesTrak (public, no auth) and SpaceTrack (requires credentials via K8s Secret). Both use the same OMM JSON format parsed by SGP4.
 
-**Failover engine**: NTNSlice evaluates trigger conditions (RSRP, latency, packet loss) and manages terrestrial ↔ satellite path switching with configurable switchback delay.
+**Provider pattern**: NTNCellConfig uses a pluggable provider interface (currently OCUDU/srsRAN). OAI and Aalyria providers are planned for v0.2.
+
+**Failover engine**: NTNSlice evaluates trigger conditions (RSRP, latency, packet loss) and manages terrestrial-satellite path switching with configurable switchback delay. QoS, security, and billing parameters are tracked per active path.
+
+**Validation**: CRD-level CEL validation rules enforce constraints (lat/lon range, SpaceTrack requires credentials, path priority consistency, ECEF non-zero) without webhook infrastructure.
 
 ## Quick Start
 
 ### Prerequisites
 
 - Go 1.25+
-- Kubernetes cluster (Kind, K3s, or kubeadm)
+- Kubernetes 1.29+ (for CEL validation)
 - kubectl
-- Helm v4+ (optional, for Helm-based install)
+- Helm v3.16+ (optional, for Helm-based install)
 
 ### Option A: Helm Install
 
@@ -89,11 +99,12 @@ make run        # Run controller locally (connects to current kubeconfig)
 ### Apply Sample Resources
 
 ```bash
-# Satellite constellation tracking
+# Satellite constellation tracking (CelesTrak)
 kubectl apply -f config/samples/ntn_v1alpha1_satelliteephemeris.yaml
 
-# Ground station management
+# Ground stations (Taipei + Hsinchu)
 kubectl apply -f config/samples/ntn_v1alpha1_groundstationlifecycle.yaml
+kubectl apply -f config/samples/ntn_v1alpha1_groundstationlifecycle_hsinchu.yaml
 
 # NTN cell configuration (OCUDU/srsRAN)
 kubectl apply -f config/samples/ntn_v1alpha1_ntncellconfig.yaml
@@ -124,80 +135,53 @@ kubectl get ntncellconfigs
 kubectl get ntnslices
 # NAME                         TENANT      ACTIVE PATH   FAILOVERS   AGE
 # enterprise-resilient-slice   acme-corp   terrestrial   0           5m
-
-# Inspect generated gNB config
-kubectl get configmap ocudu-ntn-ntn-cell-geo-demo -o yaml
 ```
 
-## Examples
+## Observability
 
-### SatelliteEphemeris
+### Prometheus Metrics
+
+The operator exports custom metrics at `:8443/metrics`:
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `ntn_operators_failover_total` | Counter | Failover events by slice, source/target path |
+| `ntn_operators_satellite_pass_available` | Gauge | Satellite pass window active (1/0) |
+| `ntn_operators_ground_station_health` | Gauge | Station condition status (1/0/-1) |
+| `ntn_operators_config_apply_errors_total` | Counter | Cell config apply failures |
+| `ntn_operators_gp_fetch_duration_seconds` | Histogram | GP data fetch duration |
+| `ntn_operators_gp_satellite_count` | Gauge | Satellites from latest fetch |
+
+## SpaceTrack Integration
+
+To use SpaceTrack as a data source, create a Secret with your credentials:
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: spacetrack-creds
+type: Opaque
+stringData:
+  username: your-spacetrack-username
+  password: your-spacetrack-password
+```
+
+Then reference it in the SatelliteEphemeris:
 
 ```yaml
 apiVersion: ntn.operators.dev/v1alpha1
 kind: SatelliteEphemeris
 metadata:
-  name: oneweb-constellation
+  name: oneweb-spacetrack
 spec:
   source:
-    type: CelesTrak
-    url: https://celestrak.org/NORAD/elements/gp.php?GROUP=oneweb&FORMAT=JSON
+    type: SpaceTrack
+    url: https://www.space-track.org/basicspacedata/query/class/gp/GROUP/oneweb/format/json
     refreshInterval: 4h
-  satellites:
-    constellation: oneweb
-  passPrediction:
-    groundStations:
-      - gs-taipei-01
-    minElevation: "10"
-    horizon: 24h
-```
-
-### NTNCellConfig
-
-```yaml
-apiVersion: ntn.operators.dev/v1alpha1
-kind: NTNCellConfig
-metadata:
-  name: ntn-cell-geo-demo
-spec:
-  provider:
-    type: ocudu
-    # namespace is enforced to match metadata.namespace for security
-  ntn:
-    cellSpecificKoffset: 150
-    taCommon: 0
-    ephemerisECEF:
-      posX: 20922195
-      posY: 1967783
-      posZ: 19770302
-      velX: 0
-      velY: 0
-      velZ: 0
-    payloadType: transparent
-```
-
-### NTNSlice
-
-```yaml
-apiVersion: ntn.operators.dev/v1alpha1
-kind: NTNSlice
-metadata:
-  name: enterprise-resilient-slice
-spec:
-  tenant: acme-corp
-  terrestrialPath:
-    provider: chunghwa-telecom
-    priority: primary
-  satellitePath:
-    provider: oneweb
-    ephemerisRef: oneweb-constellation
-    priority: failover
-  failoverPolicy:
-    triggers:
-      - "rsrp < -120"
-      - "latency > 200"
-    switchbackDelay: 60s
-    sessionContinuity: true
+    credentials:
+      name: spacetrack-creds
+      key: password
 ```
 
 ## Development
@@ -208,22 +192,40 @@ make manifests  # Generate CRD and RBAC YAML
 make test       # Run unit + envtest tests
 make lint       # Run golangci-lint
 make build      # Build manager binary
+make docs       # Generate API reference from CRDs
+make ko-build   # Build container image with ko (local)
+make ko-push    # Build and push multi-arch image
+make test-e2e   # Run E2E tests on Kind cluster
 ```
 
 ## Project Structure
 
 ```
-api/v1alpha1/           # CRD type definitions
+api/v1alpha1/           # CRD type definitions (with CEL validation rules)
 internal/controller/    # Reconciler implementations
-pkg/ephemeris/          # GP fetcher + SGP4 pass prediction
+pkg/ephemeris/          # CelesTrak + SpaceTrack GP fetchers, SGP4 pass prediction
 pkg/provider/ocudu/     # OCUDU/srsRAN provider (config generation)
 pkg/slice/              # Failover state machine + trigger parser
 pkg/netutil/            # SSRF-safe HTTP client
+pkg/metrics/            # Custom Prometheus metrics
 config/crd/             # Generated CRD YAML
 config/samples/         # Sample CR manifests
 dist/chart/             # Helm chart
 hack/                   # Demo and setup scripts
+docs/                   # API reference (auto-generated)
 ```
+
+## Known Limitations (v0.1)
+
+- **Metrics source**: Failover trigger metrics are read from CR annotations (`ntn.operators.dev/simulated-*`). Production UPF/Prometheus integration is planned for v0.2.
+- **Antenna health**: `AntennaReady` condition is simulated as True when the node exists. Real hardware integration requires vendor-specific agents.
+- **Session continuity**: The `sessionContinuity` field is tracked but not enforced at the data plane level.
+- **Providers**: Only OCUDU/srsRAN is implemented. OAI and Aalyria are planned for v0.2.
+- **Firmware updates**: The controller monitors node annotations for firmware versions but does not directly trigger OTA. An external agent on the node manages the actual update.
+
+## API Reference
+
+See [docs/api-reference.md](docs/api-reference.md) for the complete CRD field reference.
 
 ## Contributing
 

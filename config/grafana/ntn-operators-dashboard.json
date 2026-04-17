@@ -1,0 +1,106 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "title": "Failover Events",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "targets": [
+        {
+          "expr": "sum(rate(ntn_operators_failover_total[5m])) by (slice, to_path)",
+          "legendFormat": "{{slice}} -> {{to_path}}"
+        }
+      ]
+    },
+    {
+      "title": "Satellite Pass Availability",
+      "type": "stat",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "targets": [
+        {
+          "expr": "ntn_operators_satellite_pass_available",
+          "legendFormat": "{{ephemeris}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            { "options": { "0": { "text": "No Pass" } }, "type": "value" },
+            { "options": { "1": { "text": "Active" } }, "type": "value" }
+          ],
+          "thresholds": {
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "green", "value": 1 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "title": "Ground Station Health",
+      "type": "table",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "targets": [
+        {
+          "expr": "ntn_operators_ground_station_health",
+          "legendFormat": "{{station}} / {{condition}}",
+          "format": "table",
+          "instant": true
+        }
+      ]
+    },
+    {
+      "title": "GP Fetch Duration (p50/p95/p99)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum(rate(ntn_operators_gp_fetch_duration_seconds_bucket[5m])) by (le, source_type))",
+          "legendFormat": "p50 {{source_type}}"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(ntn_operators_gp_fetch_duration_seconds_bucket[5m])) by (le, source_type))",
+          "legendFormat": "p95 {{source_type}}"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(ntn_operators_gp_fetch_duration_seconds_bucket[5m])) by (le, source_type))",
+          "legendFormat": "p99 {{source_type}}"
+        }
+      ]
+    },
+    {
+      "title": "Satellite Count per Ephemeris",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 12, "x": 0, "y": 16 },
+      "targets": [
+        {
+          "expr": "ntn_operators_gp_satellite_count",
+          "legendFormat": "{{ephemeris}}"
+        }
+      ]
+    },
+    {
+      "title": "Config Apply Errors",
+      "type": "timeseries",
+      "gridPos": { "h": 4, "w": 12, "x": 12, "y": 16 },
+      "targets": [
+        {
+          "expr": "sum(rate(ntn_operators_config_apply_errors_total[5m])) by (config, provider)",
+          "legendFormat": "{{config}} ({{provider}})"
+        }
+      ]
+    }
+  ],
+  "schemaVersion": 39,
+  "tags": ["ntn", "satellite", "kubernetes"],
+  "templating": { "list": [] },
+  "time": { "from": "now-1h", "to": "now" },
+  "title": "NTN Operators",
+  "uid": "ntn-operators"
+}

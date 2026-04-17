@@ -109,3 +109,10 @@ certManager:
 prometheus:
   enable: false
 
+## PodDisruptionBudget for high availability.
+## Requires replicas > 1 to be effective.
+##
+podDisruptionBudget:
+  enable: false
+  minAvailable: 1
+
