@@ -16,3 +16,4 @@ vendor/
 # Test
 cover.out
 *.test
+main
