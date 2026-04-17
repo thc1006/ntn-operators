@@ -124,11 +124,12 @@ func (f *CelesTrakFetcher) Fetch(ctx context.Context, url string) (GPFetchResult
 			return GPFetchResult{}, fmt.Errorf("parsing OMM JSON: %w", err)
 		}
 
-		// Cache the new ETag and OMMs (sync.Map is safe for concurrent access).
+		// Cache OMMs before ETag so that a concurrent 304 path always
+		// finds the OMM data when it observes the new ETag.
+		f.ommCache.Store(url, omms)
 		if newETag := resp.Header.Get("ETag"); newETag != "" {
 			f.etagCache.Store(url, newETag)
 		}
-		f.ommCache.Store(url, omms)
 
 		return GPFetchResult{
 			OMMs:           omms,

@@ -79,7 +79,7 @@ func (r *NTNCellConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 				}
 				// NotFound — ConfigMap already gone, proceed to remove finalizer.
 			} else {
-				if err := r.Delete(ctx, cm); err != nil {
+				if err := r.Delete(ctx, cm); client.IgnoreNotFound(err) != nil {
 					log.Error(err, "Failed to delete ConfigMap during finalization")
 					return ctrl.Result{}, err
 				}

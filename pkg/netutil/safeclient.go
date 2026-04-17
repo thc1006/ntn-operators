@@ -74,40 +74,40 @@ var ErrPrivateIP = fmt.Errorf("connection to private/reserved IP address is bloc
 func NewSafeHTTPClient(timeout time.Duration) *http.Client {
 	dialer := &net.Dialer{Timeout: 5 * time.Second}
 
-	transport := &http.Transport{
-		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			host, port, err := net.SplitHostPort(addr)
-			if err != nil {
-				return nil, fmt.Errorf("invalid address %q: %w", addr, err)
-			}
+	// Clone DefaultTransport to preserve proxy, connection pooling, and TLS settings.
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		host, port, err := net.SplitHostPort(addr)
+		if err != nil {
+			return nil, fmt.Errorf("invalid address %q: %w", addr, err)
+		}
 
-			// Resolve DNS to get actual IP addresses.
-			ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
-			if err != nil {
-				return nil, fmt.Errorf("DNS resolution failed for %q: %w", host, err)
-			}
-			if len(ips) == 0 {
-				return nil, fmt.Errorf("DNS resolution for %q returned no addresses", host)
-			}
+		// Resolve DNS to get actual IP addresses.
+		ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+		if err != nil {
+			return nil, fmt.Errorf("DNS resolution failed for %q: %w", host, err)
+		}
+		if len(ips) == 0 {
+			return nil, fmt.Errorf("DNS resolution for %q returned no addresses", host)
+		}
 
-			// Validate ALL resolved IPs before connecting.
-			for _, ipAddr := range ips {
-				if IsPrivateIP(ipAddr.IP) {
-					return nil, fmt.Errorf("%w: %s resolves to %s", ErrPrivateIP, host, ipAddr.IP)
-				}
+		// Validate ALL resolved IPs before connecting.
+		for _, ipAddr := range ips {
+			if IsPrivateIP(ipAddr.IP) {
+				return nil, fmt.Errorf("%w: %s resolves to %s", ErrPrivateIP, host, ipAddr.IP)
 			}
+		}
 
-			// Try each resolved IP until one connects (handles dual-stack).
-			var lastErr error
-			for _, ipAddr := range ips {
-				conn, dialErr := dialer.DialContext(ctx, network, net.JoinHostPort(ipAddr.IP.String(), port))
-				if dialErr == nil {
-					return conn, nil
-				}
-				lastErr = dialErr
+		// Try each resolved IP until one connects (handles dual-stack).
+		var lastErr error
+		for _, ipAddr := range ips {
+			conn, dialErr := dialer.DialContext(ctx, network, net.JoinHostPort(ipAddr.IP.String(), port))
+			if dialErr == nil {
+				return conn, nil
 			}
-			return nil, fmt.Errorf("all resolved IPs for %q failed to connect: %w", host, lastErr)
-		},
+			lastErr = dialErr
+		}
+		return nil, fmt.Errorf("all resolved IPs for %q failed to connect: %w", host, lastErr)
 	}
 
 	return &http.Client{
