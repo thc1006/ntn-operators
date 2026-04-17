@@ -401,10 +401,12 @@ var _ = Describe("Manager", Ordered, func() {
 			Expect(err).NotTo(HaveOccurred(), "NTNCellConfig deletion should complete (finalizer cleanup)")
 
 			By("verifying ConfigMap was cleaned up")
-			cmd = exec.Command("kubectl", "get", "configmap", "ocudu-ntn-ntn-cell-geo-demo",
-				"-n", testNS, "-o", "name")
-			output, _ := utils.Run(cmd)
-			Expect(output).To(BeEmpty(), "ConfigMap should be deleted by finalizer")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "configmap", "ocudu-ntn-ntn-cell-geo-demo",
+					"-n", testNS, "-o", "name")
+				output, _ := utils.Run(cmd)
+				g.Expect(output).To(BeEmpty(), "ConfigMap should be deleted by finalizer")
+			}, 30*time.Second, 2*time.Second).Should(Succeed())
 		})
 
 		It("should reconcile SatelliteEphemeris and populate status", func() {
