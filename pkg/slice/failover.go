@@ -59,7 +59,7 @@ type Metrics struct {
 
 // Trigger represents a parsed failover trigger expression.
 type Trigger struct {
-	Metric   string // rsrp, latency, packetLoss
+	Metric   string // rsrp, terrestrialRSRP, latency, terrestrialLatency, packetLoss, terrestrialPacketLoss
 	Operator string // <, >, <=, >=
 	Value    float64
 }
@@ -156,13 +156,23 @@ func EvaluateFailover(
 		}
 	}
 
-	// If ALL triggers failed to parse, report configuration error.
-	if parseErrors > 0 && parseErrors == len(triggers) {
-		return FailoverResult{
-			Decision:   DecisionStay,
-			Reason:     fmt.Sprintf("All %d trigger expressions are invalid", parseErrors),
-			TargetPath: currentPath,
+	// Surface trigger parse errors.
+	if parseErrors > 0 {
+		if parseErrors == len(triggers) {
+			return FailoverResult{
+				Decision:   DecisionStay,
+				Reason:     fmt.Sprintf("All %d trigger expressions are invalid", parseErrors),
+				TargetPath: currentPath,
+			}
 		}
+		// Partial errors: continue evaluation but note in any result reason.
+		_ = parseErrors // used below in reason suffix
+	}
+
+	// Reason suffix for partial errors.
+	parseSuffix := ""
+	if parseErrors > 0 {
+		parseSuffix = fmt.Sprintf(" (%d of %d triggers had parse errors)", parseErrors, len(triggers))
 	}
 
 	switch currentPath {
@@ -170,21 +180,20 @@ func EvaluateFailover(
 		if !anyTriggered {
 			return FailoverResult{
 				Decision:   DecisionStay,
-				Reason:     "Terrestrial path healthy",
+				Reason:     "Terrestrial path healthy" + parseSuffix,
 				TargetPath: PathTerrestrial,
 			}
 		}
-		// Triggers fired — try to failover to satellite.
 		if !satelliteAvailable {
 			return FailoverResult{
 				Decision:   DecisionStay,
-				Reason:     "Terrestrial degraded but no satellite pass available",
+				Reason:     "Terrestrial degraded but no satellite pass available" + parseSuffix,
 				TargetPath: PathTerrestrial,
 			}
 		}
 		return FailoverResult{
 			Decision:   DecisionFailover,
-			Reason:     "Terrestrial path degraded, satellite pass available",
+			Reason:     "Terrestrial path degraded, satellite pass available" + parseSuffix,
 			TargetPath: PathSatellite,
 		}
 

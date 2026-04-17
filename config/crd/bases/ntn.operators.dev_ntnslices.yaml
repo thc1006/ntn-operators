@@ -151,6 +151,7 @@ spec:
                     type: string
                   provider:
                     description: provider is the network operator name (e.g., "chunghwa-telecom").
+                    minLength: 1
                     type: string
                 required:
                 - ephemerisRef
@@ -196,6 +197,7 @@ spec:
                     type: string
                   provider:
                     description: provider is the network operator name (e.g., "chunghwa-telecom").
+                    minLength: 1
                     type: string
                 required:
                 - priority

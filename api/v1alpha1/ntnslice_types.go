@@ -55,6 +55,7 @@ type NTNSliceSpec struct {
 // PathSpec defines a network path (terrestrial or satellite).
 type PathSpec struct {
 	// provider is the network operator name (e.g., "chunghwa-telecom").
+	// +kubebuilder:validation:MinLength=1
 	Provider string `json:"provider"`
 
 	// apn is the Access Point Name.
