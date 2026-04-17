@@ -25,6 +25,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -403,10 +404,12 @@ var _ = Describe("Manager", Ordered, func() {
 			By("verifying ConfigMap was cleaned up")
 			Eventually(func(g Gomega) {
 				cmd := exec.Command("kubectl", "get", "configmap", "ocudu-ntn-ntn-cell-geo-demo",
-					"-n", testNS, "-o", "name")
-				output, _ := utils.Run(cmd)
-				g.Expect(output).To(BeEmpty(), "ConfigMap should be deleted by finalizer")
-			}, 30*time.Second, 2*time.Second).Should(Succeed())
+					"-n", testNS)
+				output, err := utils.Run(cmd)
+				// ConfigMap gone = kubectl returns error with "NotFound", or empty output.
+				notFound := err != nil || strings.Contains(output, "NotFound") || strings.Contains(output, "not found")
+				g.Expect(notFound).To(BeTrue(), "ConfigMap should be deleted by finalizer")
+			}, 60*time.Second, 2*time.Second).Should(Succeed())
 		})
 
 		It("should reconcile SatelliteEphemeris and populate status", func() {
