@@ -155,6 +155,18 @@ type NTNSliceStatus struct {
 	// +optional
 	SessionCount int `json:"sessionCount,omitempty"`
 
+	// appliedQoS summarizes the QoS mapping in effect for the current path.
+	// +optional
+	AppliedQoS string `json:"appliedQoS,omitempty"`
+
+	// appliedEncryption is the encryption level in effect for the current path.
+	// +optional
+	AppliedEncryption string `json:"appliedEncryption,omitempty"`
+
+	// billingMode is the billing model active for the current path.
+	// +optional
+	BillingMode string `json:"billingMode,omitempty"`
+
 	// conditions represent the current state of the slice.
 	// +listType=map
 	// +listMapKey=type
@@ -166,6 +178,9 @@ type NTNSliceStatus struct {
 const (
 	ConditionPathActive    = "PathActive"
 	ConditionFailoverReady = "FailoverReady"
+	ConditionQoSApplied    = "QoSApplied"
+	ConditionSecured       = "Secured"
+	ConditionBillingActive = "BillingActive"
 )
 
 // +kubebuilder:object:root=true

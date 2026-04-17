@@ -556,6 +556,122 @@ var _ = Describe("NTNSlice Controller", func() {
 		})
 	})
 
+	// fullSpec returns a spec with QoS, Security, and Billing configured.
+	fullSpec := func() ntnv1alpha1.NTNSliceSpec {
+		spec := baseSpec()
+		spec.QoSMapping = &ntnv1alpha1.QoSMapping{
+			Terrestrial5QI:   9,
+			SatelliteQCI:     "interactive",
+			MaxLatencyBudget: metav1.Duration{Duration: 150 * time.Millisecond},
+		}
+		spec.Security = &ntnv1alpha1.SecurityPolicy{
+			EncryptionLevel: "AES-256",
+			AuthOnHandover:  "re-authenticate",
+		}
+		spec.Billing = &ntnv1alpha1.BillingSpec{
+			TerrestrialRate: "per-volume",
+			SatelliteRate:   "per-minute",
+		}
+		return spec
+	}
+
+	Context("When QoS, Security, and Billing are configured", func() {
+		BeforeEach(func() {
+			slice := &ntnv1alpha1.NTNSlice{
+				ObjectMeta: metav1.ObjectMeta{Name: sliceName, Namespace: namespace},
+				Spec:       fullSpec(),
+			}
+			Expect(k8sClient.Create(context.Background(), slice)).To(Succeed())
+		})
+		AfterEach(func() { deleteSlice() })
+
+		It("should set QoS/Security/Billing status and conditions on terrestrial path", func() {
+			reconciler := newReconciler()
+			_, err := reconciler.Reconcile(context.Background(), reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			updated := &ntnv1alpha1.NTNSlice{}
+			Expect(k8sClient.Get(context.Background(), typeNamespacedName, updated)).To(Succeed())
+
+			// QoS status should reflect terrestrial settings.
+			Expect(updated.Status.AppliedQoS).To(ContainSubstring("5QI=9"))
+			qosCond := meta.FindStatusCondition(updated.Status.Conditions, ntnv1alpha1.ConditionQoSApplied)
+			Expect(qosCond).NotTo(BeNil())
+			Expect(qosCond.Status).To(Equal(metav1.ConditionTrue))
+
+			// Security status.
+			Expect(updated.Status.AppliedEncryption).To(Equal("AES-256"))
+			secCond := meta.FindStatusCondition(updated.Status.Conditions, ntnv1alpha1.ConditionSecured)
+			Expect(secCond).NotTo(BeNil())
+			Expect(secCond.Status).To(Equal(metav1.ConditionTrue))
+
+			// Billing status.
+			Expect(updated.Status.BillingMode).To(Equal("per-volume"))
+			billCond := meta.FindStatusCondition(updated.Status.Conditions, ntnv1alpha1.ConditionBillingActive)
+			Expect(billCond).NotTo(BeNil())
+			Expect(billCond.Status).To(Equal(metav1.ConditionTrue))
+		})
+	})
+
+	Context("When QoS/Security/Billing are not configured", func() {
+		BeforeEach(func() { createSlice() }) // baseSpec has no QoS/Security/Billing
+		AfterEach(func() { deleteSlice() })
+
+		It("should not set QoS/Security/Billing conditions", func() {
+			reconciler := newReconciler()
+			_, err := reconciler.Reconcile(context.Background(), reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			updated := &ntnv1alpha1.NTNSlice{}
+			Expect(k8sClient.Get(context.Background(), typeNamespacedName, updated)).To(Succeed())
+
+			Expect(updated.Status.AppliedQoS).To(BeEmpty())
+			Expect(updated.Status.AppliedEncryption).To(BeEmpty())
+			Expect(updated.Status.BillingMode).To(BeEmpty())
+
+			Expect(meta.FindStatusCondition(updated.Status.Conditions, ntnv1alpha1.ConditionQoSApplied)).To(BeNil())
+			Expect(meta.FindStatusCondition(updated.Status.Conditions, ntnv1alpha1.ConditionSecured)).To(BeNil())
+			Expect(meta.FindStatusCondition(updated.Status.Conditions, ntnv1alpha1.ConditionBillingActive)).To(BeNil())
+		})
+	})
+
+	Context("When on satellite path with Billing configured", func() {
+		BeforeEach(func() {
+			slice := &ntnv1alpha1.NTNSlice{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: sliceName, Namespace: namespace,
+					Annotations: map[string]string{
+						"ntn.operators.dev/simulated-rsrp": "-130",
+					},
+				},
+				Spec: fullSpec(),
+			}
+			Expect(k8sClient.Create(context.Background(), slice)).To(Succeed())
+		})
+		AfterEach(func() { deleteSlice() })
+
+		It("should switch billing mode to satellite rate after failover", func() {
+			eph := createEphemerisWithPass(true)
+			DeferCleanup(func() { _ = k8sClient.Delete(context.Background(), eph) })
+
+			reconciler := newReconciler()
+			_, err := reconciler.Reconcile(context.Background(), reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			updated := &ntnv1alpha1.NTNSlice{}
+			Expect(k8sClient.Get(context.Background(), typeNamespacedName, updated)).To(Succeed())
+			Expect(updated.Status.ActivePathType).To(Equal(pathSatellite))
+			Expect(updated.Status.BillingMode).To(Equal("per-minute")) // satellite rate
+			Expect(updated.Status.AppliedQoS).To(ContainSubstring("interactive"))
+		})
+	})
+
 	Context("SatelliteEphemeris with empty pass windows", func() {
 		BeforeEach(func() { createSlice() })
 		AfterEach(func() { deleteSlice() })

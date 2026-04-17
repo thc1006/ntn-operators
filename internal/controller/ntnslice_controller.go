@@ -157,12 +157,79 @@ func (r *NTNSliceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		ObservedGeneration: ns.Generation,
 	})
 
-	// Step 7: Update status.
+	// Step 7: Apply QoS, Security, and Billing status based on active path.
+	activePath := ns.Status.ActivePathType
+	r.applyQoSStatus(ns, activePath)
+	r.applySecurityStatus(ns)
+	r.applyBillingStatus(ns, activePath)
+
+	// Step 8: Update status.
 	if err := r.Status().Update(ctx, ns); err != nil {
 		return ctrl.Result{}, err
 	}
 
 	return ctrl.Result{RequeueAfter: sliceRequeueInterval}, nil
+}
+
+// applyQoSStatus sets the QoS-related status fields and conditions.
+func (r *NTNSliceReconciler) applyQoSStatus(ns *ntnv1alpha1.NTNSlice, activePath string) {
+	if ns.Spec.QoSMapping == nil {
+		ns.Status.AppliedQoS = ""
+		return
+	}
+	qos := ns.Spec.QoSMapping
+	switch activePath {
+	case "satellite":
+		ns.Status.AppliedQoS = fmt.Sprintf("QCI=%s, maxLatency=%s", qos.SatelliteQCI, qos.MaxLatencyBudget.Duration)
+	default:
+		ns.Status.AppliedQoS = fmt.Sprintf("5QI=%d, maxLatency=%s", qos.Terrestrial5QI, qos.MaxLatencyBudget.Duration)
+	}
+	meta.SetStatusCondition(&ns.Status.Conditions, metav1.Condition{
+		Type:               ntnv1alpha1.ConditionQoSApplied,
+		Status:             metav1.ConditionTrue,
+		Reason:             "QoSConfigured",
+		Message:            ns.Status.AppliedQoS,
+		ObservedGeneration: ns.Generation,
+	})
+}
+
+// applySecurityStatus sets the security-related status fields and conditions.
+func (r *NTNSliceReconciler) applySecurityStatus(ns *ntnv1alpha1.NTNSlice) {
+	if ns.Spec.Security == nil {
+		ns.Status.AppliedEncryption = ""
+		return
+	}
+	ns.Status.AppliedEncryption = ns.Spec.Security.EncryptionLevel
+	msg := fmt.Sprintf("Encryption: %s, handover auth: %s",
+		ns.Spec.Security.EncryptionLevel, ns.Spec.Security.AuthOnHandover)
+	meta.SetStatusCondition(&ns.Status.Conditions, metav1.Condition{
+		Type:               ntnv1alpha1.ConditionSecured,
+		Status:             metav1.ConditionTrue,
+		Reason:             "SecurityConfigured",
+		Message:            msg,
+		ObservedGeneration: ns.Generation,
+	})
+}
+
+// applyBillingStatus sets the billing-related status fields and conditions.
+func (r *NTNSliceReconciler) applyBillingStatus(ns *ntnv1alpha1.NTNSlice, activePath string) {
+	if ns.Spec.Billing == nil {
+		ns.Status.BillingMode = ""
+		return
+	}
+	switch activePath {
+	case "satellite":
+		ns.Status.BillingMode = ns.Spec.Billing.SatelliteRate
+	default:
+		ns.Status.BillingMode = ns.Spec.Billing.TerrestrialRate
+	}
+	meta.SetStatusCondition(&ns.Status.Conditions, metav1.Condition{
+		Type:               ntnv1alpha1.ConditionBillingActive,
+		Status:             metav1.ConditionTrue,
+		Reason:             "BillingConfigured",
+		Message:            fmt.Sprintf("Billing mode: %s (%s path)", ns.Status.BillingMode, activePath),
+		ObservedGeneration: ns.Generation,
+	})
 }
 
 // readMetrics reads simulated metrics from CR annotations.
