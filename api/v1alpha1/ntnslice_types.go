@@ -22,6 +22,8 @@ import (
 
 // NTNSliceSpec defines the desired state of an NTN network slice
 // with terrestrial-satellite failover policy.
+// +kubebuilder:validation:XValidation:rule="self.terrestrialPath.priority == 'primary'",message="terrestrialPath.priority must be 'primary'"
+// +kubebuilder:validation:XValidation:rule="self.satellitePath.priority == 'failover'",message="satellitePath.priority must be 'failover'"
 type NTNSliceSpec struct {
 	// tenant is the organization or entity that owns this slice.
 	// +kubebuilder:validation:MinLength=1
@@ -81,7 +83,9 @@ type SatellitePathSpec struct {
 type FailoverPolicy struct {
 	// triggers defines conditions that initiate failover (OR logic).
 	// Format: "metric operator value" (e.g., "rsrp < -120").
+	// Validated at runtime by the failover engine (pkg/slice.ParseTrigger).
 	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=10
 	Triggers []string `json:"triggers"`
 
 	// switchbackDelay is how long to wait after terrestrial recovers

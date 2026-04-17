@@ -1,4 +1,5 @@
 {{- if .Values.crd.enable }}
+---
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
@@ -141,6 +142,9 @@ spec:
                 - type
                 - url
                 type: object
+                x-kubernetes-validations:
+                - message: SpaceTrack source type requires credentials (spec.source.credentials)
+                  rule: self.type != 'SpaceTrack' || has(self.credentials)
             required:
             - source
             type: object

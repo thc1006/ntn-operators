@@ -22,6 +22,7 @@ import (
 
 // EphemerisSource defines where to fetch GP (General Perturbations) data from.
 // Supports CelesTrak OMM JSON and Space-Track.org OMM JSON formats.
+// +kubebuilder:validation:XValidation:rule="self.type != 'SpaceTrack' || has(self.credentials)",message="SpaceTrack source type requires credentials (spec.source.credentials)"
 type EphemerisSource struct {
 	// type is the source type. Supported: "CelesTrak", "SpaceTrack".
 	// +kubebuilder:validation:Enum=CelesTrak;SpaceTrack

@@ -426,8 +426,8 @@ var _ = Describe("SatelliteEphemeris Controller", func() {
 		})
 	})
 
-	Context("When source type is SpaceTrack with no credentials ref", func() {
-		BeforeEach(func() {
+	Context("When source type is SpaceTrack with no credentials ref (CEL validation)", func() {
+		It("should reject CR creation at API level", func() {
 			resource := &ntnv1alpha1.SatelliteEphemeris{
 				ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: namespace},
 				Spec: ntnv1alpha1.SatelliteEphemerisSpec{
@@ -435,32 +435,13 @@ var _ = Describe("SatelliteEphemeris Controller", func() {
 						Type:            "SpaceTrack",
 						URL:             "https://www.space-track.org/basicspacedata/query/class/gp/format/json",
 						RefreshInterval: metav1.Duration{Duration: 4 * time.Hour},
-						// No Credentials set.
+						// No Credentials set — CEL rule should reject this.
 					},
 				},
 			}
-			Expect(k8sClient.Create(context.Background(), resource)).To(Succeed())
-		})
-		AfterEach(func() { deleteResource() })
-
-		It("should set FetcherSetupFailed when credentials ref is nil", func() {
-			stFetcher := ephemeris.NewSpaceTrackFetcher(&http.Client{}, "https://fake")
-			reconciler := newReconciler(&mockGPFetcher{})
-			reconciler.SpaceTrackFetcher = stFetcher
-
-			result, err := reconciler.Reconcile(context.Background(), reconcile.Request{
-				NamespacedName: typeNamespacedName,
-			})
-			Expect(err).NotTo(HaveOccurred())
-			Expect(result.RequeueAfter).To(Equal(time.Minute))
-
-			updated := &ntnv1alpha1.SatelliteEphemeris{}
-			Expect(k8sClient.Get(context.Background(), typeNamespacedName, updated)).To(Succeed())
-
-			cond := meta.FindStatusCondition(updated.Status.Conditions, ntnv1alpha1.ConditionGPDataFetched)
-			Expect(cond).NotTo(BeNil())
-			Expect(cond.Reason).To(Equal("FetcherSetupFailed"))
-			Expect(cond.Message).To(ContainSubstring("requires credentials"))
+			err := k8sClient.Create(context.Background(), resource)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("credentials"))
 		})
 	})
 

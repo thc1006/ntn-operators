@@ -51,6 +51,7 @@ type ProviderRef struct {
 }
 
 // NTNParams defines the core NTN radio parameters.
+// +kubebuilder:validation:XValidation:rule="self.ephemerisECEF.posX != 0 || self.ephemerisECEF.posY != 0 || self.ephemerisECEF.posZ != 0",message="ephemerisECEF position must not be all zeros"
 type NTNParams struct {
 	// cellSpecificKoffset sets the cell-specific k-offset for NTN (0-1023).
 	// +kubebuilder:validation:Minimum=0

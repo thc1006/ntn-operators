@@ -42,6 +42,8 @@ type HardwareSpec struct {
 // GeoLocation defines a geographic position.
 // Coordinates are strings to avoid float serialization issues across languages.
 // Example: lat: "25.0330", lon: "121.5654", alt: "15"
+// +kubebuilder:validation:XValidation:rule="double(self.lat) >= -90.0 && double(self.lat) <= 90.0",message="lat must be between -90 and 90"
+// +kubebuilder:validation:XValidation:rule="double(self.lon) >= -180.0 && double(self.lon) <= 180.0",message="lon must be between -180 and 180"
 type GeoLocation struct {
 	// lat is the latitude in decimal degrees (string, e.g., "25.0330").
 	// +kubebuilder:validation:Pattern=`^-?[0-9]+\.?[0-9]*$`

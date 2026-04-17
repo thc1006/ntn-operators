@@ -98,8 +98,10 @@ spec:
                     description: |-
                       triggers defines conditions that initiate failover (OR logic).
                       Format: "metric operator value" (e.g., "rsrp < -120").
+                      Validated at runtime by the failover engine (pkg/slice.ParseTrigger).
                     items:
                       type: string
+                    maxItems: 10
                     minItems: 1
                     type: array
                 required:
@@ -209,6 +211,11 @@ spec:
             - tenant
             - terrestrialPath
             type: object
+            x-kubernetes-validations:
+            - message: terrestrialPath.priority must be 'primary'
+              rule: self.terrestrialPath.priority == 'primary'
+            - message: satellitePath.priority must be 'failover'
+              rule: self.satellitePath.priority == 'failover'
           status:
             description: NTNSliceStatus defines the observed state of NTNSlice.
             properties:
