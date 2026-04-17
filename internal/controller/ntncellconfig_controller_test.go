@@ -402,4 +402,26 @@ var _ = Describe("NTNCellConfig Controller", func() {
 			_ = k8sClient.Delete(context.Background(), cm)
 		})
 	})
+
+	// --- CEL validation tests ---
+
+	Context("CEL: ephemerisECEF must not be all zeros", func() {
+		It("should reject creation when all ECEF positions are zero", func() {
+			cr := &ntnv1alpha1.NTNCellConfig{
+				ObjectMeta: metav1.ObjectMeta{Name: "cel-test-ecef", Namespace: namespace},
+				Spec: ntnv1alpha1.NTNCellConfigSpec{
+					Provider: ntnv1alpha1.ProviderRef{Type: "ocudu"},
+					NTN: ntnv1alpha1.NTNParams{
+						EphemerisECEF: ntnv1alpha1.EphemerisECEF{
+							PosX: 0, PosY: 0, PosZ: 0,
+						},
+						PayloadType: "transparent",
+					},
+				},
+			}
+			err := k8sClient.Create(context.Background(), cr)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("zeros"))
+		})
+	})
 })

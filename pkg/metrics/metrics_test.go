@@ -30,7 +30,7 @@ func TestMetricsRegistered(t *testing.T) {
 	SatellitePassAvailable.With(prometheus.Labels{"ephemeris": "_"}).Set(0)
 	GroundStationHealth.With(prometheus.Labels{"station": "_", "condition": "_"}).Set(0)
 	ConfigApplyErrorsTotal.With(prometheus.Labels{"config": "_", "provider": "_"}).Add(0)
-	GPFetchDuration.With(prometheus.Labels{"source_type": "_"}).Observe(0)
+	GPFetchDuration.With(prometheus.Labels{"source_type": "_", "status": "_"}).Observe(0)
 	GPSatelliteCount.With(prometheus.Labels{"ephemeris": "_"}).Set(0)
 
 	families, err := metrics.Registry.Gather()
@@ -86,7 +86,7 @@ func TestGPSatelliteCountGauge(t *testing.T) {
 }
 
 func TestGPFetchDurationObserve(t *testing.T) {
-	GPFetchDuration.With(prometheus.Labels{"source_type": "CelesTrak"}).Observe(1.5)
+	GPFetchDuration.With(prometheus.Labels{"source_type": "CelesTrak", "status": "success"}).Observe(1.5)
 
 	// Gather from registry to verify histogram was recorded.
 	families, err := metrics.Registry.Gather()

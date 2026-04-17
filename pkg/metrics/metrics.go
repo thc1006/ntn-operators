@@ -65,9 +65,9 @@ var (
 		prometheus.HistogramOpts{
 			Name:    "ntn_operators_gp_fetch_duration_seconds",
 			Help:    "Duration of GP data fetch operations.",
-			Buckets: prometheus.DefBuckets,
+			Buckets: []float64{0.5, 1, 2, 5, 10, 20, 30, 60},
 		},
-		[]string{"source_type"},
+		[]string{"source_type", "status"},
 	)
 
 	// GPSatelliteCount reports the number of satellites in the latest GP fetch.

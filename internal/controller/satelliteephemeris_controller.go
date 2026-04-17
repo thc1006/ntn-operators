@@ -100,7 +100,11 @@ func (r *SatelliteEphemerisReconciler) Reconcile(ctx context.Context, req ctrl.R
 	// Step 4b: Fetch GP data (with duration metric).
 	fetchStart := time.Now()
 	result, fetchErr := fetcher.Fetch(ctx, eph.Spec.Source.URL)
-	ntnmetrics.GPFetchDuration.With(prometheus.Labels{"source_type": eph.Spec.Source.Type}).Observe(time.Since(fetchStart).Seconds())
+	fetchStatus := "success"
+	if fetchErr != nil {
+		fetchStatus = "error"
+	}
+	ntnmetrics.GPFetchDuration.With(prometheus.Labels{"source_type": eph.Spec.Source.Type, "status": fetchStatus}).Observe(time.Since(fetchStart).Seconds())
 
 	// Step 5: Handle fetch errors.
 	if fetchErr != nil {

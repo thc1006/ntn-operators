@@ -25,6 +25,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -37,6 +38,7 @@ import (
 
 	ntnv1alpha1 "github.com/thc1006/ntn-operators/api/v1alpha1"
 	"github.com/thc1006/ntn-operators/pkg/lifecycle"
+	ntnmetrics "github.com/thc1006/ntn-operators/pkg/metrics"
 )
 
 const (
@@ -118,7 +120,29 @@ func (r *GroundStationLifecycleReconciler) Reconcile(ctx context.Context, req ct
 		}
 	}
 
-	// Step 6: Update status.
+	// Step 6: Update health metrics.
+	stationKey := gs.Namespace + "." + gs.Name
+	for _, condType := range []string{
+		ntnv1alpha1.ConditionK8sNodeReady,
+		ntnv1alpha1.ConditionAntennaReady,
+		ntnv1alpha1.ConditionRFLinkHealthy,
+	} {
+		cond := meta.FindStatusCondition(gs.Status.Conditions, condType)
+		val := float64(-1) // Unknown
+		if cond != nil {
+			switch cond.Status {
+			case metav1.ConditionTrue:
+				val = 1
+			case metav1.ConditionFalse:
+				val = 0
+			}
+		}
+		ntnmetrics.GroundStationHealth.With(prometheus.Labels{
+			"station": stationKey, "condition": condType,
+		}).Set(val)
+	}
+
+	// Step 7: Update status.
 	if err := r.Status().Update(ctx, gs); err != nil {
 		return ctrl.Result{}, err
 	}

@@ -672,6 +672,36 @@ var _ = Describe("NTNSlice Controller", func() {
 		})
 	})
 
+	// --- CEL validation tests ---
+
+	Context("CEL: terrestrialPath.priority must be primary", func() {
+		It("should reject creation when terrestrial priority is failover", func() {
+			spec := baseSpec()
+			spec.TerrestrialPath.Priority = "failover"
+			slice := &ntnv1alpha1.NTNSlice{
+				ObjectMeta: metav1.ObjectMeta{Name: "cel-test-priority", Namespace: namespace},
+				Spec:       spec,
+			}
+			err := k8sClient.Create(context.Background(), slice)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("primary"))
+		})
+	})
+
+	Context("CEL: satellitePath.priority must be failover", func() {
+		It("should reject creation when satellite priority is primary", func() {
+			spec := baseSpec()
+			spec.SatellitePath.Priority = "primary"
+			slice := &ntnv1alpha1.NTNSlice{
+				ObjectMeta: metav1.ObjectMeta{Name: "cel-test-sat-priority", Namespace: namespace},
+				Spec:       spec,
+			}
+			err := k8sClient.Create(context.Background(), slice)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("failover"))
+		})
+	})
+
 	Context("SatelliteEphemeris with empty pass windows", func() {
 		BeforeEach(func() { createSlice() })
 		AfterEach(func() { deleteSlice() })

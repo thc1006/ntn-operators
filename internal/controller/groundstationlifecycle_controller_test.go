@@ -430,4 +430,36 @@ var _ = Describe("GroundStationLifecycle Controller", func() {
 			Expect(result.RequeueAfter).To(Equal(1 * time.Minute))
 		})
 	})
+
+	// --- CEL validation tests ---
+
+	Context("CEL: lat out of range", func() {
+		It("should reject creation when lat > 90", func() {
+			gs := &ntnv1alpha1.GroundStationLifecycle{
+				ObjectMeta: metav1.ObjectMeta{Name: "cel-test-lat", Namespace: namespace},
+				Spec: ntnv1alpha1.GroundStationLifecycleSpec{
+					Hardware:   ntnv1alpha1.HardwareSpec{Vendor: "test", Model: "test"},
+					Deployment: ntnv1alpha1.DeploymentSpec{Location: ntnv1alpha1.GeoLocation{Lat: "91.0", Lon: "0"}},
+				},
+			}
+			err := k8sClient.Create(context.Background(), gs)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("lat"))
+		})
+	})
+
+	Context("CEL: lon out of range", func() {
+		It("should reject creation when lon < -180", func() {
+			gs := &ntnv1alpha1.GroundStationLifecycle{
+				ObjectMeta: metav1.ObjectMeta{Name: "cel-test-lon", Namespace: namespace},
+				Spec: ntnv1alpha1.GroundStationLifecycleSpec{
+					Hardware:   ntnv1alpha1.HardwareSpec{Vendor: "test", Model: "test"},
+					Deployment: ntnv1alpha1.DeploymentSpec{Location: ntnv1alpha1.GeoLocation{Lat: "0", Lon: "-181.0"}},
+				},
+			}
+			err := k8sClient.Create(context.Background(), gs)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("lon"))
+		})
+	})
 })
