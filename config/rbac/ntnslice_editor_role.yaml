@@ -1,7 +1,7 @@
 # This rule is not used by the project ntn-operators itself.
 # It is provided to allow the cluster admin to help manage permissions for users.
 #
-# Grants permissions to create, update, and delete resources within the ntn.operators.dev.
+# Grants permissions to create, update, and delete ntnslices within the ntn.operators.dev API group.
 # This role is intended for users who need to manage these resources
 # but should not control RBAC or manage permissions for others.
 

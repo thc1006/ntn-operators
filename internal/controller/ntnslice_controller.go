@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"math"
 	"strconv"
 	"time"
 
@@ -176,17 +177,17 @@ func (r *NTNSliceReconciler) readMetrics(ns *ntnv1alpha1.NTNSlice) slice.Metrics
 		return m
 	}
 	if v, ok := ns.Annotations["ntn.operators.dev/simulated-rsrp"]; ok {
-		if f, err := strconv.ParseFloat(v, 64); err == nil {
+		if f, err := strconv.ParseFloat(v, 64); err == nil && !math.IsNaN(f) && !math.IsInf(f, 0) {
 			m.RSRP = f
 		}
 	}
 	if v, ok := ns.Annotations["ntn.operators.dev/simulated-latency"]; ok {
-		if f, err := strconv.ParseFloat(v, 64); err == nil {
+		if f, err := strconv.ParseFloat(v, 64); err == nil && !math.IsNaN(f) && !math.IsInf(f, 0) {
 			m.LatencyMs = f
 		}
 	}
 	if v, ok := ns.Annotations["ntn.operators.dev/simulated-packet-loss"]; ok {
-		if f, err := strconv.ParseFloat(v, 64); err == nil {
+		if f, err := strconv.ParseFloat(v, 64); err == nil && !math.IsNaN(f) && !math.IsInf(f, 0) {
 			m.PacketLossPercent = f
 		}
 	}

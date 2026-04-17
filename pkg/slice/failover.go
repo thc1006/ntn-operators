@@ -18,6 +18,7 @@ package slice
 
 import (
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -76,6 +77,9 @@ func ParseTrigger(s string) (Trigger, error) {
 			value, err := strconv.ParseFloat(valueStr, 64)
 			if err != nil {
 				return Trigger{}, fmt.Errorf("invalid trigger value %q: %w", valueStr, err)
+			}
+			if math.IsNaN(value) || math.IsInf(value, 0) {
+				return Trigger{}, fmt.Errorf("non-finite trigger value %q in %q", valueStr, s)
 			}
 			if metric == "" {
 				return Trigger{}, fmt.Errorf("empty metric in trigger %q", s)
