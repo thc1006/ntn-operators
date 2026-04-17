@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"net/http"
 	"sync"
 	"time"
 
@@ -344,6 +345,122 @@ var _ = Describe("SatelliteEphemeris Controller", func() {
 			Expect(cond).NotTo(BeNil())
 			Expect(cond.Status).To(Equal(metav1.ConditionFalse))
 			Expect(cond.Reason).To(Equal("FetcherSetupFailed"))
+		})
+	})
+
+	// --- SpaceTrack fetcherForSource Tests ---
+
+	Context("When source type is SpaceTrack but no SpaceTrackFetcher configured", func() {
+		BeforeEach(func() {
+			resource := &ntnv1alpha1.SatelliteEphemeris{
+				ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: namespace},
+				Spec: ntnv1alpha1.SatelliteEphemerisSpec{
+					Source: ntnv1alpha1.EphemerisSource{
+						Type:            "SpaceTrack",
+						URL:             "https://www.space-track.org/basicspacedata/query/class/gp/format/json",
+						RefreshInterval: metav1.Duration{Duration: 4 * time.Hour},
+						Credentials:     &ntnv1alpha1.SecretReference{Name: "st-creds"},
+					},
+				},
+			}
+			Expect(k8sClient.Create(context.Background(), resource)).To(Succeed())
+		})
+		AfterEach(func() { deleteResource() })
+
+		It("should set FetcherSetupFailed when SpaceTrackFetcher is nil", func() {
+			reconciler := newReconciler(&mockGPFetcher{})
+			// SpaceTrackFetcher is nil by default.
+
+			result, err := reconciler.Reconcile(context.Background(), reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(Equal(time.Minute))
+
+			updated := &ntnv1alpha1.SatelliteEphemeris{}
+			Expect(k8sClient.Get(context.Background(), typeNamespacedName, updated)).To(Succeed())
+
+			cond := meta.FindStatusCondition(updated.Status.Conditions, ntnv1alpha1.ConditionGPDataFetched)
+			Expect(cond).NotTo(BeNil())
+			Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+			Expect(cond.Reason).To(Equal("FetcherSetupFailed"))
+			Expect(cond.Message).To(ContainSubstring("SpaceTrack fetcher is not configured"))
+		})
+	})
+
+	Context("When source type is SpaceTrack but credentials Secret missing", func() {
+		BeforeEach(func() {
+			resource := &ntnv1alpha1.SatelliteEphemeris{
+				ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: namespace},
+				Spec: ntnv1alpha1.SatelliteEphemerisSpec{
+					Source: ntnv1alpha1.EphemerisSource{
+						Type:            "SpaceTrack",
+						URL:             "https://www.space-track.org/basicspacedata/query/class/gp/format/json",
+						RefreshInterval: metav1.Duration{Duration: 4 * time.Hour},
+						Credentials:     &ntnv1alpha1.SecretReference{Name: "nonexistent-secret"},
+					},
+				},
+			}
+			Expect(k8sClient.Create(context.Background(), resource)).To(Succeed())
+		})
+		AfterEach(func() { deleteResource() })
+
+		It("should set FetcherSetupFailed when Secret doesn't exist", func() {
+			stFetcher := ephemeris.NewSpaceTrackFetcher(&http.Client{}, "https://fake")
+			reconciler := newReconciler(&mockGPFetcher{})
+			reconciler.SpaceTrackFetcher = stFetcher
+
+			result, err := reconciler.Reconcile(context.Background(), reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(Equal(time.Minute))
+
+			updated := &ntnv1alpha1.SatelliteEphemeris{}
+			Expect(k8sClient.Get(context.Background(), typeNamespacedName, updated)).To(Succeed())
+
+			cond := meta.FindStatusCondition(updated.Status.Conditions, ntnv1alpha1.ConditionGPDataFetched)
+			Expect(cond).NotTo(BeNil())
+			Expect(cond.Reason).To(Equal("FetcherSetupFailed"))
+			Expect(cond.Message).To(ContainSubstring("reading credentials Secret"))
+		})
+	})
+
+	Context("When source type is SpaceTrack with no credentials ref", func() {
+		BeforeEach(func() {
+			resource := &ntnv1alpha1.SatelliteEphemeris{
+				ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: namespace},
+				Spec: ntnv1alpha1.SatelliteEphemerisSpec{
+					Source: ntnv1alpha1.EphemerisSource{
+						Type:            "SpaceTrack",
+						URL:             "https://www.space-track.org/basicspacedata/query/class/gp/format/json",
+						RefreshInterval: metav1.Duration{Duration: 4 * time.Hour},
+						// No Credentials set.
+					},
+				},
+			}
+			Expect(k8sClient.Create(context.Background(), resource)).To(Succeed())
+		})
+		AfterEach(func() { deleteResource() })
+
+		It("should set FetcherSetupFailed when credentials ref is nil", func() {
+			stFetcher := ephemeris.NewSpaceTrackFetcher(&http.Client{}, "https://fake")
+			reconciler := newReconciler(&mockGPFetcher{})
+			reconciler.SpaceTrackFetcher = stFetcher
+
+			result, err := reconciler.Reconcile(context.Background(), reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(Equal(time.Minute))
+
+			updated := &ntnv1alpha1.SatelliteEphemeris{}
+			Expect(k8sClient.Get(context.Background(), typeNamespacedName, updated)).To(Succeed())
+
+			cond := meta.FindStatusCondition(updated.Status.Conditions, ntnv1alpha1.ConditionGPDataFetched)
+			Expect(cond).NotTo(BeNil())
+			Expect(cond.Reason).To(Equal("FetcherSetupFailed"))
+			Expect(cond.Message).To(ContainSubstring("requires credentials"))
 		})
 	})
 

@@ -23,6 +23,7 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -33,6 +34,7 @@ import (
 
 	ntnv1alpha1 "github.com/thc1006/ntn-operators/api/v1alpha1"
 	"github.com/thc1006/ntn-operators/pkg/provider"
+	"github.com/thc1006/ntn-operators/pkg/provider/ocudu"
 )
 
 var _ = Describe("NTNCellConfig Controller", func() {
@@ -365,6 +367,39 @@ var _ = Describe("NTNCellConfig Controller", func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(result.RequeueAfter).To(Equal(5 * time.Minute))
 			Expect(mock.ApplyCalls).To(Equal(1))
+		})
+	})
+
+	Context("When provider succeeds (OwnerReference verification)", func() {
+		BeforeEach(func() { createCR() })
+		AfterEach(func() { deleteCR() })
+
+		It("should set OwnerReference on generated ConfigMap", func() {
+			// Use real OCUDU provider so ConfigMap actually gets created.
+			realProvider := ocudu.NewProvider(k8sClient)
+			reconciler := &NTNCellConfigReconciler{
+				Client:   k8sClient,
+				Scheme:   k8sClient.Scheme(),
+				Recorder: events.NewFakeRecorder(10),
+				Provider: realProvider,
+			}
+			_, err := reconcileWithFinalizer(reconciler)
+			Expect(err).NotTo(HaveOccurred())
+
+			// Verify the ConfigMap has OwnerReference pointing to the CR.
+			cm := &corev1.ConfigMap{}
+			cmKey := types.NamespacedName{
+				Name:      "ocudu-ntn-" + resourceName,
+				Namespace: namespace,
+			}
+			Expect(k8sClient.Get(context.Background(), cmKey, cm)).To(Succeed())
+
+			cr := &ntnv1alpha1.NTNCellConfig{}
+			Expect(k8sClient.Get(context.Background(), typeNamespacedName, cr)).To(Succeed())
+			Expect(metav1.IsControlledBy(cm, cr)).To(BeTrue())
+
+			// Clean up ConfigMap.
+			_ = k8sClient.Delete(context.Background(), cm)
 		})
 	})
 })

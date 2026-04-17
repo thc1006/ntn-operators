@@ -188,7 +188,7 @@ func (f *SpaceTrackFetcher) fetchGP(ctx context.Context, gpURL string, now time.
 			FetchedAt:      now,
 		}, nil
 
-	case http.StatusTooManyRequests:
+	case http.StatusForbidden, http.StatusTooManyRequests:
 		return GPFetchResult{}, ErrRateLimited
 
 	case http.StatusUnauthorized:
