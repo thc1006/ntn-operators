@@ -109,7 +109,9 @@ func (p *Provider) ApplyCellConfig(ctx context.Context, crName string, spec *ntn
 }
 
 // GetCellStatus derives status by reading the ConfigMap in the given namespace.
-func (p *Provider) GetCellStatus(ctx context.Context, crName, namespace string) (*ntnv1alpha1.NTNCellConfigStatus, error) {
+func (p *Provider) GetCellStatus(
+	ctx context.Context, crName, namespace string,
+) (*ntnv1alpha1.NTNCellConfigStatus, error) {
 	status := &ntnv1alpha1.NTNCellConfigStatus{}
 
 	if namespace == "" {

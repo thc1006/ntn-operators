@@ -28,6 +28,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	ntnv1alpha1 "github.com/thc1006/ntn-operators/api/v1alpha1"
@@ -69,6 +70,11 @@ var _ = Describe("NTNCellConfig Controller", func() {
 			return
 		}
 		Expect(err).NotTo(HaveOccurred())
+		// Remove finalizer if present (otherwise CR stays in Terminating).
+		if controllerutil.ContainsFinalizer(cr, "ntn.operators.dev/configmap-cleanup") {
+			controllerutil.RemoveFinalizer(cr, "ntn.operators.dev/configmap-cleanup")
+			Expect(k8sClient.Update(context.Background(), cr)).To(Succeed())
+		}
 		Expect(k8sClient.Delete(context.Background(), cr)).To(Succeed())
 	}
 

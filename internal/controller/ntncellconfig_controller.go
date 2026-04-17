@@ -29,8 +29,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
+	corev1 "k8s.io/api/core/v1"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+
 	ntnv1alpha1 "github.com/thc1006/ntn-operators/api/v1alpha1"
 	"github.com/thc1006/ntn-operators/pkg/provider"
+	"github.com/thc1006/ntn-operators/pkg/provider/ocudu"
 )
 
 // NTNCellConfigReconciler reconciles a NTNCellConfig object
@@ -57,7 +61,40 @@ func (r *NTNCellConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	// Step 2: Guard against nil provider.
+	// Step 2: Handle finalizer for ConfigMap cleanup on deletion.
+	finalizerName := "ntn.operators.dev/configmap-cleanup"
+	if cc.DeletionTimestamp != nil {
+		if controllerutil.ContainsFinalizer(cc, finalizerName) {
+			// Delete the ConfigMap.
+			cm := &corev1.ConfigMap{}
+			cmKey := client.ObjectKey{
+				Namespace: cc.Namespace,
+				Name:      ocudu.ConfigMapNameFor(cc.Name),
+			}
+			if err := r.Get(ctx, cmKey, cm); err == nil {
+				if err := r.Delete(ctx, cm); err != nil {
+					log.Error(err, "Failed to delete ConfigMap during finalization")
+					return ctrl.Result{}, err
+				}
+				log.Info("Deleted ConfigMap during finalization", "configmap", cmKey)
+			}
+			controllerutil.RemoveFinalizer(cc, finalizerName)
+			if err := r.Update(ctx, cc); err != nil {
+				return ctrl.Result{}, err
+			}
+		}
+		return ctrl.Result{}, nil
+	}
+
+	// Add finalizer if not present.
+	if !controllerutil.ContainsFinalizer(cc, finalizerName) {
+		controllerutil.AddFinalizer(cc, finalizerName)
+		if err := r.Update(ctx, cc); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+
+	// Step 3: Guard against nil provider.
 	if r.Provider == nil {
 		cc.Status.AppliedKoffset = 0
 		cc.Status.ConfigMapRef = ""
