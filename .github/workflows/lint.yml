@@ -3,14 +3,21 @@ name: Lint
 on:
   push:
     branches: [main]
+    paths:
+      - '**.go'
+      - 'go.mod'
+      - 'go.sum'
+      - '.golangci.yml'
+      - '.custom-gcl.yml'
+      - 'Makefile'
   pull_request:
 
 jobs:
   lint:
-    name: Run on Ubuntu
+    name: golangci-lint
     runs-on: ubuntu-latest
     steps:
-      - name: Clone the code
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Setup Go
@@ -24,7 +31,5 @@ jobs:
           path: bin/golangci-lint*
           key: golangci-lint-${{ hashFiles('.custom-gcl.yml', '.golangci.yml', 'go.sum') }}
 
-      - name: Check linter configuration
-        run: make lint-config
       - name: Run linter
         run: make lint

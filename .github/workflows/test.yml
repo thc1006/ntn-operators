@@ -3,14 +3,20 @@ name: Tests
 on:
   push:
     branches: [main]
+    paths:
+      - '**.go'
+      - 'go.mod'
+      - 'go.sum'
+      - 'config/crd/**'
+      - 'Makefile'
   pull_request:
 
 jobs:
   test:
-    name: Run on Ubuntu
+    name: Unit + envtest
     runs-on: ubuntu-latest
     steps:
-      - name: Clone the code
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Setup Go
@@ -24,5 +30,5 @@ jobs:
           path: bin/k8s
           key: envtest-${{ runner.os }}-${{ hashFiles('Makefile', 'go.mod', 'go.sum') }}
 
-      - name: Running Tests
+      - name: Run tests
         run: make test
