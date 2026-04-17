@@ -22,6 +22,9 @@ resources:
 # default, aiding admins in cluster management. Those roles are
 # not used by the ntn-operators itself. You can comment the following lines
 # if you do not want those helpers be installed with your Project.
+- ntnslice_admin_role.yaml
+- ntnslice_editor_role.yaml
+- ntnslice_viewer_role.yaml
 - ntncellconfig_admin_role.yaml
 - ntncellconfig_editor_role.yaml
 - ntncellconfig_viewer_role.yaml

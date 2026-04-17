@@ -35,6 +35,7 @@ rules:
   resources:
   - groundstationlifecycles
   - ntncellconfigs
+  - ntnslices
   - satelliteephemeris
   verbs:
   - create
@@ -49,6 +50,7 @@ rules:
   resources:
   - groundstationlifecycles/finalizers
   - ntncellconfigs/finalizers
+  - ntnslices/finalizers
   - satelliteephemeris/finalizers
   verbs:
   - update
@@ -57,6 +59,7 @@ rules:
   resources:
   - groundstationlifecycles/status
   - ntncellconfigs/status
+  - ntnslices/status
   - satelliteephemeris/status
   verbs:
   - get

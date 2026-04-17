@@ -5,6 +5,7 @@ resources:
 - bases/ntn.operators.dev_satelliteephemeris.yaml
 - bases/ntn.operators.dev_groundstationlifecycles.yaml
 - bases/ntn.operators.dev_ntncellconfigs.yaml
+- bases/ntn.operators.dev_ntnslices.yaml
 # +kubebuilder:scaffold:crdkustomizeresource
 
 patches:
