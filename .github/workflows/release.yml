@@ -28,6 +28,12 @@ jobs:
         with:
           go-version-file: go.mod
 
+      - name: Run tests before release
+        run: make test
+
+      - name: Run lint before release
+        run: make lint
+
       - name: Setup ko
         uses: ko-build/setup-ko@v0.9
 

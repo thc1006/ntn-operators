@@ -386,6 +386,10 @@ var _ = Describe("Manager", Ordered, func() {
 				filepath.Join("config", "samples", "ntn_v1alpha1_ntncellconfig.yaml"))
 			_, err := utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred())
+			DeferCleanup(func() {
+				cmd := exec.Command("kubectl", "delete", "-n", testNS, "ntncellconfigs", "ntn-cell-geo-demo", "--ignore-not-found", "--timeout=30s")
+				_, _ = utils.Run(cmd)
+			})
 
 			By("waiting for ConfigApplied=True")
 			Eventually(func(g Gomega) {

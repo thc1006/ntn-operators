@@ -25,6 +25,7 @@ cleanup() {
     kill -- -"$CONTROLLER_PID" 2>/dev/null || true
     kubectl delete -f "$SAMPLES_DIR/ntn_v1alpha1_ntnslice.yaml" --ignore-not-found 2>/dev/null
     kubectl delete -f "$SAMPLES_DIR/ntn_v1alpha1_ntncellconfig.yaml" --ignore-not-found 2>/dev/null
+    kubectl delete -f "$SAMPLES_DIR/ntn_v1alpha1_groundstationlifecycle_hsinchu.yaml" --ignore-not-found 2>/dev/null
     kubectl delete -f "$SAMPLES_DIR/ntn_v1alpha1_groundstationlifecycle.yaml" --ignore-not-found 2>/dev/null
     kubectl delete -f "$SAMPLES_DIR/ntn_v1alpha1_satelliteephemeris.yaml" --ignore-not-found 2>/dev/null
     echo "Done."

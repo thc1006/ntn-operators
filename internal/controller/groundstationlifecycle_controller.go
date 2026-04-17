@@ -50,6 +50,10 @@ const (
 	// firmwareVersionAnnotation is the Node annotation for current firmware version.
 	firmwareVersionAnnotation = "ntn.operators.dev/firmware-version"
 
+	// firmwareUpdateTimeout is the maximum duration an update can be in Updating phase
+	// before being marked as timed out and transitioned to Degraded.
+	firmwareUpdateTimeout = 30 * time.Minute
+
 	// availableFirmwareAnnotation is the Node annotation for available firmware version.
 	availableFirmwareAnnotation = "ntn.operators.dev/available-firmware-version"
 )
@@ -377,7 +381,7 @@ func (r *GroundStationLifecycleReconciler) reconcileFirmware(
 	// Handle update timeout (Updating → Degraded if stuck > 30 min).
 	if gs.Status.Phase == ntnv1alpha1.PhaseUpdating && gs.Status.FirmwareUpdateStarted != nil {
 		startedAt := gs.Status.FirmwareUpdateStarted.Time
-		if r.now().Sub(startedAt) > 30*time.Minute {
+		if r.now().Sub(startedAt) > firmwareUpdateTimeout {
 			meta.SetStatusCondition(&gs.Status.Conditions, metav1.Condition{
 				Type:               ntnv1alpha1.ConditionFirmwareUpToDate,
 				Status:             metav1.ConditionFalse,
