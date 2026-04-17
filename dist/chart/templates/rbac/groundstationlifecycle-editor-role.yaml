@@ -1,0 +1,30 @@
+{{- if .Values.rbacHelpers.enable }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+    app.kubernetes.io/name: {{ include "ntn-operators.name" . }}
+    helm.sh/chart: {{ .Chart.Name }}-{{ .Chart.Version | replace "+" "_" }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  name: {{ include "ntn-operators.resourceName" (dict "suffix" "groundstationlifecycle-editor-role" "context" $) }}
+rules:
+- apiGroups:
+  - ntn.operators.dev
+  resources:
+  - groundstationlifecycles
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - ntn.operators.dev
+  resources:
+  - groundstationlifecycles/status
+  verbs:
+  - get
+{{- end }}

@@ -1,0 +1,24 @@
+NTN Operators {{ .Chart.AppVersion }} has been installed.
+
+Release: {{ .Release.Name }}
+Namespace: {{ .Release.Namespace }}
+
+Custom Resource Definitions:
+  - SatelliteEphemeris (sateph)  — satellite orbit tracking via CelesTrak OMM
+  - GroundStationLifecycle (gs)  — ground station node management
+  - NTNCellConfig (ncc)          — OCUDU/srsRAN gNB NTN cell configuration
+  - NTNSlice (nts)               — terrestrial-satellite slice failover
+
+Verify the installation:
+
+  kubectl get pods -n {{ .Release.Namespace }}
+  kubectl get crd | grep ntn.operators.dev
+
+Apply a sample resource:
+
+  kubectl apply -f https://raw.githubusercontent.com/thc1006/ntn-operators/main/config/samples/ntn_v1alpha1_satelliteephemeris.yaml
+
+Learn more:
+
+  helm status {{ .Release.Name }} -n {{ .Release.Namespace }}
+  helm get all {{ .Release.Name }} -n {{ .Release.Namespace }}

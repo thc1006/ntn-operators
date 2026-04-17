@@ -1,0 +1,43 @@
+# Security Policy
+
+## Reporting a Vulnerability
+
+If you discover a security vulnerability in NTN K8s Operators, please report it responsibly.
+
+**Do NOT open a public GitHub issue for security vulnerabilities.**
+
+Instead, please email: **caake2025@gmail.com**
+
+Include:
+- Description of the vulnerability
+- Steps to reproduce
+- Potential impact
+- Suggested fix (if any)
+
+## Response Timeline
+
+- **Acknowledgment**: Within 48 hours of report
+- **Assessment**: Within 7 days
+- **Fix**: Targeted within 30 days for critical issues
+
+## Supported Versions
+
+| Version | Supported |
+|---------|-----------|
+| 0.1.x   | Yes       |
+
+## Security Measures
+
+This project implements the following security practices:
+
+- **SSRF prevention**: All outbound HTTP clients validate resolved IPs against private ranges at the TCP dial level (see `pkg/netutil/safeclient.go`)
+- **Namespace isolation**: Controllers enforce that provider operations stay within the CR's own namespace
+- **Read-only filesystem**: Container runs with `readOnlyRootFilesystem: true`
+- **Non-root execution**: Container runs as UID 65532 (distroless nonroot)
+- **Minimal capabilities**: All Linux capabilities are dropped
+- **Input validation**: CRD webhook validation (planned for v0.2)
+- **Dependency scanning**: Dependabot enabled for Go modules
+
+## Disclosure Policy
+
+We follow a coordinated disclosure model. After a fix is released, we will publish a security advisory on GitHub with credit to the reporter.

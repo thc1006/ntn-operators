@@ -1,0 +1,66 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "ntn-operators.resourceName" (dict "suffix" "manager-role" "context" $) }}
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - configmaps
+  verbs:
+  - create
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
+- apiGroups:
+  - ""
+  resources:
+  - nodes
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - ntn.operators.dev
+  resources:
+  - groundstationlifecycles
+  - ntncellconfigs
+  - ntnslices
+  - satelliteephemeris
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - ntn.operators.dev
+  resources:
+  - groundstationlifecycles/finalizers
+  - ntncellconfigs/finalizers
+  - ntnslices/finalizers
+  - satelliteephemeris/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - ntn.operators.dev
+  resources:
+  - groundstationlifecycles/status
+  - ntncellconfigs/status
+  - ntnslices/status
+  - satelliteephemeris/status
+  verbs:
+  - get
+  - patch
+  - update
