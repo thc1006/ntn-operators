@@ -1,4 +1,5 @@
 {{- if .Values.crd.enable }}
+---
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
@@ -221,6 +222,18 @@ spec:
                 - terrestrial
                 - satellite
                 - unavailable
+                type: string
+              appliedEncryption:
+                description: appliedEncryption is the encryption level in effect for
+                  the current path.
+                type: string
+              appliedQoS:
+                description: appliedQoS summarizes the QoS mapping in effect for the
+                  current path.
+                type: string
+              billingMode:
+                description: billingMode is the billing model active for the current
+                  path.
                 type: string
               conditions:
                 description: conditions represent the current state of the slice.
