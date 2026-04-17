@@ -91,11 +91,9 @@ func (r *NTNCellConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, nil
 	}
 
-	// Step 4: Default namespace to CR namespace if not set.
+	// Step 4: Force provider namespace to CR namespace (prevents cross-namespace writes).
 	spec := cc.Spec.DeepCopy()
-	if spec.Provider.Namespace == "" {
-		spec.Provider.Namespace = cc.Namespace
-	}
+	spec.Provider.Namespace = cc.Namespace
 
 	// Step 5: Apply configuration via provider.
 	log.Info("Applying NTN cell configuration",

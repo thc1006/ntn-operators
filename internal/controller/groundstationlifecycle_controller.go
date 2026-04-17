@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -40,6 +41,8 @@ import (
 
 const (
 	// groundStationLabel is the Node label used to match a GroundStationLifecycle CR.
+	// Value format: "<namespace>.<name>" to prevent cross-namespace collision.
+	// Uses "." as separator since "/" is not valid in K8s label values.
 	groundStationLabel = "ntn.operators.dev/groundstation"
 
 	// firmwareVersionAnnotation is the Node annotation for current firmware version.
@@ -89,7 +92,7 @@ func (r *GroundStationLifecycleReconciler) Reconcile(ctx context.Context, req ct
 	requeueAfter := r.healthCheckInterval(gs)
 
 	// Step 2: Find matching Node.
-	node, err := r.findMatchingNode(ctx, gs.Name)
+	node, err := r.findMatchingNode(ctx, gs.Namespace, gs.Name)
 	if err != nil {
 		log.Error(err, "Failed to find matching node")
 	}
@@ -132,10 +135,11 @@ func (r *GroundStationLifecycleReconciler) healthCheckInterval(gs *ntnv1alpha1.G
 	return 30 * time.Second
 }
 
-// findMatchingNode finds a Node labeled ntn.operators.dev/groundstation=<name>.
-func (r *GroundStationLifecycleReconciler) findMatchingNode(ctx context.Context, gsName string) (*corev1.Node, error) {
+// findMatchingNode finds a Node labeled ntn.operators.dev/groundstation=<namespace>.<name>.
+func (r *GroundStationLifecycleReconciler) findMatchingNode(ctx context.Context, namespace, gsName string) (*corev1.Node, error) {
+	labelValue := namespace + "." + gsName
 	var nodeList corev1.NodeList
-	if err := r.List(ctx, &nodeList, client.MatchingLabels{groundStationLabel: gsName}); err != nil {
+	if err := r.List(ctx, &nodeList, client.MatchingLabels{groundStationLabel: labelValue}); err != nil {
 		return nil, fmt.Errorf("listing nodes: %w", err)
 	}
 	switch len(nodeList.Items) {
@@ -144,7 +148,7 @@ func (r *GroundStationLifecycleReconciler) findMatchingNode(ctx context.Context,
 	case 1:
 		return &nodeList.Items[0], nil
 	default:
-		return nil, &ambiguousNodeError{count: len(nodeList.Items), gsName: gsName}
+		return nil, &ambiguousNodeError{count: len(nodeList.Items), gsName: namespace + "." + gsName}
 	}
 }
 
@@ -384,7 +388,8 @@ func (r *GroundStationLifecycleReconciler) reconcileFirmware(
 
 // checkHTTPEndpoint performs an HTTP GET and returns true if 2xx.
 // Returns true when HTTPClient is nil (skip check, assume healthy).
-// Only http:// and https:// schemes are allowed to reduce attack surface.
+// SSRF protection: HTTPClient should be created via netutil.NewSafeHTTPClient
+// which validates resolved IPs at TCP dial level. Scheme check is defense in depth.
 func (r *GroundStationLifecycleReconciler) checkHTTPEndpoint(ctx context.Context, endpoint string) bool {
 	if r.HTTPClient == nil {
 		return true // no client configured, skip check
@@ -448,24 +453,18 @@ func (r *GroundStationLifecycleReconciler) nodeToGroundStation(
 	if !ok {
 		return nil
 	}
-	gsName, found := node.Labels[groundStationLabel]
+	labelValue, found := node.Labels[groundStationLabel]
 	if !found {
 		return nil
 	}
-	// GroundStationLifecycle is namespaced; list all and match by name.
-	var gsList ntnv1alpha1.GroundStationLifecycleList
-	if err := r.List(ctx, &gsList); err != nil {
-		log := logf.FromContext(ctx)
-		log.Error(err, "Failed to list GroundStationLifecycle for node mapper")
-		return nil
+	// Label format: "<namespace>.<name>". Parse directly.
+	parts := strings.SplitN(labelValue, ".", 2)
+	if len(parts) != 2 {
+		return nil // invalid label format
 	}
-	var requests []ctrl.Request
-	for _, gs := range gsList.Items {
-		if gs.Name == gsName {
-			requests = append(requests, ctrl.Request{
-				NamespacedName: client.ObjectKeyFromObject(&gs),
-			})
-		}
-	}
-	return requests
+	gsNamespace, gsName := parts[0], parts[1]
+
+	return []ctrl.Request{{
+		NamespacedName: client.ObjectKey{Namespace: gsNamespace, Name: gsName},
+	}}
 }

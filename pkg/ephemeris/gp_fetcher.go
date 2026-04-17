@@ -60,9 +60,8 @@ type GPFetcher interface {
 // upstream data has not changed.
 type CelesTrakFetcher struct {
 	httpClient *http.Client
-	mu         sync.Mutex
-	etagCache  map[string]string     // url -> last ETag
-	ommCache   map[string][]sgp4.OMM // url -> last parsed OMMs
+	etagCache  sync.Map // url -> string (ETag)
+	ommCache   sync.Map // url -> []sgp4.OMM
 }
 
 // NewCelesTrakFetcher creates a new fetcher with the given HTTP client.
@@ -72,8 +71,6 @@ func NewCelesTrakFetcher(httpClient *http.Client) *CelesTrakFetcher {
 	}
 	return &CelesTrakFetcher{
 		httpClient: httpClient,
-		etagCache:  make(map[string]string),
-		ommCache:   make(map[string][]sgp4.OMM),
 	}
 }
 
@@ -88,12 +85,8 @@ func (f *CelesTrakFetcher) Fetch(ctx context.Context, url string) (GPFetchResult
 	req.Header.Set("User-Agent", "ntn-operators/0.1")
 
 	// Set conditional GET header if we have a cached ETag.
-	f.mu.Lock()
-	etag := f.etagCache[url]
-	f.mu.Unlock()
-
-	if etag != "" {
-		req.Header.Set("If-None-Match", etag)
+	if etag, ok := f.etagCache.Load(url); ok {
+		req.Header.Set("If-None-Match", etag.(string))
 	}
 
 	resp, err := f.httpClient.Do(req)
@@ -106,9 +99,10 @@ func (f *CelesTrakFetcher) Fetch(ctx context.Context, url string) (GPFetchResult
 
 	switch resp.StatusCode {
 	case http.StatusNotModified:
-		f.mu.Lock()
-		cached := f.ommCache[url]
-		f.mu.Unlock()
+		var cached []sgp4.OMM
+		if v, ok := f.ommCache.Load(url); ok {
+			cached = v.([]sgp4.OMM)
+		}
 		return GPFetchResult{
 			OMMs:           cached,
 			SatelliteCount: len(cached),
@@ -130,13 +124,11 @@ func (f *CelesTrakFetcher) Fetch(ctx context.Context, url string) (GPFetchResult
 			return GPFetchResult{}, fmt.Errorf("parsing OMM JSON: %w", err)
 		}
 
-		// Cache the new ETag and OMMs.
-		f.mu.Lock()
+		// Cache the new ETag and OMMs (sync.Map is safe for concurrent access).
 		if newETag := resp.Header.Get("ETag"); newETag != "" {
-			f.etagCache[url] = newETag
+			f.etagCache.Store(url, newETag)
 		}
-		f.ommCache[url] = omms
-		f.mu.Unlock()
+		f.ommCache.Store(url, omms)
 
 		return GPFetchResult{
 			OMMs:           omms,

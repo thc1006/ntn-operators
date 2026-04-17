@@ -71,7 +71,7 @@ var _ = Describe("GroundStationLifecycle Controller", func() {
 		node := &corev1.Node{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:   nodeName,
-				Labels: map[string]string{groundStationLabel: gsName},
+				Labels: map[string]string{groundStationLabel: namespace + "." + gsName},
 				Annotations: map[string]string{
 					firmwareVersionAnnotation:   "2.3.0",
 					availableFirmwareAnnotation: "2.3.1",
@@ -212,7 +212,7 @@ var _ = Describe("GroundStationLifecycle Controller", func() {
 			node2 := &corev1.Node{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:   "edge-node-02",
-					Labels: map[string]string{groundStationLabel: gsName},
+					Labels: map[string]string{groundStationLabel: namespace + "." + gsName},
 				},
 			}
 			Expect(k8sClient.Create(context.Background(), node2)).To(Succeed())
