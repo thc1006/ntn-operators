@@ -29,10 +29,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
+	"github.com/prometheus/client_golang/prometheus"
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	ntnv1alpha1 "github.com/thc1006/ntn-operators/api/v1alpha1"
+	ntnmetrics "github.com/thc1006/ntn-operators/pkg/metrics"
 	"github.com/thc1006/ntn-operators/pkg/provider"
 	"github.com/thc1006/ntn-operators/pkg/provider/ocudu"
 )
@@ -151,6 +153,9 @@ func (r *NTNCellConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 
 	if err := r.Provider.ApplyCellConfig(ctx, cc.Name, spec); err != nil {
 		log.Error(err, "Failed to apply cell config")
+		ntnmetrics.ConfigApplyErrorsTotal.With(prometheus.Labels{
+			"config": cc.Name, "provider": spec.Provider.Type,
+		}).Inc()
 		cc.Status.AppliedKoffset = 0
 		cc.Status.ConfigMapRef = ""
 		meta.SetStatusCondition(&cc.Status.Conditions, metav1.Condition{

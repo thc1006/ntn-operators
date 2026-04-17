@@ -34,7 +34,10 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
+	"github.com/prometheus/client_golang/prometheus"
+
 	ntnv1alpha1 "github.com/thc1006/ntn-operators/api/v1alpha1"
+	ntnmetrics "github.com/thc1006/ntn-operators/pkg/metrics"
 	"github.com/thc1006/ntn-operators/pkg/slice"
 )
 
@@ -114,10 +117,20 @@ func (r *NTNSliceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	previousPath := string(currentPath)
 	ns.Status.ActivePathType = string(result.TargetPath)
 
+	// Update satellite availability metric.
+	if satelliteAvailable {
+		ntnmetrics.SatellitePassAvailable.With(prometheus.Labels{"ephemeris": ns.Spec.SatellitePath.EphemerisRef}).Set(1)
+	} else {
+		ntnmetrics.SatellitePassAvailable.With(prometheus.Labels{"ephemeris": ns.Spec.SatellitePath.EphemerisRef}).Set(0)
+	}
+
 	switch result.Decision {
 	case slice.DecisionFailover:
 		ns.Status.FailoverCount++
 		ns.Status.LastFailover = &metav1.Time{Time: now}
+		ntnmetrics.FailoverTotal.With(prometheus.Labels{
+			"slice": ns.Name, "from_path": previousPath, "to_path": string(result.TargetPath),
+		}).Inc()
 		log.Info("Failover triggered", "from", previousPath, "to", result.TargetPath, "reason", result.Reason)
 		if r.Recorder != nil {
 			r.Recorder.Eventf(ns, nil, "Warning", "FailoverTriggered", "FailoverTriggered",

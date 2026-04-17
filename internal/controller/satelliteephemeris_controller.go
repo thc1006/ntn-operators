@@ -35,8 +35,11 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
+	"github.com/prometheus/client_golang/prometheus"
+
 	ntnv1alpha1 "github.com/thc1006/ntn-operators/api/v1alpha1"
 	"github.com/thc1006/ntn-operators/pkg/ephemeris"
+	ntnmetrics "github.com/thc1006/ntn-operators/pkg/metrics"
 )
 
 const minRefreshInterval = 2 * time.Hour
@@ -94,8 +97,10 @@ func (r *SatelliteEphemerisReconciler) Reconcile(ctx context.Context, req ctrl.R
 		return ctrl.Result{RequeueAfter: time.Minute}, nil
 	}
 
-	// Step 4b: Fetch GP data.
+	// Step 4b: Fetch GP data (with duration metric).
+	fetchStart := time.Now()
 	result, fetchErr := fetcher.Fetch(ctx, eph.Spec.Source.URL)
+	ntnmetrics.GPFetchDuration.With(prometheus.Labels{"source_type": eph.Spec.Source.Type}).Observe(time.Since(fetchStart).Seconds())
 
 	// Step 5: Handle fetch errors.
 	if fetchErr != nil {
@@ -123,6 +128,7 @@ func (r *SatelliteEphemerisReconciler) Reconcile(ctx context.Context, req ctrl.R
 		log.Info("Fetched GP data successfully", "satelliteCount", result.SatelliteCount)
 		eph.Status.SatelliteCount = result.SatelliteCount
 		eph.Status.LastUpdated = &metav1.Time{Time: result.FetchedAt}
+		ntnmetrics.GPSatelliteCount.With(prometheus.Labels{"ephemeris": eph.Name}).Set(float64(result.SatelliteCount))
 
 		meta.SetStatusCondition(&eph.Status.Conditions, metav1.Condition{
 			Type:               ntnv1alpha1.ConditionGPDataFetched,
