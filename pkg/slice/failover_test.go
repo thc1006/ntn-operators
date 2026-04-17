@@ -204,17 +204,18 @@ func TestEvaluateFailover_MultipleTriggers_ORLogic(t *testing.T) {
 	}
 }
 
-func TestEvaluateFailover_UnknownPath_Initialize(t *testing.T) {
+func TestEvaluateFailover_EmptyPath_NormalizesToTerrestrial(t *testing.T) {
+	// Empty path normalized to terrestrial, healthy → stay.
 	result := EvaluateFailover(
 		"", triggers,
 		Metrics{RSRP: -90, LatencyMs: 20, PacketLossPercent: 0.1},
 		true, 60*time.Second, time.Time{}, now,
 	)
-	if result.Decision != DecisionSwitchback {
-		t.Errorf("expected Switchback (initialize), got %s: %s", result.Decision, result.Reason)
+	if result.Decision != DecisionStay {
+		t.Errorf("expected Stay (normalized to terrestrial, healthy), got %s: %s", result.Decision, result.Reason)
 	}
 	if result.TargetPath != PathTerrestrial {
-		t.Errorf("expected terrestrial initialization, got %s", result.TargetPath)
+		t.Errorf("expected terrestrial, got %s", result.TargetPath)
 	}
 }
 
@@ -240,14 +241,18 @@ func TestEvaluateFailover_AllTriggersInvalid(t *testing.T) {
 	}
 }
 
-func TestEvaluateFailover_UnknownPath_BothDegraded(t *testing.T) {
+func TestEvaluateFailover_EmptyPath_Degraded_Failover(t *testing.T) {
+	// Empty path normalized to terrestrial, triggers fire, satellite available → failover.
 	result := EvaluateFailover(
 		"", triggers,
 		Metrics{RSRP: -130, LatencyMs: 300, PacketLossPercent: 10},
-		false, // no satellite either
+		true,
 		60*time.Second, time.Time{}, now,
 	)
-	if result.TargetPath != PathUnavailable {
-		t.Errorf("expected unavailable, got %s", result.TargetPath)
+	if result.Decision != DecisionFailover {
+		t.Errorf("expected Failover, got %s: %s", result.Decision, result.Reason)
+	}
+	if result.TargetPath != PathSatellite {
+		t.Errorf("expected satellite, got %s", result.TargetPath)
 	}
 }
