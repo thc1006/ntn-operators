@@ -17,6 +17,7 @@ limitations under the License.
 package slice
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -192,6 +193,28 @@ func TestEvaluateFailover_UnknownPath_Initialize(t *testing.T) {
 	}
 	if result.TargetPath != PathTerrestrial {
 		t.Errorf("expected terrestrial initialization, got %s", result.TargetPath)
+	}
+}
+
+func TestParseTrigger_EmptyMetric(t *testing.T) {
+	_, err := ParseTrigger("< -120")
+	if err == nil {
+		t.Fatal("expected error for empty metric")
+	}
+}
+
+func TestEvaluateFailover_AllTriggersInvalid(t *testing.T) {
+	result := EvaluateFailover(
+		PathTerrestrial,
+		[]string{"invalid", "also bad", "nope"},
+		Metrics{RSRP: -130},
+		true, 60*time.Second, time.Time{}, now,
+	)
+	if result.Decision != DecisionStay {
+		t.Errorf("expected Stay for all invalid triggers, got %s", result.Decision)
+	}
+	if !strings.Contains(result.Reason, "invalid") {
+		t.Errorf("expected reason to mention invalid, got %q", result.Reason)
 	}
 }
 

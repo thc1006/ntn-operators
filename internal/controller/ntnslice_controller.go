@@ -30,6 +30,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	ntnv1alpha1 "github.com/thc1006/ntn-operators/api/v1alpha1"
 	"github.com/thc1006/ntn-operators/pkg/slice"
@@ -131,11 +132,25 @@ func (r *NTNSliceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	}
 
 	// Step 6: Set PathActive condition.
+	// Map decision to CamelCase reason for K8s API convention.
+	reasonMap := map[slice.Decision]string{
+		slice.DecisionStay:       "Stay",
+		slice.DecisionFailover:   "Failover",
+		slice.DecisionSwitchback: "Switchback",
+	}
+	pathReason := reasonMap[result.Decision]
+
+	pathStatus := metav1.ConditionTrue
+	if result.TargetPath == slice.PathUnavailable {
+		pathStatus = metav1.ConditionFalse
+		pathReason = "Unavailable"
+	}
+
 	pathMsg := fmt.Sprintf("Active on %s path: %s", ns.Status.ActivePathType, result.Reason)
 	meta.SetStatusCondition(&ns.Status.Conditions, metav1.Condition{
 		Type:               ntnv1alpha1.ConditionPathActive,
-		Status:             metav1.ConditionTrue,
-		Reason:             string(result.Decision),
+		Status:             pathStatus,
+		Reason:             pathReason,
 		Message:            pathMsg,
 		ObservedGeneration: ns.Generation,
 	})
@@ -212,9 +227,36 @@ func (r *NTNSliceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&ntnv1alpha1.NTNSlice{}).
 		Watches(&ntnv1alpha1.SatelliteEphemeris{},
-			handler.EnqueueRequestForOwner(mgr.GetScheme(), mgr.GetRESTMapper(),
-				&ntnv1alpha1.NTNSlice{}),
+			handler.EnqueueRequestsFromMapFunc(r.ephemerisToSlice),
 		).
 		Named("ntnslice").
 		Complete(r)
+}
+
+// ephemerisToSlice maps a SatelliteEphemeris change to all NTNSlices
+// that reference it via spec.satellitePath.ephemerisRef.
+func (r *NTNSliceReconciler) ephemerisToSlice(
+	ctx context.Context, obj client.Object,
+) []reconcile.Request {
+	eph, ok := obj.(*ntnv1alpha1.SatelliteEphemeris)
+	if !ok {
+		return nil
+	}
+
+	var sliceList ntnv1alpha1.NTNSliceList
+	if err := r.List(ctx, &sliceList, client.InNamespace(eph.Namespace)); err != nil {
+		log := logf.FromContext(ctx)
+		log.Error(err, "Failed to list NTNSlices for ephemeris mapper")
+		return nil
+	}
+
+	var requests []reconcile.Request
+	for _, s := range sliceList.Items {
+		if s.Spec.SatellitePath.EphemerisRef == eph.Name {
+			requests = append(requests, reconcile.Request{
+				NamespacedName: client.ObjectKeyFromObject(&s),
+			})
+		}
+	}
+	return requests
 }

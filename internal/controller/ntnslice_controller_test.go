@@ -205,6 +205,31 @@ var _ = Describe("NTNSlice Controller", func() {
 		})
 	})
 
+	Context("When ephemeris changes and slice references it", func() {
+		BeforeEach(func() { createSlice() })
+		AfterEach(func() { deleteSlice() })
+
+		It("should map ephemeris to referencing slices", func() {
+			reconciler := newReconciler()
+
+			eph := &ntnv1alpha1.SatelliteEphemeris{
+				ObjectMeta: metav1.ObjectMeta{Name: "oneweb-constellation", Namespace: namespace},
+				Spec: ntnv1alpha1.SatelliteEphemerisSpec{
+					Source: ntnv1alpha1.EphemerisSource{
+						Type: "CelesTrak", URL: "https://test",
+						RefreshInterval: metav1.Duration{Duration: 4 * time.Hour},
+					},
+				},
+			}
+			Expect(k8sClient.Create(context.Background(), eph)).To(Succeed())
+			DeferCleanup(func() { _ = k8sClient.Delete(context.Background(), eph) })
+
+			requests := reconciler.ephemerisToSlice(context.Background(), eph)
+			Expect(requests).To(HaveLen(1))
+			Expect(requests[0].Name).To(Equal(sliceName))
+		})
+	})
+
 	Context("When resource does not exist", func() {
 		It("should return without error", func() {
 			reconciler := newReconciler()

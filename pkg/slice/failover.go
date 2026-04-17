@@ -77,6 +77,9 @@ func ParseTrigger(s string) (Trigger, error) {
 			if err != nil {
 				return Trigger{}, fmt.Errorf("invalid trigger value %q: %w", valueStr, err)
 			}
+			if metric == "" {
+				return Trigger{}, fmt.Errorf("empty metric in trigger %q", s)
+			}
 			return Trigger{Metric: metric, Operator: op, Value: value}, nil
 		}
 	}
@@ -115,7 +118,7 @@ func (t Trigger) Evaluate(m Metrics) bool {
 //
 // Parameters:
 //   - currentPath: the currently active path
-//   - triggers: parsed from spec.failoverPolicy.triggers
+//   - triggers: raw trigger expressions from spec (e.g., "rsrp < -120")
 //   - metrics: current terrestrial path quality
 //   - satelliteAvailable: whether a satellite pass window is active
 //   - switchbackDelay: minimum time before switching back
@@ -132,14 +135,25 @@ func EvaluateFailover(
 ) FailoverResult {
 	// Parse and evaluate all triggers (OR logic).
 	anyTriggered := false
+	parseErrors := 0
 	for _, triggerStr := range triggers {
 		trigger, err := ParseTrigger(triggerStr)
 		if err != nil {
-			continue // skip unparseable triggers
+			parseErrors++
+			continue
 		}
 		if trigger.Evaluate(metrics) {
 			anyTriggered = true
 			break
+		}
+	}
+
+	// If ALL triggers failed to parse, report configuration error.
+	if parseErrors > 0 && parseErrors == len(triggers) {
+		return FailoverResult{
+			Decision:   DecisionStay,
+			Reason:     fmt.Sprintf("All %d trigger expressions are invalid", parseErrors),
+			TargetPath: currentPath,
 		}
 	}
 
