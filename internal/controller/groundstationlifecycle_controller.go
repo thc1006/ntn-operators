@@ -174,9 +174,17 @@ func (r *GroundStationLifecycleReconciler) reconcileHealth(
 			Message:            nodeErr.Error(),
 			ObservedGeneration: gs.Generation,
 		})
-		// Clear stale conditions that depend on node presence.
-		meta.RemoveStatusCondition(&gs.Status.Conditions, ntnv1alpha1.ConditionAntennaReady)
-		meta.RemoveStatusCondition(&gs.Status.Conditions, ntnv1alpha1.ConditionRFLinkHealthy)
+		// Set node-dependent conditions to Unknown (preserve diagnostic history).
+		meta.SetStatusCondition(&gs.Status.Conditions, metav1.Condition{
+			Type: ntnv1alpha1.ConditionAntennaReady, Status: metav1.ConditionUnknown,
+			Reason: "NodeAPIError", Message: "Cannot determine antenna status: " + nodeErr.Error(),
+			ObservedGeneration: gs.Generation,
+		})
+		meta.SetStatusCondition(&gs.Status.Conditions, metav1.Condition{
+			Type: ntnv1alpha1.ConditionRFLinkHealthy, Status: metav1.ConditionUnknown,
+			Reason: "NodeAPIError", Message: "Cannot determine RF link status: " + nodeErr.Error(),
+			ObservedGeneration: gs.Generation,
+		})
 		gs.Status.Phase = ntnv1alpha1.PhaseOffline
 		return
 	}
@@ -189,9 +197,16 @@ func (r *GroundStationLifecycleReconciler) reconcileHealth(
 			Message:            fmt.Sprintf("No node with label %s=%s found", groundStationLabel, gs.Name),
 			ObservedGeneration: gs.Generation,
 		})
-		// Clear stale conditions that depend on node presence.
-		meta.RemoveStatusCondition(&gs.Status.Conditions, ntnv1alpha1.ConditionAntennaReady)
-		meta.RemoveStatusCondition(&gs.Status.Conditions, ntnv1alpha1.ConditionRFLinkHealthy)
+		meta.SetStatusCondition(&gs.Status.Conditions, metav1.Condition{
+			Type: ntnv1alpha1.ConditionAntennaReady, Status: metav1.ConditionUnknown,
+			Reason: "NodeNotFound", Message: "Node not found, antenna status unknown",
+			ObservedGeneration: gs.Generation,
+		})
+		meta.SetStatusCondition(&gs.Status.Conditions, metav1.Condition{
+			Type: ntnv1alpha1.ConditionRFLinkHealthy, Status: metav1.ConditionUnknown,
+			Reason: "NodeNotFound", Message: "Node not found, RF link status unknown",
+			ObservedGeneration: gs.Generation,
+		})
 		if gs.Status.Phase == "" || gs.Status.Phase == ntnv1alpha1.PhaseProvisioning {
 			gs.Status.Phase = ntnv1alpha1.PhaseProvisioning
 		} else {
