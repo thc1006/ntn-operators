@@ -1,0 +1,27 @@
+apiVersion: ntn.operators.dev/v1alpha1
+kind: GroundStationLifecycle
+metadata:
+  labels:
+    app.kubernetes.io/name: ntn-operators
+    app.kubernetes.io/managed-by: kustomize
+  name: gs-hsinchu-01
+spec:
+  hardware:
+    vendor: ennoconn
+    model: rugged-edge-5000
+    antennaType: flat-panel
+    bands:
+      - Ka
+      - Ku
+  deployment:
+    location:
+      lat: "24.7961"
+      lon: "120.9967"
+      alt: "70"
+    k8sDistro: k3s
+  monitoring:
+    healthCheckInterval: 30s
+  firmware:
+    autoUpdate: true
+    channel: stable
+    maintenanceWindow: "02:00-04:00 UTC"

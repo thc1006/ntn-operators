@@ -35,8 +35,9 @@ echo "3. Creating SatelliteEphemeris (oneweb-constellation)..."
 kubectl apply -f "$SAMPLES_DIR/ntn_v1alpha1_satelliteephemeris.yaml"
 echo ""
 
-echo "4. Creating GroundStationLifecycle (gs-taipei-01)..."
+echo "4. Creating GroundStationLifecycle (gs-taipei-01 + gs-hsinchu-01)..."
 kubectl apply -f "$SAMPLES_DIR/ntn_v1alpha1_groundstationlifecycle.yaml"
+kubectl apply -f "$SAMPLES_DIR/ntn_v1alpha1_groundstationlifecycle_hsinchu.yaml"
 echo ""
 
 echo "5. Creating NTNCellConfig (ntn-cell-geo-demo)..."

@@ -8,7 +8,7 @@ metadata:
 spec:
   provider:
     type: ocudu
-    namespace: default
+    # namespace is enforced to match metadata.namespace for security
   ntn:
     cellSpecificKoffset: 150
     taCommon: 0

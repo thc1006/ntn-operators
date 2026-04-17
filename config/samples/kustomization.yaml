@@ -2,6 +2,7 @@
 resources:
 - ntn_v1alpha1_satelliteephemeris.yaml
 - ntn_v1alpha1_groundstationlifecycle.yaml
+- ntn_v1alpha1_groundstationlifecycle_hsinchu.yaml
 - ntn_v1alpha1_ntncellconfig.yaml
 - ntn_v1alpha1_ntnslice.yaml
 # +kubebuilder:scaffold:manifestskustomizesamples
