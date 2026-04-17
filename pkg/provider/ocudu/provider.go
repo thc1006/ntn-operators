@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -37,11 +38,12 @@ const ConfigMapPrefix = "ocudu-ntn-"
 const maxK8sNameLen = 253
 
 // ConfigMapNameFor returns the ConfigMap name for a given NTNCellConfig CR name.
-// If the resulting name exceeds K8s limits, it is truncated to fit.
+// If the resulting name exceeds K8s limits, it is truncated and trailing
+// invalid characters ('-', '.') are stripped to produce a valid DNS-1123 name.
 func ConfigMapNameFor(crName string) string {
 	name := ConfigMapPrefix + crName
 	if len(name) > maxK8sNameLen {
-		name = name[:maxK8sNameLen]
+		name = strings.TrimRight(name[:maxK8sNameLen], "-.")
 	}
 	return name
 }

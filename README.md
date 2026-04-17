@@ -11,7 +11,7 @@ Kubernetes-native management framework for Non-Terrestrial Networks (NTN). Decla
 |-----|-----------|-------------|
 | **SatelliteEphemeris** | `sateph` | Auto-fetches GP data (OMM JSON) from CelesTrak, runs SGP4 pass prediction |
 | **GroundStationLifecycle** | `gs` | Manages edge ground station nodes — health checks, firmware, K8s integration |
-| **NTNCellConfig** | `ncc` | Configures NTN gNB cells via OCUDU/srsRAN provider (generates ConfigMap) |
+| **NTNCellConfig** | `ntncc` | Configures NTN gNB cells via OCUDU/srsRAN provider (generates ConfigMap) |
 | **NTNSlice** | `nts` | Manages terrestrial-satellite slice failover, QoS mapping, session continuity |
 
 ## Architecture
@@ -162,7 +162,7 @@ metadata:
 spec:
   provider:
     type: ocudu
-    namespace: default
+    # namespace is enforced to match metadata.namespace for security
   ntn:
     cellSpecificKoffset: 150
     taCommon: 0

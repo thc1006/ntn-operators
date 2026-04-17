@@ -99,7 +99,7 @@ func (r *NTNCellConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		if err := r.Update(ctx, cc); err != nil {
 			return ctrl.Result{}, err
 		}
-		return ctrl.Result{Requeue: true}, nil
+		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
 
 	// Step 3: Guard against nil provider.
@@ -138,6 +138,10 @@ func (r *NTNCellConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 
 	// Step 4: Force provider namespace to CR namespace (prevents cross-namespace writes).
 	spec := cc.Spec.DeepCopy()
+	if spec.Provider.Namespace != "" && spec.Provider.Namespace != cc.Namespace {
+		log.Info("Overriding provider.namespace to match CR namespace for security",
+			"specified", spec.Provider.Namespace, "enforced", cc.Namespace)
+	}
 	spec.Provider.Namespace = cc.Namespace
 
 	// Step 5: Apply configuration via provider.
