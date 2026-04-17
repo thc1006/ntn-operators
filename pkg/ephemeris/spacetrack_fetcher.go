@@ -18,6 +18,7 @@ package ephemeris
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -148,9 +149,9 @@ func (f *SpaceTrackFetcher) login(ctx context.Context, username, password string
 // errSessionExpired is a sentinel for 401 detection in retry logic.
 var errSessionExpired = fmt.Errorf("SpaceTrack session expired")
 
-// isSessionExpired checks if an error is a session expiry (401).
+// isSessionExpired checks if an error wraps the session expired sentinel.
 func isSessionExpired(err error) bool {
-	return err != nil && strings.Contains(err.Error(), "session expired")
+	return errors.Is(err, errSessionExpired)
 }
 
 // fetchGP performs the authenticated GP data request.

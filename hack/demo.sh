@@ -13,16 +13,17 @@ make install
 echo ""
 
 echo "2. Starting controller (background)..."
-setsid make run &
+make run &
 CONTROLLER_PID=$!
 sleep 5
-echo "   Controller process group PID: $CONTROLLER_PID"
+echo "   Controller PID: $CONTROLLER_PID"
 echo ""
 
 cleanup() {
     echo ""
     echo "=== Cleaning up ==="
-    kill -- -"$CONTROLLER_PID" 2>/dev/null || true
+    kill "$CONTROLLER_PID" 2>/dev/null || true
+    wait "$CONTROLLER_PID" 2>/dev/null || true
     kubectl delete -f "$SAMPLES_DIR/ntn_v1alpha1_ntnslice.yaml" --ignore-not-found 2>/dev/null
     kubectl delete -f "$SAMPLES_DIR/ntn_v1alpha1_ntncellconfig.yaml" --ignore-not-found 2>/dev/null
     kubectl delete -f "$SAMPLES_DIR/ntn_v1alpha1_groundstationlifecycle_hsinchu.yaml" --ignore-not-found 2>/dev/null

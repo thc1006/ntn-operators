@@ -53,7 +53,9 @@ jobs:
 
       - name: Install Helm
         run: |
+          set -euo pipefail
           curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+          helm version
 
       - name: Update Chart version
         run: |
