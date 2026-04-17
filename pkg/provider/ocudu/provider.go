@@ -30,8 +30,13 @@ import (
 	ntnv1alpha1 "github.com/thc1006/ntn-operators/api/v1alpha1"
 )
 
-// ConfigMapName is the name of the ConfigMap that holds the generated NTN config.
-const ConfigMapName = "ocudu-ntn-config"
+// ConfigMapPrefix is the prefix for ConfigMap names. Final name = prefix + CR name.
+const ConfigMapPrefix = "ocudu-ntn-"
+
+// ConfigMapNameFor returns the ConfigMap name for a given NTNCellConfig CR name.
+func ConfigMapNameFor(crName string) string {
+	return ConfigMapPrefix + crName
+}
 
 // Provider implements provider.NTNProvider for OCUDU/srsRAN gNB.
 // It is stateless — status is derived from the ConfigMap.
@@ -46,7 +51,7 @@ func NewProvider(c client.Client) *Provider {
 
 // ApplyCellConfig generates OCUDU-compatible NTN config YAML and writes it
 // to a ConfigMap in the provider's target namespace.
-func (p *Provider) ApplyCellConfig(ctx context.Context, spec *ntnv1alpha1.NTNCellConfigSpec) error {
+func (p *Provider) ApplyCellConfig(ctx context.Context, crName string, spec *ntnv1alpha1.NTNCellConfigSpec) error {
 	if spec == nil {
 		return fmt.Errorf("spec must not be nil")
 	}
@@ -61,13 +66,13 @@ func (p *Provider) ApplyCellConfig(ctx context.Context, spec *ntnv1alpha1.NTNCel
 
 	namespace := spec.Provider.Namespace
 	cm := &corev1.ConfigMap{}
-	key := types.NamespacedName{Name: ConfigMapName, Namespace: namespace}
+	key := types.NamespacedName{Name: ConfigMapNameFor(crName), Namespace: namespace}
 	err = p.client.Get(ctx, key, cm)
 
 	if apierrors.IsNotFound(err) {
 		cm = &corev1.ConfigMap{
 			ObjectMeta: metav1.ObjectMeta{
-				Name:      ConfigMapName,
+				Name:      ConfigMapNameFor(crName),
 				Namespace: namespace,
 				Labels: map[string]string{
 					"app.kubernetes.io/managed-by": "ntn-operators",
@@ -104,7 +109,7 @@ func (p *Provider) ApplyCellConfig(ctx context.Context, spec *ntnv1alpha1.NTNCel
 }
 
 // GetCellStatus derives status by reading the ConfigMap in the given namespace.
-func (p *Provider) GetCellStatus(ctx context.Context, namespace string) (*ntnv1alpha1.NTNCellConfigStatus, error) {
+func (p *Provider) GetCellStatus(ctx context.Context, crName, namespace string) (*ntnv1alpha1.NTNCellConfigStatus, error) {
 	status := &ntnv1alpha1.NTNCellConfigStatus{}
 
 	if namespace == "" {
@@ -112,12 +117,12 @@ func (p *Provider) GetCellStatus(ctx context.Context, namespace string) (*ntnv1a
 	}
 
 	cm := &corev1.ConfigMap{}
-	key := types.NamespacedName{Name: ConfigMapName, Namespace: namespace}
+	key := types.NamespacedName{Name: ConfigMapNameFor(crName), Namespace: namespace}
 	if err := p.client.Get(ctx, key, cm); err != nil {
 		if apierrors.IsNotFound(err) {
 			return status, nil
 		}
-		return status, fmt.Errorf("reading ConfigMap %s/%s: %w", namespace, ConfigMapName, err)
+		return status, fmt.Errorf("reading ConfigMap %s/%s: %w", namespace, ConfigMapNameFor(crName), err)
 	}
 
 	status.ConfigMapRef = cm.Name
@@ -129,7 +134,7 @@ func (p *Provider) GetCellStatus(ctx context.Context, namespace string) (*ntnv1a
 	}
 
 	if _, ok := cm.Data["geo_ntn.yml"]; !ok {
-		return status, fmt.Errorf("ConfigMap %s/%s missing geo_ntn.yml key", namespace, ConfigMapName)
+		return status, fmt.Errorf("ConfigMap %s/%s missing geo_ntn.yml key", namespace, ConfigMapNameFor(crName))
 	}
 
 	return status, nil

@@ -100,7 +100,7 @@ func (r *NTNCellConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		"provider", spec.Provider.Type,
 		"koffset", spec.NTN.CellSpecificKoffset)
 
-	if err := r.Provider.ApplyCellConfig(ctx, spec); err != nil {
+	if err := r.Provider.ApplyCellConfig(ctx, cc.Name, spec); err != nil {
 		log.Error(err, "Failed to apply cell config")
 		cc.Status.AppliedKoffset = 0
 		cc.Status.ConfigMapRef = ""
@@ -121,7 +121,7 @@ func (r *NTNCellConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	}
 
 	// Step 6: Get applied status from provider.
-	status, err := r.Provider.GetCellStatus(ctx, spec.Provider.Namespace)
+	status, err := r.Provider.GetCellStatus(ctx, cc.Name, spec.Provider.Namespace)
 	if err != nil {
 		log.Error(err, "Failed to get cell status after apply")
 		meta.SetStatusCondition(&cc.Status.Conditions, metav1.Condition{
