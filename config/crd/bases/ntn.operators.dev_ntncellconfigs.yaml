@@ -69,11 +69,6 @@ spec:
                     default: 0
                     description: prachMaxMsg3HarqRetx sets the max msg3 HARQ retransmissions.
                     type: integer
-                  pucchSRPeriodMs:
-                    default: 320
-                    description: pucchSRPeriodMs sets the PUCCH SR period in ms (extended
-                      for NTN).
-                    type: integer
                   rrcGuardTimeMs:
                     default: 12800
                     description: rrcGuardTimeMs sets the RRC procedure guard time

@@ -1,0 +1,48 @@
+cell_cfg:
+  sib:
+    t300: 2000                      # Extend the RRC Connection Establishment timer in ms.
+    t301: 2000                      # Extend the RRC Connection Re-establishment timer in ms.
+    t311: 3000                      # Extend the RRC Connection Re-establishment procedure timer in ms.
+    t319: 2000                      # Extend the RRC Connection Resume timer in ms.
+    si_window_length: 40            # Set SI Window Length in slots.
+    si_sched_info:
+      - si_period: 16               # Set SIB2 scheduling period in radio frames.
+        sib_mapping: 2              # Enable SIB2.
+      - si_period: 16               # Set SIB19 scheduling period in radio frames.
+        sib_mapping: 19             # Enable SIB19.
+        si_window_position: 2       # Set SI window position of the associated SIB19 message.
+  pucch:
+    sr_period_ms: 80                # Set Scheduling Request period.
+  csi:
+    csi_rs_period: 80               # Set CSI-RS report period.
+  pdsch:
+    nof_harqs: 16                   # Sets the number of Downlink HARQ processes.
+    max_nof_harq_retxs: 0           # Disable HARQ retransmissions.
+  prach:
+    prach_config_index: 31          # Use Preamble Format 1 to improve the timing robustness
+    max_msg3_harq_retx: 0           # Disable Msg3 HARQ retransmissions.
+
+cu_cp:
+  request_pdu_session_timeout: 10
+  rrc:
+    rrc_procedure_guard_time_ms: 12800 # Set high RRC guard time value.
+
+cell_cfg:
+  sched_expert_cfg:
+    ta_sched_cfg:
+      ta_cmd_offset_threshold: 1
+      ta_measurement_slot_period: 40
+      ta_measurement_slot_prohibit_period: 250
+      ta_target: 0
+
+ntn:
+  cell_specific_koffset:  240       # Cell-specific k-offset.
+  ta_info:                          # TA-Info.
+    ta_common:  0
+  ephemeris_info_ecef:              # Satellite ephemeris in position and velocity state vector format.
+    pos_x:  -28105880
+    pos_y:  31509747
+    pos_z:  -1691895
+    vel_x:  34
+    vel_y:  9
+    vel_z:  -385

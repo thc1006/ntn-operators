@@ -1,0 +1,55 @@
+cu_cp:
+  amf:
+    addr: 10.53.1.2
+    port: 38412
+    bind_addr: 10.53.1.1
+    supported_tracking_areas:
+      - tac: 7
+        plmn_list:
+          - plmn: "00101"
+            tai_slice_support_list:
+              - sst: 1
+  inactivity_timer: 7200
+  rrc:
+    rrc_procedure_guard_time_ms: 12800
+
+ru_sdr:
+  device_driver: zmq
+  device_args: tx_port=tcp://127.0.0.1:2000,rx_port=tcp://127.0.0.1:2001
+  srate: 5.76
+  tx_gain: 75
+  rx_gain: 75
+
+cell_cfg:
+  dl_arfcn: 437000
+  band: 256
+  channel_bandwidth_MHz: 5
+  common_scs: 15
+  plmn: "00101"
+  tac: 7
+  sib:
+    si_window_length: 5
+    si_sched_info:
+      - si_period: 16
+        sib_mapping: 19
+        si_window_position: 1
+  pdsch:
+    max_nof_harq_retxs: 0
+  prach:
+    max_msg3_harq_retx: 0
+
+ntn:
+  cell_specific_koffset: 150
+  ta_info:
+    ta_common: 0
+  ephemeris_info_ecef:
+    pos_x: 20922195
+    pos_y: 1967783
+    pos_z: 19770302
+    vel_x: 0
+    vel_y: 0
+    vel_z: 0
+
+log:
+  filename: /tmp/gnb.log
+  all_level: info

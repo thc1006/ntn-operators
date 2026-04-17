@@ -1,0 +1,46 @@
+cu_cp:
+  amf:
+    addr: 10.53.1.2                 # The address or hostname of the AMF.
+    port: 38412
+    bind_addr: 10.53.1.1            # A local IP that the gNB binds to for traffic from the AMF.
+    supported_tracking_areas:
+      - tac: 7
+        plmn_list:
+          - plmn: "00101"
+            tai_slice_support_list:
+              - sst: 1
+  inactivity_timer: 7200            # Sets the UE/PDU Session/DRB inactivity timer to 7200 seconds. Supported: [1 - 7200].
+
+ru_sdr:
+  device_driver: zmq                # The RF driver name.
+  device_args: tx_port=tcp://127.0.0.1:2000,rx_port=tcp://127.0.0.1:2001 # Optionally pass arguments to the selected RF driver.
+  srate: 5.76                       # RF sample rate might need to be adjusted according to selected bandwidth.
+  tx_gain: 75                       # Transmit gain of the RF might need to adjusted to the given situation.
+  rx_gain: 75                       # Receive gain of the RF might need to adjusted to the given situation.
+
+cell_cfg:
+  dl_arfcn: 437000                  # ARFCN of the downlink carrier (center frequency).
+  band: 256                         # Use NTN band.
+  channel_bandwidth_MHz: 5          # Bandwith in MHz. Number of PRBs will be automatically derived.
+  common_scs: 15                    # Subcarrier spacing in kHz used for data.
+  plmn: "00101"                     # PLMN broadcasted by the gNB.
+  tac: 7                            # Tracking area code (needs to match the core configuration).
+  pucch:
+    nof_ue_res_harq_per_set: 7
+    nof_cell_harq_pucch_res_sets: 1
+    f1_nof_cyclic_shifts: 1
+    f1_enable_occ: true
+    f0_or_f1_nof_cell_res_sr: 7
+    f2_or_f3_or_f4_nof_cell_res_csi: 7
+
+log:
+  filename: /tmp/gnb.log            # Path of the log file.
+  all_level: info                   # Logging level applied to all layers.
+  broadcast_enabled: false
+  hex_max_size: 256
+
+pcap:
+  mac_enable: false                 # Set to true to enable MAC-layer PCAPs.
+  mac_filename: /tmp/gnb_mac.pcap   # Path where the MAC PCAP is stored.
+  ngap_enable: false                # Set to true to enable NGAP PCAPs.
+  ngap_filename: /tmp/gnb_ngap.pcap # Path where the NGAP PCAP is stored.

@@ -22,7 +22,6 @@ spec:
       velZ: 0
     payloadType: transparent
   cellOverrides:
-    pucchSRPeriodMs: 320
     pdschMaxHarqRetxs: 0
     prachMaxMsg3HarqRetx: 0
     rrcGuardTimeMs: 12800

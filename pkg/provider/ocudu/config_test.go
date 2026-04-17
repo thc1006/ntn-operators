@@ -44,9 +44,17 @@ func TestGenerateConfig_GEODefault(t *testing.T) {
 
 	yaml := string(data)
 
-	// Verify NTN section.
+	// NTN section — must use srsRAN CLI11 format.
 	assertContains(t, yaml, "cell_specific_koffset: 150")
+
+	// ta_common MUST be under ntn.ta_info (not ntn.ta_common).
+	assertContains(t, yaml, "ta_info:")
 	assertContains(t, yaml, "ta_common: 0")
+	assertNotContains(t, yaml, "ntn:\n  ta_common:") // Must NOT be flat
+
+	// Ephemeris MUST use ephemeris_info_ecef (not ephemeris_info).
+	assertContains(t, yaml, "ephemeris_info_ecef:")
+	assertNotContains(t, yaml, "ephemeris_info:")
 	assertContains(t, yaml, "pos_x: 20922195")
 	assertContains(t, yaml, "pos_y: 1967783")
 	assertContains(t, yaml, "pos_z: 19770302")
@@ -54,9 +62,15 @@ func TestGenerateConfig_GEODefault(t *testing.T) {
 	assertContains(t, yaml, "vel_y: 0")
 	assertContains(t, yaml, "vel_z: 0")
 
-	// Verify cell_cfg defaults for NTN.
-	assertContains(t, yaml, "sr_period_ms: 320")
+	// SIB19 — must have si_window_position (required by srsRAN).
+	assertContains(t, yaml, "sib_mapping: 19")
+	assertContains(t, yaml, "si_window_position:")
+
+	// cell_cfg NTN defaults.
 	assertContains(t, yaml, "max_nof_harq_retxs: 0")
+	assertContains(t, yaml, "max_msg3_harq_retx: 0")
+
+	// cu_cp RRC guard time.
 	assertContains(t, yaml, "rrc_procedure_guard_time_ms: 12800")
 }
 
@@ -76,6 +90,7 @@ func TestGenerateConfig_CustomKoffset(t *testing.T) {
 
 	yaml := string(data)
 	assertContains(t, yaml, "cell_specific_koffset: 500")
+	// ta_common under ta_info subsection
 	assertContains(t, yaml, "ta_common: 1000")
 }
 
@@ -86,7 +101,6 @@ func TestGenerateConfig_CustomCellOverrides(t *testing.T) {
 			EphemerisECEF:       ntnv1alpha1.EphemerisECEF{PosX: 1, PosY: 2, PosZ: 3},
 		},
 		CellOverrides: &ntnv1alpha1.CellOverrides{
-			PucchSRPeriodMs:      640,
 			PdschMaxHarqRetxs:    2,
 			PrachMaxMsg3HarqRetx: 1,
 			RrcGuardTimeMs:       25600,
@@ -99,7 +113,6 @@ func TestGenerateConfig_CustomCellOverrides(t *testing.T) {
 	}
 
 	yaml := string(data)
-	assertContains(t, yaml, "sr_period_ms: 640")
 	assertContains(t, yaml, "max_nof_harq_retxs: 2")
 	assertContains(t, yaml, "max_msg3_harq_retx: 1")
 	assertContains(t, yaml, "rrc_procedure_guard_time_ms: 25600")
@@ -127,10 +140,24 @@ func TestGenerateConfig_LEOWithVelocity(t *testing.T) {
 	assertContains(t, yaml, "vel_z: 50")
 }
 
-func TestGenerateConfig_SIB19Scheduling(t *testing.T) {
+func TestGenerateConfig_NilSpec(t *testing.T) {
+	_, err := GenerateConfig(nil)
+	if err == nil {
+		t.Fatal("expected error for nil spec")
+	}
+}
+
+func TestGenerateConfig_MatchesLiveGNBFormat(t *testing.T) {
+	// This test generates config and validates it matches the exact format
+	// that was verified to work with srsRAN gNB (commit 4bf1543).
 	spec := &ntnv1alpha1.NTNCellConfigSpec{
 		NTN: ntnv1alpha1.NTNParams{
-			EphemerisECEF: ntnv1alpha1.EphemerisECEF{PosX: 1, PosY: 2, PosZ: 3},
+			CellSpecificKoffset: 150,
+			TACommon:            0,
+			EphemerisECEF: ntnv1alpha1.EphemerisECEF{
+				PosX: 20922195, PosY: 1967783, PosZ: 19770302,
+			},
+			PayloadType: "transparent",
 		},
 	}
 
@@ -140,14 +167,46 @@ func TestGenerateConfig_SIB19Scheduling(t *testing.T) {
 	}
 
 	yaml := string(data)
-	// SIB19 must always be scheduled for NTN.
-	assertContains(t, yaml, "sib_mapping:")
-	assertContains(t, yaml, "19")
+
+	// These exact strings were verified against a live srsRAN gNB that
+	// successfully started, connected to AMF, and broadcast NTN cell.
+	requiredFragments := []string{
+		"ntn:",
+		"  cell_specific_koffset: 150",
+		"  ta_info:",
+		"    ta_common: 0",
+		"  ephemeris_info_ecef:",
+		"    pos_x: 20922195",
+		"cell_cfg:",
+		"  sib:",
+		"    si_sched_info:",
+		"      - si_period: 16",
+		"        sib_mapping: 19",
+		"        si_window_position: 1",
+		"  pdsch:",
+		"    max_nof_harq_retxs: 0",
+		"cu_cp:",
+		"  rrc:",
+		"    rrc_procedure_guard_time_ms: 12800",
+	}
+
+	for _, frag := range requiredFragments {
+		if !strings.Contains(yaml, frag) {
+			t.Errorf("generated config missing required fragment %q\n\nFull output:\n%s", frag, yaml)
+		}
+	}
 }
 
 func assertContains(t *testing.T, haystack, needle string) {
 	t.Helper()
 	if !strings.Contains(haystack, needle) {
 		t.Errorf("expected YAML to contain %q, got:\n%s", needle, haystack)
+	}
+}
+
+func assertNotContains(t *testing.T, haystack, needle string) {
+	t.Helper()
+	if strings.Contains(haystack, needle) {
+		t.Errorf("expected YAML to NOT contain %q, got:\n%s", needle, haystack)
 	}
 }

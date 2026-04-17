@@ -101,11 +101,9 @@ type EphemerisECEF struct {
 }
 
 // CellOverrides allows fine-tuning cell parameters for NTN.
+// Note: PUCCH SR period is intentionally NOT exposed; the gNB
+// auto-selects the correct value based on channel bandwidth.
 type CellOverrides struct {
-	// pucchSRPeriodMs sets the PUCCH SR period in ms (extended for NTN).
-	// +kubebuilder:default=320
-	PucchSRPeriodMs int `json:"pucchSRPeriodMs,omitempty"`
-
 	// pdschMaxHarqRetxs sets the max HARQ retransmissions (0 = disabled for NTN).
 	// +kubebuilder:default=0
 	PdschMaxHarqRetxs int `json:"pdschMaxHarqRetxs,omitempty"`
