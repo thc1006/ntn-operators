@@ -16,7 +16,8 @@ manager:
     tag: v0.1.0
     pullPolicy: IfNotPresent
 
-  ## Arguments
+  ## Extra arguments passed to the manager binary.
+  ## Note: --leader-elect defaults to true in the binary; listed here for visibility.
   ##
   args:
     - --leader-elect

@@ -17,3 +17,6 @@ vendor/
 cover.out
 *.test
 main
+
+# Generated kustomize output (regenerate with: make build-installer)
+dist/install.yaml
