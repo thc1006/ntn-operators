@@ -448,6 +448,41 @@ var _ = Describe("GroundStationLifecycle Controller", func() {
 		})
 	})
 
+	Context("Firmware update timeout", func() {
+		BeforeEach(func() {
+			createGS(false, true)
+			createNode(true, "1.0", "2.0")
+		})
+		AfterEach(func() {
+			deleteGS()
+			deleteNode()
+		})
+
+		It("should transition to Degraded when update exceeds 30 minutes", func() {
+			// Pre-set to Updating with a start time 31 minutes ago.
+			gs := &ntnv1alpha1.GroundStationLifecycle{}
+			Expect(k8sClient.Get(context.Background(), typeNamespacedName, gs)).To(Succeed())
+			gs.Status.Phase = ntnv1alpha1.PhaseUpdating
+			gs.Status.FirmwareVersion = "1.0"
+			updateStarted := fixedNow.Add(-31 * time.Minute)
+			gs.Status.FirmwareUpdateStarted = &metav1.Time{Time: updateStarted}
+			Expect(k8sClient.Status().Update(context.Background(), gs)).To(Succeed())
+
+			reconciler := newReconciler(nil)
+			_, err := reconcileGS(reconciler)
+			Expect(err).NotTo(HaveOccurred())
+
+			updated := &ntnv1alpha1.GroundStationLifecycle{}
+			Expect(k8sClient.Get(context.Background(), typeNamespacedName, updated)).To(Succeed())
+			Expect(updated.Status.Phase).To(Equal(ntnv1alpha1.PhaseDegraded))
+			Expect(updated.Status.FirmwareUpdateStarted).To(BeNil())
+
+			cond := meta.FindStatusCondition(updated.Status.Conditions, ntnv1alpha1.ConditionFirmwareUpToDate)
+			Expect(cond).NotTo(BeNil())
+			Expect(cond.Reason).To(Equal("UpdateTimedOut"))
+		})
+	})
+
 	Context("CEL: lon out of range", func() {
 		It("should reject creation when lon < -180", func() {
 			gs := &ntnv1alpha1.GroundStationLifecycle{

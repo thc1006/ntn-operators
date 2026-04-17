@@ -251,6 +251,10 @@ func (in *GroundStationLifecycleStatus) DeepCopyInto(out *GroundStationLifecycle
 		in, out := &in.LastHealthCheck, &out.LastHealthCheck
 		*out = (*in).DeepCopy()
 	}
+	if in.FirmwareUpdateStarted != nil {
+		in, out := &in.FirmwareUpdateStarted, &out.FirmwareUpdateStarted
+		*out = (*in).DeepCopy()
+	}
 	if in.Conditions != nil {
 		in, out := &in.Conditions, &out.Conditions
 		*out = make([]v1.Condition, len(*in))

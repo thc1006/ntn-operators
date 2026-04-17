@@ -374,6 +374,27 @@ func (r *GroundStationLifecycleReconciler) reconcileFirmware(
 		ObservedGeneration: gs.Generation,
 	})
 
+	// Handle update timeout (Updating → Degraded if stuck > 30 min).
+	if gs.Status.Phase == ntnv1alpha1.PhaseUpdating && gs.Status.FirmwareUpdateStarted != nil {
+		startedAt := gs.Status.FirmwareUpdateStarted.Time
+		if r.now().Sub(startedAt) > 30*time.Minute {
+			meta.SetStatusCondition(&gs.Status.Conditions, metav1.Condition{
+				Type:               ntnv1alpha1.ConditionFirmwareUpToDate,
+				Status:             metav1.ConditionFalse,
+				Reason:             "UpdateTimedOut",
+				Message:            "Firmware update exceeded 30-minute timeout",
+				ObservedGeneration: gs.Generation,
+			})
+			gs.Status.Phase = ntnv1alpha1.PhaseDegraded
+			gs.Status.FirmwareUpdateStarted = nil
+			if r.Recorder != nil {
+				r.Recorder.Eventf(gs, nil, "Warning", "FirmwareUpdateTimedOut", "FirmwareUpdateTimedOut",
+					"Firmware update started at %s timed out after 30m", startedAt)
+			}
+			return
+		}
+	}
+
 	// Handle update completion (Updating → Running).
 	if gs.Status.Phase == ntnv1alpha1.PhaseUpdating {
 		if availableVersion == "" {
@@ -389,6 +410,7 @@ func (r *GroundStationLifecycleReconciler) reconcileFirmware(
 			return
 		}
 		gs.Status.FirmwareVersion = availableVersion
+		gs.Status.FirmwareUpdateStarted = nil
 		meta.SetStatusCondition(&gs.Status.Conditions, metav1.Condition{
 			Type:               ntnv1alpha1.ConditionFirmwareUpToDate,
 			Status:             metav1.ConditionTrue,
@@ -423,7 +445,9 @@ func (r *GroundStationLifecycleReconciler) reconcileFirmware(
 				return // outside maintenance window
 			}
 		}
+		now := r.now()
 		gs.Status.Phase = ntnv1alpha1.PhaseUpdating
+		gs.Status.FirmwareUpdateStarted = &metav1.Time{Time: now}
 		if r.Recorder != nil {
 			r.Recorder.Eventf(gs, nil, "Normal", "FirmwareUpdateStarted", "FirmwareUpdateStarted",
 				"Starting firmware update from %s to %s", currentVersion, availableVersion)

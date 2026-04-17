@@ -149,6 +149,11 @@ type GroundStationLifecycleStatus struct {
 	// +optional
 	LastHealthCheck *metav1.Time `json:"lastHealthCheck,omitempty"`
 
+	// firmwareUpdateStarted is when the current firmware update began.
+	// Used for timeout detection.
+	// +optional
+	FirmwareUpdateStarted *metav1.Time `json:"firmwareUpdateStarted,omitempty"`
+
 	// conditions represent the current state of the ground station.
 	// +listType=map
 	// +listMapKey=type
