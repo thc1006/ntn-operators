@@ -254,6 +254,19 @@ define gomodver
 $(shell go list -m -f '{{if .Replace}}{{.Replace.Version}}{{else}}{{.Version}}{{end}}' $(1) 2>/dev/null)
 endef
 
+##@ ko Build
+
+KO ?= ko
+KO_DOCKER_REPO ?= ghcr.io/thc1006/ntn-operators
+
+.PHONY: ko-build
+ko-build: ## Build container image with ko (local, single-arch).
+	KO_DOCKER_REPO=$(KO_DOCKER_REPO) $(KO) build ./cmd/ --bare --local
+
+.PHONY: ko-push
+ko-push: ## Build and push multi-arch image with ko.
+	KO_DOCKER_REPO=$(KO_DOCKER_REPO) $(KO) build ./cmd/ --bare --platform=linux/amd64,linux/arm64
+
 ##@ Helm Deployment
 
 ## Helm binary to use for deploying the chart
