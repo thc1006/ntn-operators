@@ -254,6 +254,15 @@ define gomodver
 $(shell go list -m -f '{{if .Replace}}{{.Replace.Version}}{{else}}{{.Version}}{{end}}' $(1) 2>/dev/null)
 endef
 
+##@ Documentation
+
+CRDOC ?= $(LOCALBIN)/crdoc
+
+.PHONY: docs
+docs: ## Generate API reference documentation from CRDs.
+	@command -v $(CRDOC) >/dev/null 2>&1 || GOBIN="$(LOCALBIN)" go install fybrik.io/crdoc@latest
+	$(CRDOC) --resources config/crd/bases --output docs/api-reference.md
+
 ##@ ko Build
 
 KO ?= ko
