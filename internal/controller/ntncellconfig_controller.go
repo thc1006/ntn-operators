@@ -169,6 +169,20 @@ func (r *NTNCellConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{RequeueAfter: time.Minute}, nil
 	}
 
+	// Step 5b: Ensure OwnerReference on ConfigMap for garbage collection.
+	cm := &corev1.ConfigMap{}
+	cmKey := client.ObjectKey{
+		Namespace: cc.Namespace,
+		Name:      ocudu.ConfigMapNameFor(cc.Name),
+	}
+	if err := r.Get(ctx, cmKey, cm); err == nil {
+		if err := controllerutil.SetControllerReference(cc, cm, r.Scheme); err == nil {
+			if err := r.Update(ctx, cm); err != nil {
+				log.Error(err, "Failed to set OwnerReference on ConfigMap")
+			}
+		}
+	}
+
 	// Step 6: Get applied status from provider.
 	status, err := r.Provider.GetCellStatus(ctx, cc.Name, spec.Provider.Namespace)
 	if err != nil {

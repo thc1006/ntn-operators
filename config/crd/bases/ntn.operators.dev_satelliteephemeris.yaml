@@ -131,6 +131,7 @@ spec:
                       For CelesTrak: https://celestrak.org/NORAD/elements/gp.php?GROUP=oneweb&FORMAT=JSON
                       For SpaceTrack: https://www.space-track.org/basicspacedata/query/class/gp/...
                     minLength: 1
+                    pattern: ^https?://
                     type: string
                 required:
                 - refreshInterval
