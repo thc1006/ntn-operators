@@ -189,7 +189,9 @@ spec:
                       description: NTNNeighborCell describes a neighbor NTN cell.
                       properties:
                         frequency:
-                          description: frequency is the neighbor cell's ARFCN.
+                          description: frequency is the neighbor cell's ARFCN (NR-ARFCN,
+                            always >= 1).
+                          minimum: 1
                           type: integer
                         physicalCellID:
                           description: physicalCellID of the neighbor (0-1007).

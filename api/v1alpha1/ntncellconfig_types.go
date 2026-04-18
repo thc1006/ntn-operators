@@ -166,7 +166,8 @@ type NTNNeighborCell struct {
 	// +kubebuilder:validation:Maximum=1007
 	PhysicalCellID int `json:"physicalCellID"`
 
-	// frequency is the neighbor cell's ARFCN.
+	// frequency is the neighbor cell's ARFCN (NR-ARFCN, always >= 1).
+	// +kubebuilder:validation:Minimum=1
 	// +optional
 	Frequency int `json:"frequency,omitempty"`
 }
