@@ -30,12 +30,13 @@ Include:
 
 This project implements the following security practices:
 
-- **SSRF prevention**: All outbound HTTP clients validate resolved IPs against private ranges at the TCP dial level (see `pkg/netutil/safeclient.go`)
+- **SSRF prevention**: All outbound HTTP clients validate resolved IPs against private ranges at the TCP dial level, including redirect targets (see `pkg/netutil/safeclient.go`)
 - **Namespace isolation**: Controllers enforce that provider operations stay within the CR's own namespace
+- **CEL CRD validation**: Server-side validation rules (URL scheme, lat/lon range, credential requirements) without webhook infrastructure
+- **Secret management**: SpaceTrack credentials read from K8s Secrets with scoped RBAC (`secrets:get;list;watch`)
 - **Read-only filesystem**: Container runs with `readOnlyRootFilesystem: true`
 - **Non-root execution**: Container runs as UID 65532 (distroless nonroot)
 - **Minimal capabilities**: All Linux capabilities are dropped
-- **Input validation**: CRD webhook validation (planned for v0.2)
 - **Dependency scanning**: Dependabot enabled for Go modules
 
 ## Disclosure Policy

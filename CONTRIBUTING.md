@@ -1,25 +1,34 @@
 # Contributing to NTN K8s Operators
 
-Thank you for your interest! This project is in early development.
+Thank you for your interest in contributing!
 
 ## Development Setup
 
 ```bash
-# Prerequisites
-go install sigs.k8s.io/controller-runtime/tools/setup-envtest@latest
+# Prerequisites: Go 1.25+, kubebuilder v4.13+, kubectl, Kind
 
 # Build & Test
-make generate    # Generate deepcopy and CRD manifests
-make manifests   # Generate RBAC and CRD YAML
+make generate    # Generate DeepCopy methods
+make manifests   # Generate CRD, RBAC, and webhook YAML
 make lint        # Run golangci-lint
-make test        # Unit + integration (envtest)
-make test-e2e    # End-to-end with kind cluster
+make test        # Unit + envtest tests
+make test-e2e    # E2E tests on Kind cluster
+make docs        # Generate API reference from CRDs
+make ko-build    # Build container image with ko (local)
 ```
 
 ## CRD Design Principles
 
 1. **Declarative** — describe desired state, controller reconciles
 2. **Provider-agnostic** — same CRD works with different NTN backends
-3. **Nephio-compatible** — follows KRM conventions, works with PackageVariant
-4. **GitOps-ready** — all config is YAML, ArgoCD/Flux friendly
-5. **Versionable** — v1alpha1 → v1beta1 → v1, following K8s API conventions
+3. **CEL-validated** — CRD-level validation without webhook infrastructure
+4. **Observable** — custom Prometheus metrics for all domain events
+5. **GitOps-ready** — all config is YAML, ArgoCD/Flux friendly
+
+## Pull Request Guidelines
+
+- Run `make lint && make test` before opening a PR
+- Follow existing code style (enforced by golangci-lint)
+- Add tests for new features (target ≥80% coverage)
+- Update `docs/api-reference.md` if CRD types change (`make docs`)
+- Update `CHANGELOG.md` with your changes
