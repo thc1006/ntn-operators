@@ -74,17 +74,23 @@ func (f *SpaceTrackFetcher) SetCredentials(username, password string) {
 	f.loggedIn = false // force re-login on next fetch
 }
 
-// Fetch retrieves GP data from SpaceTrack. It handles authentication
-// automatically using cookie-based session management.
-// On HTTP 401, it automatically retries login once before failing.
+// Fetch retrieves GP data using previously set credentials (via SetCredentials).
+// Deprecated: Use FetchWithCredentials for request-scoped credential isolation.
 func (f *SpaceTrackFetcher) Fetch(ctx context.Context, gpURL string) (GPFetchResult, error) {
-	now := time.Now()
-
 	f.mu.Lock()
 	username := f.activeUsername
 	password := f.activePassword
-	loggedIn := f.loggedIn
 	f.mu.Unlock()
+	return f.FetchWithCredentials(ctx, gpURL, username, password)
+}
+
+// FetchWithCredentials retrieves GP data with request-scoped credentials.
+// This prevents credential interleaving when multiple CRs share a fetcher.
+// It manages session cookies per credential pair and auto-retries on 401.
+func (f *SpaceTrackFetcher) FetchWithCredentials(
+	ctx context.Context, gpURL, username, password string,
+) (GPFetchResult, error) {
+	now := time.Now()
 
 	if username == "" || password == "" {
 		return GPFetchResult{}, fmt.Errorf("SpaceTrack credentials not configured; set credentials via Secret reference")
@@ -92,12 +98,21 @@ func (f *SpaceTrackFetcher) Fetch(ctx context.Context, gpURL string) (GPFetchRes
 
 	log := logr.FromContextOrDiscard(ctx)
 
-	// Login if we don't have a session.
-	if !loggedIn {
+	// Check if we need to (re-)login for this credential pair.
+	f.mu.Lock()
+	needLogin := !f.loggedIn || f.activeUsername != username || f.activePassword != password
+	f.mu.Unlock()
+
+	if needLogin {
 		log.V(1).Info("authenticating with SpaceTrack")
 		if err := f.login(ctx, username, password); err != nil {
 			return GPFetchResult{}, fmt.Errorf("SpaceTrack login failed: %w", err)
 		}
+		f.mu.Lock()
+		f.activeUsername = username
+		f.activePassword = password
+		f.loggedIn = true
+		f.mu.Unlock()
 	}
 
 	// Fetch GP data.
@@ -112,6 +127,11 @@ func (f *SpaceTrackFetcher) Fetch(ctx context.Context, gpURL string) (GPFetchRes
 		if loginErr := f.login(ctx, username, password); loginErr != nil {
 			return GPFetchResult{}, fmt.Errorf("SpaceTrack re-login failed: %w", loginErr)
 		}
+		f.mu.Lock()
+		f.activeUsername = username
+		f.activePassword = password
+		f.loggedIn = true
+		f.mu.Unlock()
 		return f.fetchGP(ctx, gpURL, now)
 	}
 

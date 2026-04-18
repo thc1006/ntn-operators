@@ -360,12 +360,29 @@ func (r *SatelliteEphemerisReconciler) fetcherForSource(
 		if !ok {
 			return nil, fmt.Errorf("secret %q does not contain key %q", creds.Name, "username")
 		}
-		r.SpaceTrackFetcher.SetCredentials(string(username), string(password))
-		return r.SpaceTrackFetcher, nil
+		// Return a credentials-bound fetcher to prevent interleaving
+		// when multiple CRs share the SpaceTrackFetcher instance.
+		return &boundSpaceTrackFetcher{
+			fetcher:  r.SpaceTrackFetcher,
+			username: string(username),
+			password: string(password),
+		}, nil
 
 	default:
 		return nil, fmt.Errorf("unsupported source type %q", eph.Spec.Source.Type)
 	}
+}
+
+// boundSpaceTrackFetcher wraps SpaceTrackFetcher with request-scoped credentials
+// to prevent credential interleaving across concurrent reconciles.
+type boundSpaceTrackFetcher struct {
+	fetcher  *ephemeris.SpaceTrackFetcher
+	username string
+	password string
+}
+
+func (b *boundSpaceTrackFetcher) Fetch(ctx context.Context, url string) (ephemeris.GPFetchResult, error) {
+	return b.fetcher.FetchWithCredentials(ctx, url, b.username, b.password)
 }
 
 // SetupWithManager sets up the controller with the Manager.

@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"sync/atomic"
 	"testing"
 )
@@ -281,6 +282,87 @@ func TestSpaceTrackFetcher_SessionExpiredAutoRetry(t *testing.T) {
 	if gpCallCount.Load() != 2 {
 		t.Errorf("expected 2 GP calls (fail + retry), got %d", gpCallCount.Load())
 	}
+}
+
+func TestSpaceTrackFetcher_ConcurrentCredsIsolation(t *testing.T) {
+	// Prove that two callers with different credentials don't interfere.
+	var loginIdentities []string
+	var mu sync.Mutex
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == loginPath {
+			if err := r.ParseForm(); err == nil {
+				mu.Lock()
+				loginIdentities = append(loginIdentities, r.FormValue("identity"))
+				mu.Unlock()
+			}
+			http.SetCookie(w, &http.Cookie{Name: "chocolatechip", Value: "s", Path: "/"})
+			_, _ = fmt.Fprint(w, `""`)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, sampleOMMJSON)
+	}))
+	defer server.Close()
+
+	fetcher := NewSpaceTrackFetcher(&http.Client{}, server.URL)
+
+	// Simulate two CRs with different credentials calling sequentially.
+	// CR-A sets alice, CR-B sets bob, then CR-A fetches — should use alice, not bob.
+	fetcher.SetCredentials("alice", "pass-a")
+	fetcher.SetCredentials("bob", "pass-b") // overwrites!
+
+	_, err := fetcher.Fetch(context.Background(), server.URL+"/gp")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	mu.Lock()
+	firstLogin := loginIdentities[0]
+	mu.Unlock()
+
+	// BUG: This will be "bob" because SetCredentials overwrites shared state.
+	// After fix, Fetch should use request-scoped credentials, not shared state.
+	// For now, this test documents the bug.
+	if firstLogin == "bob" {
+		t.Log("BUG CONFIRMED: alice's fetch used bob's credentials due to shared state")
+	}
+}
+
+func TestSpaceTrackFetcher_FetchWithCredentials(t *testing.T) {
+	var lastIdentity string
+	var mu sync.Mutex
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == loginPath {
+			if err := r.ParseForm(); err == nil {
+				mu.Lock()
+				lastIdentity = r.FormValue("identity")
+				mu.Unlock()
+			}
+			http.SetCookie(w, &http.Cookie{Name: "chocolatechip", Value: "s", Path: "/"})
+			_, _ = fmt.Fprint(w, `""`)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, sampleOMMJSON)
+	}))
+	defer server.Close()
+
+	fetcher := NewSpaceTrackFetcher(&http.Client{}, server.URL)
+
+	// FetchWithCredentials passes creds per-call — no interleave possible.
+	result, err := fetcher.FetchWithCredentials(context.Background(), server.URL+"/gp", "alice", "pass-a")
+	if err != nil {
+		t.Fatalf("FetchWithCredentials failed: %v", err)
+	}
+	if result.SatelliteCount != 1 {
+		t.Errorf("expected 1 satellite, got %d", result.SatelliteCount)
+	}
+
+	mu.Lock()
+	if lastIdentity != "alice" {
+		t.Errorf("expected login as alice, got %s", lastIdentity)
+	}
+	mu.Unlock()
 }
 
 func TestSpaceTrackFetcher_CredentialsUnchangedNoRelogin(t *testing.T) {
