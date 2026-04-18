@@ -71,9 +71,11 @@ func (r *NTNSliceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 
 	// Step 2: Read simulated metrics from annotations.
 	metrics := r.readMetrics(ns)
+	log.V(2).Info("metrics read", "rsrp", metrics.RSRP, "latencyMs", metrics.LatencyMs, "packetLossPercent", metrics.PacketLossPercent)
 
 	// Step 3: Check satellite availability via SatelliteEphemeris.
 	satelliteAvailable := r.checkSatelliteAvailability(ctx, ns, now)
+	log.V(1).Info("satellite availability", "available", satelliteAvailable, "ephemerisRef", ns.Spec.SatellitePath.EphemerisRef)
 
 	// Set FailoverReady condition based on satellite availability.
 	failoverReadyStatus := metav1.ConditionTrue

@@ -101,6 +101,7 @@ func (r *NTNCellConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		if err := r.Update(ctx, cc); err != nil {
 			return ctrl.Result{}, err
 		}
+		log.V(1).Info("finalizer added, requeueing")
 		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
 

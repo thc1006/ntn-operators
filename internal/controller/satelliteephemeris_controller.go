@@ -327,6 +327,8 @@ func (r *SatelliteEphemerisReconciler) handleFetchError(
 func (r *SatelliteEphemerisReconciler) fetcherForSource(
 	ctx context.Context, eph *ntnv1alpha1.SatelliteEphemeris,
 ) (ephemeris.GPFetcher, error) {
+	log := logf.FromContext(ctx)
+	log.V(1).Info("selecting fetcher", "sourceType", eph.Spec.Source.Type)
 	switch eph.Spec.Source.Type {
 	case "CelesTrak":
 		if r.Fetcher == nil {
