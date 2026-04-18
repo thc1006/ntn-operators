@@ -188,10 +188,10 @@ func (r *NTNCellConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	}
 	if err := r.Get(ctx, cmKey, cm); err == nil {
 		if !metav1.IsControlledBy(cm, cc) {
-			if err := controllerutil.SetControllerReference(cc, cm, r.Scheme); err == nil {
-				if err := r.Update(ctx, cm); err != nil {
-					log.V(1).Info("failed to set OwnerReference on ConfigMap", "err", err)
-				}
+			if err := controllerutil.SetControllerReference(cc, cm, r.Scheme); err != nil {
+				log.V(1).Info("failed to build OwnerReference for ConfigMap", "err", err)
+			} else if err := r.Update(ctx, cm); err != nil {
+				log.V(1).Info("failed to update ConfigMap with OwnerReference", "err", err)
 			}
 		}
 	}
@@ -199,7 +199,7 @@ func (r *NTNCellConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// Step 6: Get applied status from provider.
 	status, err := r.Provider.GetCellStatus(ctx, cc.Name, spec.Provider.Namespace)
 	if err != nil {
-		log.V(1).Info("failed to get cell status after apply", "err", err)
+		log.Error(err, "failed to get cell status after apply")
 		meta.SetStatusCondition(&cc.Status.Conditions, metav1.Condition{
 			Type:               ntnv1alpha1.ConditionConfigApplied,
 			Status:             metav1.ConditionUnknown,

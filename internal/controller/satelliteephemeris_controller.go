@@ -158,7 +158,7 @@ func (r *SatelliteEphemerisReconciler) Reconcile(ctx context.Context, req ctrl.R
 	// Step 7: Compute pass predictions if configured; clear stale data if disabled.
 	if eph.Spec.PassPrediction != nil && len(eph.Spec.PassPrediction.GroundStations) > 0 {
 		if err := r.predictPasses(ctx, eph, result); err != nil {
-			log.V(1).Info("pass prediction failed", "err", err)
+			log.Error(err, "pass prediction failed")
 			eph.Status.NextPassWindows = nil // clear stale pass data
 			meta.SetStatusCondition(&eph.Status.Conditions, metav1.Condition{
 				Type:               ntnv1alpha1.ConditionPassesPredicted,
@@ -402,7 +402,7 @@ func (r *SatelliteEphemerisReconciler) groundStationToEphemeris(
 
 	var ephList ntnv1alpha1.SatelliteEphemerisList
 	if err := r.List(ctx, &ephList, client.InNamespace(gs.Namespace)); err != nil {
-		log.V(1).Info("failed to list SatelliteEphemeris for ground station mapper", "err", err)
+		log.Error(err, "failed to list SatelliteEphemeris for ground station mapper")
 		return nil
 	}
 

@@ -295,7 +295,7 @@ func (r *NTNSliceReconciler) checkSatelliteAvailability(
 	if err := r.Get(ctx, key, eph); err != nil {
 		if !apierrors.IsNotFound(err) {
 			log := logf.FromContext(ctx)
-			log.V(1).Info("failed to get SatelliteEphemeris", "ref", ns.Spec.SatellitePath.EphemerisRef, "err", err)
+			log.Error(err, "failed to get SatelliteEphemeris", "ref", ns.Spec.SatellitePath.EphemerisRef)
 		}
 		return false
 	}
@@ -342,7 +342,7 @@ func (r *NTNSliceReconciler) ephemerisToSlice(
 	var sliceList ntnv1alpha1.NTNSliceList
 	if err := r.List(ctx, &sliceList, client.InNamespace(eph.Namespace)); err != nil {
 		log := logf.FromContext(ctx)
-		log.V(1).Info("failed to list NTNSlices for ephemeris mapper", "err", err)
+		log.Error(err, "failed to list NTNSlices for ephemeris mapper")
 		return nil
 	}
 
