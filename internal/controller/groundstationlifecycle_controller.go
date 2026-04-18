@@ -497,16 +497,18 @@ func (r *GroundStationLifecycleReconciler) checkHTTPEndpoint(ctx context.Context
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
-		log.V(2).Info("invalid endpoint URL", "endpoint", endpoint, "err", err)
+		log.V(1).Info("invalid endpoint URL", "err", err)
 		return false
 	}
 	if req.URL.Scheme != "http" && req.URL.Scheme != "https" {
-		log.V(2).Info("unsupported URL scheme", "endpoint", endpoint, "scheme", req.URL.Scheme)
+		log.V(1).Info("unsupported URL scheme", "scheme", req.URL.Scheme)
 		return false
 	}
+	// Log only scheme+host to avoid leaking credentials/tokens in URL.
+	safeEndpoint := req.URL.Scheme + "://" + req.URL.Host + req.URL.Path
 	resp, err := r.HTTPClient.Do(req)
 	if err != nil {
-		log.V(2).Info("health check failed", "endpoint", endpoint, "err", err)
+		log.V(2).Info("health check failed", "endpoint", safeEndpoint, "err", err)
 		return false
 	}
 	defer func() {
@@ -514,7 +516,7 @@ func (r *GroundStationLifecycleReconciler) checkHTTPEndpoint(ctx context.Context
 		_ = resp.Body.Close()
 	}()
 	healthy := resp.StatusCode >= 200 && resp.StatusCode < 300
-	log.V(2).Info("health check result", "endpoint", endpoint, "status", resp.StatusCode, "healthy", healthy)
+	log.V(2).Info("health check result", "endpoint", safeEndpoint, "status", resp.StatusCode, "healthy", healthy)
 	return healthy
 }
 
