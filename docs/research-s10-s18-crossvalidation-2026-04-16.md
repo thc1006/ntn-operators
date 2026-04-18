@@ -69,7 +69,7 @@ cu_cp:
 ```
 
 **來源**：
-1. [srsRAN geo_ntn.yml](https://github.com/srsran/srsRAN_Project/blob/main/configs/geo_ntn.yml)
+1. [srsRAN geo_ntn.yml](https://gitlab.com/ocudu/ocudu/-/blob/dev/configs/geo_ntn.yml) (migrated from archived srsRAN_Project)
 2. [srsRAN Config Reference](https://docs.srsran.com/projects/project/en/latest/user_manuals/source/config_ref.html)
 3. [srsRAN NTN Tutorial](https://docs.srsran.com/projects/project/en/latest/tutorials/source/ntn/source/index.html)
 4. [srsRAN NTN Tutorial source](https://docs.srsran.com/projects/project/en/latest/_sources/tutorials/source/ntn/source/index.rst.txt)
@@ -80,8 +80,8 @@ cu_cp:
 **問題描述**：LEO 衛星軌道周期 ~90-109 分鐘，ephemeris 需每幾分鐘更新。srsRAN/OCUDU 的 SIB19 ephemeris 是靜態的。
 
 **已確認的 Issues**：
-- [GitHub #1066](https://github.com/srsran/srsRAN_Project/issues/1066)（2025-02）：SIB19 ephemeris 不更新
-- [GitHub #1293](https://github.com/srsran/srsRAN_Project/issues/1293)：額外 SIB19 問題
+- [GitHub #1066](https://github.com/srsran/srsRAN_Project/issues/1066) (archived)（2025-02）：SIB19 ephemeris 不更新
+- [GitHub #1293](https://github.com/srsran/srsRAN_Project/issues/1293) (archived)：額外 SIB19 問題
 - srsRAN_Project 2026-02-17 **archived**
 
 **Amarisoft 的解決方案**（商業軟體）：
@@ -90,8 +90,8 @@ cu_cp:
 - 但 Amarisoft 是**閉源商業軟體**，不適合我們的開源 Provider
 
 **來源**：
-1. [GitHub Issue #1066](https://github.com/srsran/srsRAN_Project/issues/1066)
-2. [GitHub Issue #1293](https://github.com/srsran/srsRAN_Project/issues/1293)
+1. [GitHub Issue #1066](https://github.com/srsran/srsRAN_Project/issues/1066) (archived)
+2. [GitHub Issue #1293](https://github.com/srsran/srsRAN_Project/issues/1293) (archived)
 3. [ESA/Telesat/Amarisoft LEO NTN](https://connectivity.esa.int/archives/news/esa-telesat-and-amarisoft-achieve-worldfirst-5g-3gpp-nonterrestrial-network-link-over-leo)
 4. [Amarisoft NTN docs](https://tech-academy.amarisoft.com/NR_SA_NTN.html)
 5. [srsRAN NTN Tutorial](https://docs.srsran.com/projects/project/en/latest/tutorials/source/ntn/source/index.html)
@@ -110,7 +110,7 @@ cu_cp:
 **來源**：
 1. [OCUDU Helm blog](https://nilsfuerste.com/2026/02/02/ocudu-on-kubernetes-0-introducing-ocudu-and-helm-chart-architecture/)
 2. [srsRAN K8s docs](https://docs.srsran.com/projects/project/en/latest/tutorials/source/k8s/source/index.html)
-3. [srsRAN Helm repo](https://github.com/srsran/srsRAN_Project_helm)
+3. [srsRAN Helm repo](https://github.com/srsran/srsRAN_Project_helm) (archived; see gitlab.com/ocudu/ocudu)
 4. [OCUDU GitLab](https://gitlab.com/ocudu/ocudu)
 5. [OCUDU Docs](https://ocudu-docs-604e90.gitlab.io/)
 
