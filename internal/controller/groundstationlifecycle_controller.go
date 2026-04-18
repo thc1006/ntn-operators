@@ -87,6 +87,11 @@ type GroundStationLifecycleReconciler struct {
 // Reconcile checks ground station health, manages firmware OTA, and records phase transitions.
 func (r *GroundStationLifecycleReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
+	log.V(1).Info("reconciling")
+	reconcileStart := time.Now()
+	defer func() {
+		log.V(1).Info("reconcile complete", "duration", time.Since(reconcileStart))
+	}()
 
 	// Step 1: Fetch the CR.
 	gs := &ntnv1alpha1.GroundStationLifecycle{}
