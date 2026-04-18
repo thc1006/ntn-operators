@@ -173,7 +173,7 @@ func TestGenerateConfig_MovingRefLocation(t *testing.T) {
 			CellSpecificKoffset: 50,
 			EphemerisECEF:       ntnv1alpha1.EphemerisECEF{PosX: 1, PosY: 2, PosZ: 3},
 			MovingRefLocation: &ntnv1alpha1.MovingRefLocation{
-				Latitude:  248500, // 24.85° in 1e-4 degrees
+				Latitude:  248500,  // 24.85° in 1e-4 degrees
 				Longitude: 1210000, // 121.0° in 1e-4 degrees
 			},
 		},
