@@ -29,7 +29,7 @@ import (
 // This format was validated against srsRAN gNB commit 4bf1543 (OCUDU v1.0).
 // Key format differences from the old docs-era geo_ntn.yml:
 //   - ta_common is under ntn.ta_info (not ntn.ta_common)
-//   - ephemeris uses ephemeris_info_ecef (not ephemeris_info)
+//   - ephemeris uses ephemeris_info_ecef or ephemeris_orbital (variant)
 //   - sib_mapping is scalar 19 (not array [19])
 //   - si_window_position is REQUIRED for SIB19
 //   - pucch.sr_period_ms is omitted (let gNB use bandwidth-appropriate default)
@@ -40,6 +40,15 @@ ntn:
   cell_specific_koffset: {{ .Koffset }}
   ta_info:
     ta_common: {{ .TACommon }}
+{{- if .UseOrbital }}
+  ephemeris_orbital:
+    semi_major_axis: {{ .OrbSemiMajorAxis }}
+    eccentricity: {{ .OrbEccentricity }}
+    inclination: {{ .OrbInclination }}
+    right_ascension: {{ .OrbRightAscension }}
+    arg_of_periapsis: {{ .OrbArgOfPeriapsis }}
+    mean_anomaly: {{ .OrbMeanAnomaly }}
+{{- else }}
   ephemeris_info_ecef:
     pos_x: {{ .EphPosX }}
     pos_y: {{ .EphPosY }}
@@ -47,6 +56,7 @@ ntn:
     vel_x: {{ .EphVelX }}
     vel_y: {{ .EphVelY }}
     vel_z: {{ .EphVelZ }}
+{{- end }}
 
 cell_cfg:
   sib:
@@ -71,12 +81,19 @@ type configData struct {
 	PayloadType          string
 	Koffset              int
 	TACommon             int
+	UseOrbital           bool
 	EphPosX              int
 	EphPosY              int
 	EphPosZ              int
 	EphVelX              int
 	EphVelY              int
 	EphVelZ              int
+	OrbSemiMajorAxis     int
+	OrbEccentricity      int
+	OrbInclination       int
+	OrbRightAscension    int
+	OrbArgOfPeriapsis    int
+	OrbMeanAnomaly       int
 	PdschMaxHarqRetxs    int
 	PrachMaxMsg3HarqRetx int
 	RrcGuardTimeMs       int
@@ -99,15 +116,29 @@ func GenerateConfig(spec *ntnv1alpha1.NTNCellConfigSpec) ([]byte, error) {
 		PayloadType:          payloadType,
 		Koffset:              spec.NTN.CellSpecificKoffset,
 		TACommon:             spec.NTN.TACommon,
-		EphPosX:              spec.NTN.EphemerisECEF.PosX,
-		EphPosY:              spec.NTN.EphemerisECEF.PosY,
-		EphPosZ:              spec.NTN.EphemerisECEF.PosZ,
-		EphVelX:              spec.NTN.EphemerisECEF.VelX,
-		EphVelY:              spec.NTN.EphemerisECEF.VelY,
-		EphVelZ:              spec.NTN.EphemerisECEF.VelZ,
 		PdschMaxHarqRetxs:    0,
 		PrachMaxMsg3HarqRetx: 0,
 		RrcGuardTimeMs:       12800,
+	}
+
+	switch {
+	case spec.NTN.EphemerisOrbital != nil:
+		data.UseOrbital = true
+		data.OrbSemiMajorAxis = spec.NTN.EphemerisOrbital.SemiMajorAxis
+		data.OrbEccentricity = spec.NTN.EphemerisOrbital.Eccentricity
+		data.OrbInclination = spec.NTN.EphemerisOrbital.Inclination
+		data.OrbRightAscension = spec.NTN.EphemerisOrbital.RightAscension
+		data.OrbArgOfPeriapsis = spec.NTN.EphemerisOrbital.ArgOfPeriapsis
+		data.OrbMeanAnomaly = spec.NTN.EphemerisOrbital.MeanAnomaly
+	case spec.NTN.EphemerisECEF != nil:
+		data.EphPosX = spec.NTN.EphemerisECEF.PosX
+		data.EphPosY = spec.NTN.EphemerisECEF.PosY
+		data.EphPosZ = spec.NTN.EphemerisECEF.PosZ
+		data.EphVelX = spec.NTN.EphemerisECEF.VelX
+		data.EphVelY = spec.NTN.EphemerisECEF.VelY
+		data.EphVelZ = spec.NTN.EphemerisECEF.VelZ
+	default:
+		return nil, fmt.Errorf("either ephemerisECEF or ephemerisOrbital must be set")
 	}
 
 	// Apply custom overrides if provided.

@@ -51,7 +51,10 @@ type ProviderRef struct {
 }
 
 // NTNParams defines the core NTN radio parameters.
-// +kubebuilder:validation:XValidation:rule="self.ephemerisECEF.posX != 0 || self.ephemerisECEF.posY != 0 || self.ephemerisECEF.posZ != 0",message="ephemerisECEF position must not be all zeros"
+// Exactly one of ephemerisECEF or ephemerisOrbital must be set.
+// +kubebuilder:validation:XValidation:rule="has(self.ephemerisECEF) || has(self.ephemerisOrbital)",message="exactly one of ephemerisECEF or ephemerisOrbital must be set"
+// +kubebuilder:validation:XValidation:rule="!(has(self.ephemerisECEF) && has(self.ephemerisOrbital))",message="ephemerisECEF and ephemerisOrbital are mutually exclusive"
+// +kubebuilder:validation:XValidation:rule="!has(self.ephemerisECEF) || self.ephemerisECEF.posX != 0 || self.ephemerisECEF.posY != 0 || self.ephemerisECEF.posZ != 0",message="ephemerisECEF position must not be all zeros"
 type NTNParams struct {
 	// cellSpecificKoffset sets the cell-specific k-offset for NTN (0-1023).
 	// +kubebuilder:validation:Minimum=0
@@ -66,13 +69,49 @@ type NTNParams struct {
 	TACommon int `json:"taCommon,omitempty"`
 
 	// ephemerisECEF defines the satellite position and velocity in ECEF coordinates.
-	// +required
-	EphemerisECEF EphemerisECEF `json:"ephemerisECEF"`
+	// Mutually exclusive with ephemerisOrbital.
+	// +optional
+	EphemerisECEF *EphemerisECEF `json:"ephemerisECEF,omitempty"`
+
+	// ephemerisOrbital defines the satellite orbit using Keplerian elements.
+	// Mutually exclusive with ephemerisECEF. Preferred for LEO satellites
+	// where source data is in OMM/TLE form (CelesTrak, SpaceTrack).
+	// +optional
+	EphemerisOrbital *EphemerisOrbital `json:"ephemerisOrbital,omitempty"`
 
 	// payloadType specifies the satellite payload architecture.
 	// +kubebuilder:validation:Enum=transparent;regenerative
 	// +kubebuilder:default="transparent"
 	PayloadType string `json:"payloadType,omitempty"`
+}
+
+// EphemerisOrbital defines the satellite orbit using Keplerian elements,
+// matching OCUDU's orbital_coordinates_t representation.
+// All angular values are in units of 1e-4 degrees (per 3GPP TS 38.331).
+type EphemerisOrbital struct {
+	// semiMajorAxis is the semi-major axis in metres.
+	// +kubebuilder:validation:Minimum=6370000
+	SemiMajorAxis int `json:"semiMajorAxis"`
+	// eccentricity is the orbital eccentricity scaled by 1e6 (0-999999 for e < 1.0).
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=999999
+	Eccentricity int `json:"eccentricity"`
+	// inclination is the orbital inclination in 1e-4 degrees (0-1800000 = 0°-180°).
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=1800000
+	Inclination int `json:"inclination"`
+	// rightAscension is the right ascension of the ascending node in 1e-4 degrees (0-3600000).
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=3600000
+	RightAscension int `json:"rightAscension"`
+	// argOfPeriapsis is the argument of periapsis in 1e-4 degrees (0-3600000).
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=3600000
+	ArgOfPeriapsis int `json:"argOfPeriapsis"`
+	// meanAnomaly is the mean anomaly in 1e-4 degrees (0-3600000).
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=3600000
+	MeanAnomaly int `json:"meanAnomaly"`
 }
 
 // EphemerisECEF defines the satellite position and velocity in Earth-Centered
