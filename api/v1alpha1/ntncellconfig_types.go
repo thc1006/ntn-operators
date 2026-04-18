@@ -37,7 +37,7 @@ type NTNCellConfigSpec struct {
 	// ephemerisRef is the name of a SatelliteEphemeris CR in the same namespace
 	// whose ephemeris data will be used for dynamic NTN parameter updates.
 	// When set, the controller watches the referenced SatelliteEphemeris and
-	// re-reconciles when its status changes.
+	// re-reconciles when it is updated.
 	// +optional
 	EphemerisRef string `json:"ephemerisRef,omitempty"`
 }
