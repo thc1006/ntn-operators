@@ -343,10 +343,9 @@ func (r *GroundStationLifecycleReconciler) reconcileFirmware(
 		return
 	}
 
-	// Sync firmware version from node annotation on first reconcile or
-	// when current status version doesn't match either known version
-	// (indicating an external agent updated the firmware outside our control).
-	if v, ok := node.Annotations[firmwareVersionAnnotation]; ok && gs.Status.FirmwareVersion == "" {
+	// Always sync firmware version from node annotation so that external
+	// agent changes (outside of our OTA cycle) are reflected in status.
+	if v, ok := node.Annotations[firmwareVersionAnnotation]; ok {
 		gs.Status.FirmwareVersion = v
 	}
 
@@ -412,7 +411,7 @@ func (r *GroundStationLifecycleReconciler) reconcileFirmware(
 				Message:            "Available firmware version annotation removed during update",
 				ObservedGeneration: gs.Generation,
 			})
-			gs.Status.Phase = ntnv1alpha1.PhaseRunning
+			gs.Status.Phase = ntnv1alpha1.PhaseDegraded
 			gs.Status.FirmwareUpdateStarted = nil
 			return
 		}

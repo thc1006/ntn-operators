@@ -459,6 +459,78 @@ var _ = Describe("GroundStationLifecycle Controller", func() {
 		})
 	})
 
+	Context("Firmware version sync from node agent (external change)", func() {
+		BeforeEach(func() {
+			createGS(false, true)
+			createNode(true) // uses hardcoded firmware-version=2.3.0, available=2.3.1
+		})
+		AfterEach(func() {
+			deleteGS()
+			deleteNode()
+		})
+
+		It("should pick up firmware version changed externally by node agent", func() {
+			reconciler := newReconciler(nil)
+			_, err := reconcileGS(reconciler)
+			Expect(err).NotTo(HaveOccurred())
+
+			gs := getGS()
+			Expect(gs.Status.FirmwareVersion).To(Equal("2.3.0"))
+
+			// Node agent externally updates firmware to 3.0.0.
+			node := &corev1.Node{}
+			Expect(k8sClient.Get(context.Background(), types.NamespacedName{Name: nodeName}, node)).To(Succeed())
+			node.Annotations[firmwareVersionAnnotation] = "3.0.0"
+			node.Annotations[availableFirmwareAnnotation] = "3.0.0"
+			Expect(k8sClient.Update(context.Background(), node)).To(Succeed())
+
+			// Next reconcile should sync to 3.0.0.
+			_, err = reconcileGS(reconciler)
+			Expect(err).NotTo(HaveOccurred())
+
+			gs = getGS()
+			Expect(gs.Status.FirmwareVersion).To(Equal("3.0.0"))
+		})
+	})
+
+	Context("Firmware update interrupted (available version annotation removed)", func() {
+		BeforeEach(func() {
+			createGS(false, true)
+			createNode(true) // firmware-version=2.3.0, available=2.3.1
+		})
+		AfterEach(func() {
+			deleteGS()
+			deleteNode()
+		})
+
+		It("should transition to Degraded (not Running) on interruption", func() {
+			// Pre-set to Updating.
+			gs := &ntnv1alpha1.GroundStationLifecycle{}
+			Expect(k8sClient.Get(context.Background(), typeNamespacedName, gs)).To(Succeed())
+			gs.Status.Phase = ntnv1alpha1.PhaseUpdating
+			gs.Status.FirmwareVersion = "2.3.0"
+			gs.Status.FirmwareUpdateStarted = &metav1.Time{Time: fixedNow.Add(-5 * time.Minute)}
+			Expect(k8sClient.Status().Update(context.Background(), gs)).To(Succeed())
+
+			// Remove available-firmware annotation (simulates interruption).
+			node := &corev1.Node{}
+			Expect(k8sClient.Get(context.Background(), types.NamespacedName{Name: nodeName}, node)).To(Succeed())
+			delete(node.Annotations, availableFirmwareAnnotation)
+			Expect(k8sClient.Update(context.Background(), node)).To(Succeed())
+
+			reconciler := newReconciler(nil)
+			_, err := reconcileGS(reconciler)
+			Expect(err).NotTo(HaveOccurred())
+
+			updated := getGS()
+			Expect(updated.Status.Phase).To(Equal(ntnv1alpha1.PhaseDegraded))
+
+			cond := meta.FindStatusCondition(updated.Status.Conditions, ntnv1alpha1.ConditionFirmwareUpToDate)
+			Expect(cond).NotTo(BeNil())
+			Expect(cond.Reason).To(Equal("UpdateInterrupted"))
+		})
+	})
+
 	Context("Firmware update timeout", func() {
 		BeforeEach(func() {
 			createGS(false, true)
