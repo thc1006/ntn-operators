@@ -101,12 +101,12 @@ func (f *SpaceTrackFetcher) FetchWithCredentials(
 			"SpaceTrack credentials not set; use SetCredentials or FetchWithCredentials")
 	}
 
-	now := time.Now()
 	log := logr.FromContextOrDiscard(ctx)
 
 	// Serialize login + HTTP request to prevent cookie/session interleaving.
 	// JSON parsing is done outside the lock to reduce contention.
 	f.mu.Lock()
+	now := time.Now()
 
 	needLogin := !f.loggedIn || f.activeUsername != username || f.activePassword != password
 	if needLogin {
