@@ -509,7 +509,8 @@ func (r *GroundStationLifecycleReconciler) checkHTTPEndpoint(ctx context.Context
 	safeEndpoint := req.URL.Scheme + "://" + req.URL.Host
 	resp, err := r.HTTPClient.Do(req)
 	if err != nil {
-		log.V(2).Info("health check failed", "endpoint", safeEndpoint, "err", err)
+		// Don't log err directly — net/http errors embed the full URL which may contain credentials.
+		log.V(2).Info("health check failed", "endpoint", safeEndpoint)
 		return false
 	}
 	defer func() {
