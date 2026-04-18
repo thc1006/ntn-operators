@@ -28,13 +28,16 @@ var _ NTNProvider = &MockProvider{}
 
 // MockProvider is a test double for NTNProvider.
 type MockProvider struct {
-	mu          sync.Mutex
-	ApplyErr    error
-	StatusErr   error
-	ApplyCalls  int
-	StatusCalls int
-	LastSpec    *ntnv1alpha1.NTNCellConfigSpec
-	StatusValue *ntnv1alpha1.NTNCellConfigStatus
+	mu             sync.Mutex
+	ApplyErr       error
+	StatusErr      error
+	EphemerisErr   error
+	ApplyCalls     int
+	StatusCalls    int
+	EphemerisCalls int
+	LastSpec       *ntnv1alpha1.NTNCellConfigSpec
+	LastEphemeris  *EphemerisUpdate
+	StatusValue    *ntnv1alpha1.NTNCellConfigStatus
 }
 
 func (m *MockProvider) ApplyCellConfig(_ context.Context, _ string, spec *ntnv1alpha1.NTNCellConfigSpec) error {
@@ -53,4 +56,12 @@ func (m *MockProvider) GetCellStatus(_ context.Context, _, _ string) (*ntnv1alph
 		return m.StatusValue, m.StatusErr
 	}
 	return &ntnv1alpha1.NTNCellConfigStatus{}, m.StatusErr
+}
+
+func (m *MockProvider) PushEphemerisUpdate(_ context.Context, _, _ string, update EphemerisUpdate) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.EphemerisCalls++
+	m.LastEphemeris = &update
+	return m.EphemerisErr
 }

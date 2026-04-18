@@ -263,3 +263,128 @@ func TestConfigMapNameFor_NoCollision(t *testing.T) {
 		t.Errorf("name exceeds K8s limit: %d", len(nameA))
 	}
 }
+
+func TestPushEphemerisUpdate_ECEF(t *testing.T) {
+	p := newTestProvider(t)
+	ctx := context.Background()
+
+	// First apply to create the ConfigMap.
+	spec := geoSpec()
+	if err := p.ApplyCellConfig(ctx, "test-cr", spec); err != nil {
+		t.Fatalf("ApplyCellConfig: %v", err)
+	}
+
+	// Push updated ECEF.
+	update := provider.EphemerisUpdate{
+		ECEF: &ntnv1alpha1.EphemerisECEF{
+			PosX: 99999, PosY: 88888, PosZ: 77777,
+			VelX: 10, VelY: 20, VelZ: 30,
+		},
+	}
+	if err := p.PushEphemerisUpdate(ctx, "test-cr", "ntn-system", update); err != nil {
+		t.Fatalf("PushEphemerisUpdate: %v", err)
+	}
+
+	// Verify ConfigMap was updated.
+	var cm corev1.ConfigMap
+	key := types.NamespacedName{
+		Name:      ConfigMapNameFor("test-cr"),
+		Namespace: "ntn-system",
+	}
+	if err := p.client.Get(ctx, key, &cm); err != nil {
+		t.Fatalf("Get ConfigMap: %v", err)
+	}
+	yaml := cm.Data["geo_ntn.yml"]
+	if !contains(yaml, "pos_x: 99999") {
+		t.Errorf("expected updated pos_x in YAML:\n%s", yaml)
+	}
+	if !contains(yaml, "vel_z: 30") {
+		t.Errorf("expected updated vel_z in YAML:\n%s", yaml)
+	}
+	// Old values should be gone.
+	if contains(yaml, "pos_x: 20922195") {
+		t.Error("old pos_x should have been replaced")
+	}
+}
+
+func TestPushEphemerisUpdate_Orbital(t *testing.T) {
+	p := newTestProvider(t)
+	ctx := context.Background()
+
+	// First apply to create the ConfigMap.
+	if err := p.ApplyCellConfig(ctx, "test-cr", geoSpec()); err != nil {
+		t.Fatalf("ApplyCellConfig: %v", err)
+	}
+
+	// Push orbital update (replaces the ECEF block).
+	update := provider.EphemerisUpdate{
+		Orbital: &ntnv1alpha1.EphemerisOrbital{
+			SemiMajorAxis:  7000000,
+			Eccentricity:   100,
+			Inclination:    970000,
+			RightAscension: 500000,
+			ArgOfPeriapsis: 300000,
+			MeanAnomaly:    100000,
+		},
+	}
+	if err := p.PushEphemerisUpdate(ctx, "test-cr", "ntn-system", update); err != nil {
+		t.Fatalf("PushEphemerisUpdate: %v", err)
+	}
+
+	var cm corev1.ConfigMap
+	key := types.NamespacedName{
+		Name:      ConfigMapNameFor("test-cr"),
+		Namespace: "ntn-system",
+	}
+	if err := p.client.Get(ctx, key, &cm); err != nil {
+		t.Fatalf("Get ConfigMap: %v", err)
+	}
+	yaml := cm.Data["geo_ntn.yml"]
+	if !contains(yaml, "ephemeris_orbital:") {
+		t.Errorf("expected ephemeris_orbital block:\n%s", yaml)
+	}
+	if !contains(yaml, "semi_major_axis: 7000000") {
+		t.Errorf("expected semi_major_axis:\n%s", yaml)
+	}
+	// Old ECEF block should be gone.
+	if contains(yaml, "ephemeris_info_ecef:") {
+		t.Error("old ECEF block should have been replaced")
+	}
+}
+
+func TestPushEphemerisUpdate_BothSet(t *testing.T) {
+	p := newTestProvider(t)
+	err := p.PushEphemerisUpdate(
+		context.Background(), "cr", "ns",
+		provider.EphemerisUpdate{
+			ECEF:    &ntnv1alpha1.EphemerisECEF{PosX: 1},
+			Orbital: &ntnv1alpha1.EphemerisOrbital{SemiMajorAxis: 1},
+		},
+	)
+	if err == nil {
+		t.Fatal("expected error when both ECEF and Orbital are set")
+	}
+}
+
+func TestPushEphemerisUpdate_NoConfigMap(t *testing.T) {
+	p := newTestProvider(t)
+	ctx := context.Background()
+
+	update := provider.EphemerisUpdate{
+		ECEF: &ntnv1alpha1.EphemerisECEF{PosX: 1},
+	}
+	err := p.PushEphemerisUpdate(ctx, "nonexistent", "ntn-system", update)
+	if err == nil {
+		t.Fatal("expected error when ConfigMap doesn't exist")
+	}
+}
+
+func TestPushEphemerisUpdate_NeitherSet(t *testing.T) {
+	p := newTestProvider(t)
+	err := p.PushEphemerisUpdate(
+		context.Background(), "cr", "ns", provider.EphemerisUpdate{},
+	)
+	if err == nil {
+		t.Fatal("expected error when neither ECEF nor Orbital is set")
+	}
+}

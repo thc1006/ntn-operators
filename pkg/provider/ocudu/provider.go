@@ -31,6 +31,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	ntnv1alpha1 "github.com/thc1006/ntn-operators/api/v1alpha1"
+	"github.com/thc1006/ntn-operators/pkg/provider"
 )
 
 // ConfigMapPrefix is the prefix for ConfigMap names. Final name = prefix + CR name.
@@ -156,4 +157,103 @@ func (p *Provider) GetCellStatus(
 	}
 
 	return status, nil
+}
+
+// PushEphemerisUpdate updates the ephemeris section of the existing ConfigMap.
+// Phase 1 implementation: reads the current config, replaces the ephemeris
+// data, and writes it back. Future Phase 2 will use OCUDU's WebSocket API.
+func (p *Provider) PushEphemerisUpdate(
+	ctx context.Context, crName, namespace string, update provider.EphemerisUpdate,
+) error {
+	if namespace == "" {
+		return fmt.Errorf("namespace must not be empty")
+	}
+	if update.ECEF == nil && update.Orbital == nil {
+		return fmt.Errorf("either ECEF or Orbital must be set")
+	}
+	if update.ECEF != nil && update.Orbital != nil {
+		return fmt.Errorf("ECEF and Orbital are mutually exclusive")
+	}
+
+	cm := &corev1.ConfigMap{}
+	key := types.NamespacedName{
+		Name:      ConfigMapNameFor(crName),
+		Namespace: namespace,
+	}
+	if err := p.client.Get(ctx, key, cm); err != nil {
+		return fmt.Errorf("reading ConfigMap: %w", err)
+	}
+
+	yamlContent, ok := cm.Data["geo_ntn.yml"]
+	if !ok {
+		return fmt.Errorf("ConfigMap missing geo_ntn.yml")
+	}
+
+	// Replace the ephemeris section in the existing YAML.
+	updated := replaceEphemeris(yamlContent, update)
+	cm.Data["geo_ntn.yml"] = updated
+
+	if err := p.client.Update(ctx, cm); err != nil {
+		return fmt.Errorf("updating ConfigMap: %w", err)
+	}
+	return nil
+}
+
+// replaceEphemeris replaces the ephemeris block in OCUDU config YAML.
+func replaceEphemeris(
+	content string, update provider.EphemerisUpdate,
+) string {
+	var newBlock string
+	if update.Orbital != nil {
+		newBlock = fmt.Sprintf(`  ephemeris_orbital:
+    semi_major_axis: %d
+    eccentricity: %d
+    inclination: %d
+    right_ascension: %d
+    arg_of_periapsis: %d
+    mean_anomaly: %d`,
+			update.Orbital.SemiMajorAxis,
+			update.Orbital.Eccentricity,
+			update.Orbital.Inclination,
+			update.Orbital.RightAscension,
+			update.Orbital.ArgOfPeriapsis,
+			update.Orbital.MeanAnomaly)
+	} else {
+		newBlock = fmt.Sprintf(`  ephemeris_info_ecef:
+    pos_x: %d
+    pos_y: %d
+    pos_z: %d
+    vel_x: %d
+    vel_y: %d
+    vel_z: %d`,
+			update.ECEF.PosX,
+			update.ECEF.PosY,
+			update.ECEF.PosZ,
+			update.ECEF.VelX,
+			update.ECEF.VelY,
+			update.ECEF.VelZ)
+	}
+
+	// Find and replace ephemeris_info_ecef or ephemeris_orbital block.
+	lines := strings.Split(content, "\n")
+	var result []string
+	skip := false
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "ephemeris_info_ecef:" ||
+			trimmed == "ephemeris_orbital:" {
+			skip = true
+			result = append(result, strings.Split(newBlock, "\n")...)
+			continue
+		}
+		if skip {
+			// Skip indented sub-fields of the old block.
+			if strings.HasPrefix(line, "    ") && !strings.HasPrefix(trimmed, "#") {
+				continue
+			}
+			skip = false
+		}
+		result = append(result, line)
+	}
+	return strings.Join(result, "\n")
 }
