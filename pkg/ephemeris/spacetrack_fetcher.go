@@ -217,13 +217,17 @@ func (f *SpaceTrackFetcher) doFetchGP(ctx context.Context, gpURL string, now tim
 		}, nil
 
 	case http.StatusForbidden, http.StatusTooManyRequests:
+		// Drain body to allow connection reuse.
+		_, _ = io.Copy(io.Discard, resp.Body)
 		return GPFetchResult{}, ErrRateLimited
 
 	case http.StatusUnauthorized:
+		_, _ = io.Copy(io.Discard, resp.Body)
 		f.loggedIn = false
 		return GPFetchResult{}, fmt.Errorf("%w (HTTP 401)", errSessionExpired)
 
 	default:
+		_, _ = io.Copy(io.Discard, resp.Body)
 		return GPFetchResult{}, fmt.Errorf("%w: HTTP %d from %s", ErrBadResponse, resp.StatusCode, gpURL)
 	}
 }
