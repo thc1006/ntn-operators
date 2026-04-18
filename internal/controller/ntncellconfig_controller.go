@@ -56,6 +56,11 @@ type NTNCellConfigReconciler struct {
 // Reconcile applies NTN cell configuration to the specified provider backend.
 func (r *NTNCellConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
+	log.V(1).Info("reconciling")
+	reconcileStart := time.Now()
+	defer func() {
+		log.V(1).Info("reconcile complete", "duration", time.Since(reconcileStart))
+	}()
 
 	// Step 1: Get the NTNCellConfig resource.
 	cc := &ntnv1alpha1.NTNCellConfig{}
@@ -185,7 +190,7 @@ func (r *NTNCellConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		if !metav1.IsControlledBy(cm, cc) {
 			if err := controllerutil.SetControllerReference(cc, cm, r.Scheme); err == nil {
 				if err := r.Update(ctx, cm); err != nil {
-					log.Error(err, "Failed to set OwnerReference on ConfigMap")
+					log.V(1).Info("failed to set OwnerReference on ConfigMap", "err", err)
 				}
 			}
 		}
@@ -194,7 +199,7 @@ func (r *NTNCellConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// Step 6: Get applied status from provider.
 	status, err := r.Provider.GetCellStatus(ctx, cc.Name, spec.Provider.Namespace)
 	if err != nil {
-		log.Error(err, "Failed to get cell status after apply")
+		log.V(1).Info("failed to get cell status after apply", "err", err)
 		meta.SetStatusCondition(&cc.Status.Conditions, metav1.Condition{
 			Type:               ntnv1alpha1.ConditionConfigApplied,
 			Status:             metav1.ConditionUnknown,

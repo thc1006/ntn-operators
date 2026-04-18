@@ -63,6 +63,11 @@ type SatelliteEphemerisReconciler struct {
 // Reconcile fetches GP data, computes pass predictions, and updates status.
 func (r *SatelliteEphemerisReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
+	log.V(1).Info("reconciling")
+	reconcileStart := time.Now()
+	defer func() {
+		log.V(1).Info("reconcile complete", "duration", time.Since(reconcileStart))
+	}()
 
 	// Step 1: Get the SatelliteEphemeris resource.
 	eph := &ntnv1alpha1.SatelliteEphemeris{}
@@ -153,7 +158,7 @@ func (r *SatelliteEphemerisReconciler) Reconcile(ctx context.Context, req ctrl.R
 	// Step 7: Compute pass predictions if configured; clear stale data if disabled.
 	if eph.Spec.PassPrediction != nil && len(eph.Spec.PassPrediction.GroundStations) > 0 {
 		if err := r.predictPasses(ctx, eph, result); err != nil {
-			log.Error(err, "Pass prediction failed")
+			log.V(1).Info("pass prediction failed", "err", err)
 			eph.Status.NextPassWindows = nil // clear stale pass data
 			meta.SetStatusCondition(&eph.Status.Conditions, metav1.Condition{
 				Type:               ntnv1alpha1.ConditionPassesPredicted,
@@ -397,7 +402,7 @@ func (r *SatelliteEphemerisReconciler) groundStationToEphemeris(
 
 	var ephList ntnv1alpha1.SatelliteEphemerisList
 	if err := r.List(ctx, &ephList, client.InNamespace(gs.Namespace)); err != nil {
-		log.Error(err, "Failed to list SatelliteEphemeris for ground station mapper")
+		log.V(1).Info("failed to list SatelliteEphemeris for ground station mapper", "err", err)
 		return nil
 	}
 
