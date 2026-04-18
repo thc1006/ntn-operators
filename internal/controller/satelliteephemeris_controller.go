@@ -57,7 +57,7 @@ type SatelliteEphemerisReconciler struct {
 // +kubebuilder:rbac:groups=ntn.operators.dev,resources=satelliteephemeris/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=ntn.operators.dev,resources=satelliteephemeris/finalizers,verbs=update
 // +kubebuilder:rbac:groups=ntn.operators.dev,resources=groundstationlifecycles,verbs=get;list;watch
-// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=secrets,verbs=get
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
 // Reconcile fetches GP data, computes pass predictions, and updates status.
@@ -305,6 +305,11 @@ func (r *SatelliteEphemerisReconciler) handleFetchError(
 		Message:            "No data to parse due to fetch failure",
 		ObservedGeneration: eph.Generation,
 	})
+
+	// Clear stale pass windows to prevent NTNSlice from using outdated data
+	// for failover readiness decisions.
+	eph.Status.NextPassWindows = nil
+	meta.RemoveStatusCondition(&eph.Status.Conditions, ntnv1alpha1.ConditionPassesPredicted)
 
 	if err := r.Status().Update(ctx, eph); err != nil {
 		return ctrl.Result{}, err

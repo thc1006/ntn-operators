@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/akhenakh/sgp4"
+	"github.com/go-logr/logr"
 )
 
 // SpaceTrackFetcher implements GPFetcher for Space-Track.org OMM JSON endpoints.
@@ -89,8 +90,11 @@ func (f *SpaceTrackFetcher) Fetch(ctx context.Context, gpURL string) (GPFetchRes
 		return GPFetchResult{}, fmt.Errorf("SpaceTrack credentials not configured; set credentials via Secret reference")
 	}
 
+	log := logr.FromContextOrDiscard(ctx)
+
 	// Login if we don't have a session.
 	if !loggedIn {
+		log.V(1).Info("authenticating with SpaceTrack")
 		if err := f.login(ctx, username, password); err != nil {
 			return GPFetchResult{}, fmt.Errorf("SpaceTrack login failed: %w", err)
 		}
@@ -104,6 +108,7 @@ func (f *SpaceTrackFetcher) Fetch(ctx context.Context, gpURL string) (GPFetchRes
 
 	// On 401, retry login once and re-fetch.
 	if isSessionExpired(err) {
+		log.V(1).Info("session expired, re-authenticating")
 		if loginErr := f.login(ctx, username, password); loginErr != nil {
 			return GPFetchResult{}, fmt.Errorf("SpaceTrack re-login failed: %w", loginErr)
 		}

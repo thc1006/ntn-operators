@@ -283,6 +283,49 @@ var _ = Describe("SatelliteEphemeris Controller", func() {
 		})
 	})
 
+	Context("When fetch fails with stale pass windows (regression #13)", func() {
+		BeforeEach(func() { createResource() })
+		AfterEach(func() { deleteResource() })
+
+		It("should clear NextPassWindows and remove PassesPredicted on fetch failure", func() {
+			// First: seed status with pass windows and PassesPredicted=True.
+			eph := &ntnv1alpha1.SatelliteEphemeris{}
+			Expect(k8sClient.Get(context.Background(), typeNamespacedName, eph)).To(Succeed())
+			eph.Status.SatelliteCount = 100
+			eph.Status.NextPassWindows = []ntnv1alpha1.PassWindow{
+				{
+					Satellite: "SAT-1", GroundStation: "gs-01",
+					AOS: metav1.Time{Time: time.Now()}, LOS: metav1.Time{Time: time.Now().Add(time.Hour)},
+					MaxElevation: "45.0",
+				},
+			}
+			meta.SetStatusCondition(&eph.Status.Conditions, metav1.Condition{
+				Type: ntnv1alpha1.ConditionPassesPredicted, Status: metav1.ConditionTrue,
+				Reason: "PredictionSucceeded", Message: "1 passes",
+			})
+			Expect(k8sClient.Status().Update(context.Background(), eph)).To(Succeed())
+
+			// Verify seeded state.
+			Expect(eph.Status.NextPassWindows).To(HaveLen(1))
+
+			// Now reconcile with a failing fetcher.
+			mock := &mockGPFetcher{err: errors.New("network timeout")}
+			reconciler := newReconciler(mock)
+			_, err := reconciler.Reconcile(context.Background(), reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			// Verify stale data is cleared.
+			updated := &ntnv1alpha1.SatelliteEphemeris{}
+			Expect(k8sClient.Get(context.Background(), typeNamespacedName, updated)).To(Succeed())
+			Expect(updated.Status.NextPassWindows).To(BeEmpty())
+
+			passCond := meta.FindStatusCondition(updated.Status.Conditions, ntnv1alpha1.ConditionPassesPredicted)
+			Expect(passCond).To(BeNil(), "PassesPredicted condition should be removed on fetch failure")
+		})
+	})
+
 	Context("When refreshInterval is below minimum", func() {
 		BeforeEach(func() {
 			resource := &ntnv1alpha1.SatelliteEphemeris{
