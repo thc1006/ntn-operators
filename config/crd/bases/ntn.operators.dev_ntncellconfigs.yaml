@@ -87,8 +87,9 @@ spec:
                     minimum: 0
                     type: integer
                   ephemerisECEF:
-                    description: ephemerisECEF defines the satellite position and
-                      velocity in ECEF coordinates.
+                    description: |-
+                      ephemerisECEF defines the satellite position and velocity in ECEF coordinates.
+                      Mutually exclusive with ephemerisOrbital.
                     properties:
                       posX:
                         description: posX is the X position of the satellite (-67108864
@@ -128,6 +129,54 @@ spec:
                     - posY
                     - posZ
                     type: object
+                  ephemerisOrbital:
+                    description: |-
+                      ephemerisOrbital defines the satellite orbit using Keplerian elements.
+                      Mutually exclusive with ephemerisECEF. Preferred for LEO satellites
+                      where source data is in OMM/TLE form (CelesTrak, SpaceTrack).
+                    properties:
+                      argOfPeriapsis:
+                        description: argOfPeriapsis is the argument of periapsis in
+                          1e-4 degrees (0-3600000).
+                        maximum: 3600000
+                        minimum: 0
+                        type: integer
+                      eccentricity:
+                        description: eccentricity is the orbital eccentricity scaled
+                          by 1e6 (0-999999 for e < 1.0).
+                        maximum: 999999
+                        minimum: 0
+                        type: integer
+                      inclination:
+                        description: inclination is the orbital inclination in 1e-4
+                          degrees (0-1800000 = 0°-180°).
+                        maximum: 1800000
+                        minimum: 0
+                        type: integer
+                      meanAnomaly:
+                        description: meanAnomaly is the mean anomaly in 1e-4 degrees
+                          (0-3600000).
+                        maximum: 3600000
+                        minimum: 0
+                        type: integer
+                      rightAscension:
+                        description: rightAscension is the right ascension of the
+                          ascending node in 1e-4 degrees (0-3600000).
+                        maximum: 3600000
+                        minimum: 0
+                        type: integer
+                      semiMajorAxis:
+                        description: semiMajorAxis is the semi-major axis in metres.
+                        minimum: 6370000
+                        type: integer
+                    required:
+                    - argOfPeriapsis
+                    - eccentricity
+                    - inclination
+                    - meanAnomaly
+                    - rightAscension
+                    - semiMajorAxis
+                    type: object
                   payloadType:
                     default: transparent
                     description: payloadType specifies the satellite payload architecture.
@@ -141,13 +190,17 @@ spec:
                     maximum: 66485757
                     minimum: 0
                     type: integer
-                required:
-                - ephemerisECEF
                 type: object
                 x-kubernetes-validations:
+                - message: exactly one of ephemerisECEF or ephemerisOrbital must be
+                    set
+                  rule: has(self.ephemerisECEF) || has(self.ephemerisOrbital)
+                - message: ephemerisECEF and ephemerisOrbital are mutually exclusive
+                  rule: '!(has(self.ephemerisECEF) && has(self.ephemerisOrbital))'
                 - message: ephemerisECEF position must not be all zeros
-                  rule: self.ephemerisECEF.posX != 0 || self.ephemerisECEF.posY !=
-                    0 || self.ephemerisECEF.posZ != 0
+                  rule: '!has(self.ephemerisECEF) || self.ephemerisECEF.posX != 0
+                    || self.ephemerisECEF.posY != 0 || self.ephemerisECEF.posZ !=
+                    0'
               provider:
                 description: provider specifies which NTN backend to configure.
                 properties:

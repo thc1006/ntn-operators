@@ -37,7 +37,7 @@ func geoSpec() *ntnv1alpha1.NTNCellConfigSpec {
 		NTN: ntnv1alpha1.NTNParams{
 			CellSpecificKoffset: 150,
 			TACommon:            0,
-			EphemerisECEF: ntnv1alpha1.EphemerisECEF{
+			EphemerisECEF: &ntnv1alpha1.EphemerisECEF{
 				PosX: 20922195, PosY: 1967783, PosZ: 19770302,
 			},
 			PayloadType: "transparent",

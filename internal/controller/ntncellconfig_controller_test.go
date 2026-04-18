@@ -49,7 +49,7 @@ var _ = Describe("NTNCellConfig Controller", func() {
 			NTN: ntnv1alpha1.NTNParams{
 				CellSpecificKoffset: 150,
 				TACommon:            0,
-				EphemerisECEF: ntnv1alpha1.EphemerisECEF{
+				EphemerisECEF: &ntnv1alpha1.EphemerisECEF{
 					PosX: 20922195, PosY: 1967783, PosZ: 19770302,
 				},
 				PayloadType: "transparent",
@@ -171,7 +171,7 @@ var _ = Describe("NTNCellConfig Controller", func() {
 				Spec: ntnv1alpha1.NTNCellConfigSpec{
 					Provider: ntnv1alpha1.ProviderRef{Type: "aalyria"},
 					NTN: ntnv1alpha1.NTNParams{
-						EphemerisECEF: ntnv1alpha1.EphemerisECEF{PosX: 1, PosY: 2, PosZ: 3},
+						EphemerisECEF: &ntnv1alpha1.EphemerisECEF{PosX: 1, PosY: 2, PosZ: 3},
 					},
 				},
 			}
@@ -224,7 +224,7 @@ var _ = Describe("NTNCellConfig Controller", func() {
 					Provider: ntnv1alpha1.ProviderRef{Type: "ocudu", Namespace: "other-ns"},
 					NTN: ntnv1alpha1.NTNParams{
 						CellSpecificKoffset: 150,
-						EphemerisECEF:       ntnv1alpha1.EphemerisECEF{PosX: 1, PosY: 2, PosZ: 3},
+						EphemerisECEF:       &ntnv1alpha1.EphemerisECEF{PosX: 1, PosY: 2, PosZ: 3},
 						PayloadType:         "transparent",
 					},
 				},
@@ -411,7 +411,7 @@ var _ = Describe("NTNCellConfig Controller", func() {
 				Spec: ntnv1alpha1.NTNCellConfigSpec{
 					Provider: ntnv1alpha1.ProviderRef{Type: "ocudu"},
 					NTN: ntnv1alpha1.NTNParams{
-						EphemerisECEF: ntnv1alpha1.EphemerisECEF{
+						EphemerisECEF: &ntnv1alpha1.EphemerisECEF{
 							PosX: 0, PosY: 0, PosZ: 0,
 						},
 						PayloadType: "transparent",

@@ -28,7 +28,7 @@ func TestGenerateConfig_GEODefault(t *testing.T) {
 		NTN: ntnv1alpha1.NTNParams{
 			CellSpecificKoffset: 150,
 			TACommon:            0,
-			EphemerisECEF: ntnv1alpha1.EphemerisECEF{
+			EphemerisECEF: &ntnv1alpha1.EphemerisECEF{
 				PosX: 20922195,
 				PosY: 1967783,
 				PosZ: 19770302,
@@ -79,7 +79,7 @@ func TestGenerateConfig_CustomKoffset(t *testing.T) {
 		NTN: ntnv1alpha1.NTNParams{
 			CellSpecificKoffset: 500,
 			TACommon:            1000,
-			EphemerisECEF:       ntnv1alpha1.EphemerisECEF{PosX: 1, PosY: 2, PosZ: 3},
+			EphemerisECEF:       &ntnv1alpha1.EphemerisECEF{PosX: 1, PosY: 2, PosZ: 3},
 		},
 	}
 
@@ -98,7 +98,7 @@ func TestGenerateConfig_CustomCellOverrides(t *testing.T) {
 	spec := &ntnv1alpha1.NTNCellConfigSpec{
 		NTN: ntnv1alpha1.NTNParams{
 			CellSpecificKoffset: 150,
-			EphemerisECEF:       ntnv1alpha1.EphemerisECEF{PosX: 1, PosY: 2, PosZ: 3},
+			EphemerisECEF:       &ntnv1alpha1.EphemerisECEF{PosX: 1, PosY: 2, PosZ: 3},
 		},
 		CellOverrides: &ntnv1alpha1.CellOverrides{
 			PdschMaxHarqRetxs:    2,
@@ -122,7 +122,7 @@ func TestGenerateConfig_LEOWithVelocity(t *testing.T) {
 	spec := &ntnv1alpha1.NTNCellConfigSpec{
 		NTN: ntnv1alpha1.NTNParams{
 			CellSpecificKoffset: 50,
-			EphemerisECEF: ntnv1alpha1.EphemerisECEF{
+			EphemerisECEF: &ntnv1alpha1.EphemerisECEF{
 				PosX: 1000000, PosY: 2000000, PosZ: 3000000,
 				VelX: 100, VelY: -200, VelZ: 50,
 			},
@@ -140,6 +140,67 @@ func TestGenerateConfig_LEOWithVelocity(t *testing.T) {
 	assertContains(t, yaml, "vel_z: 50")
 }
 
+func TestGenerateConfig_OrbitalEphemeris(t *testing.T) {
+	spec := &ntnv1alpha1.NTNCellConfigSpec{
+		NTN: ntnv1alpha1.NTNParams{
+			CellSpecificKoffset: 50,
+			EphemerisOrbital: &ntnv1alpha1.EphemerisOrbital{
+				SemiMajorAxis:  6921000,
+				Eccentricity:   1,
+				Inclination:    879000,
+				RightAscension: 1000000,
+				ArgOfPeriapsis: 900000,
+				MeanAnomaly:    2700000,
+			},
+			PayloadType: "transparent",
+		},
+	}
+
+	data, err := GenerateConfig(spec)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	yaml := string(data)
+
+	// Should emit ephemeris_orbital, NOT ephemeris_info_ecef.
+	assertContains(t, yaml, "ephemeris_orbital:")
+	assertNotContains(t, yaml, "ephemeris_info_ecef:")
+
+	assertContains(t, yaml, "semi_major_axis: 6921000")
+	assertContains(t, yaml, "eccentricity: 1")
+	assertContains(t, yaml, "inclination: 879000")
+	assertContains(t, yaml, "right_ascension: 1000000")
+	assertContains(t, yaml, "arg_of_periapsis: 900000")
+	assertContains(t, yaml, "mean_anomaly: 2700000")
+}
+
+func TestGenerateConfig_BothEphemerisSet(t *testing.T) {
+	spec := &ntnv1alpha1.NTNCellConfigSpec{
+		NTN: ntnv1alpha1.NTNParams{
+			EphemerisECEF:    &ntnv1alpha1.EphemerisECEF{PosX: 1, PosY: 2, PosZ: 3},
+			EphemerisOrbital: &ntnv1alpha1.EphemerisOrbital{SemiMajorAxis: 6921000},
+		},
+	}
+	_, err := GenerateConfig(spec)
+	if err == nil {
+		t.Fatal("expected error when both ephemeris types are set")
+	}
+	assertContains(t, err.Error(), "mutually exclusive")
+}
+
+func TestGenerateConfig_NeitherEphemerisSet(t *testing.T) {
+	spec := &ntnv1alpha1.NTNCellConfigSpec{
+		NTN: ntnv1alpha1.NTNParams{
+			CellSpecificKoffset: 150,
+		},
+	}
+	_, err := GenerateConfig(spec)
+	if err == nil {
+		t.Fatal("expected error when neither ephemeris type is set")
+	}
+}
+
 func TestGenerateConfig_NilSpec(t *testing.T) {
 	_, err := GenerateConfig(nil)
 	if err == nil {
@@ -154,7 +215,7 @@ func TestGenerateConfig_MatchesLiveGNBFormat(t *testing.T) {
 		NTN: ntnv1alpha1.NTNParams{
 			CellSpecificKoffset: 150,
 			TACommon:            0,
-			EphemerisECEF: ntnv1alpha1.EphemerisECEF{
+			EphemerisECEF: &ntnv1alpha1.EphemerisECEF{
 				PosX: 20922195, PosY: 1967783, PosZ: 19770302,
 			},
 			PayloadType: "transparent",
