@@ -97,7 +97,7 @@ func (f *SpaceTrackFetcher) FetchWithCredentials(
 	ctx context.Context, gpURL, username, password string,
 ) (GPFetchResult, error) {
 	if username == "" || password == "" {
-		return GPFetchResult{}, fmt.Errorf("SpaceTrack credentials not configured; set credentials via Secret reference")
+		return GPFetchResult{}, fmt.Errorf("SpaceTrack credentials not set; call SetCredentials or pass credentials to FetchWithCredentials")
 	}
 
 	now := time.Now()
