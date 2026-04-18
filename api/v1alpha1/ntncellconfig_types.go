@@ -34,10 +34,12 @@ type NTNCellConfigSpec struct {
 	// +optional
 	CellOverrides *CellOverrides `json:"cellOverrides,omitempty"`
 
-	// ephemerisRef is the name of a SatelliteEphemeris CR in the same namespace
-	// whose ephemeris data will be used for dynamic NTN parameter updates.
-	// When set, the controller watches the referenced SatelliteEphemeris and
-	// re-reconciles when it is updated.
+	// ephemerisRef is the name of a SatelliteEphemeris CR in the same namespace.
+	// When set, the controller re-reconciles this NTNCellConfig whenever the
+	// referenced SatelliteEphemeris is updated. Future work will consume the
+	// ephemeris data for dynamic NTN parameter updates; currently this field
+	// only triggers reconciliation. The static ephemeris in spec.ntn
+	// (ephemerisECEF or ephemerisOrbital) remains required.
 	// +optional
 	EphemerisRef string `json:"ephemerisRef,omitempty"`
 }
