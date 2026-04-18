@@ -248,3 +248,18 @@ func TestGetCellStatus_MissingGeoNtn(t *testing.T) {
 func contains(s, substr string) bool {
 	return strings.Contains(s, substr)
 }
+
+func TestConfigMapNameFor_NoCollision(t *testing.T) {
+	// Two different long names that share a 243-char prefix should produce
+	// different ConfigMap names (hash suffix prevents collision).
+	base := strings.Repeat("a", 245)
+	nameA := ConfigMapNameFor(base + "-alpha")
+	nameB := ConfigMapNameFor(base + "-bravo")
+
+	if nameA == nameB {
+		t.Errorf("collision: different CR names produced same ConfigMap name %q", nameA)
+	}
+	if len(nameA) > maxK8sNameLen {
+		t.Errorf("name exceeds K8s limit: %d", len(nameA))
+	}
+}
