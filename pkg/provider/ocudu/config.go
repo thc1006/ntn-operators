@@ -190,7 +190,7 @@ func GenerateConfig(spec *ntnv1alpha1.NTNCellConfigSpec) ([]byte, error) {
 	// Populate extended TA info fields.
 	if spec.NTN.TAInfo != nil {
 		data.TACommon = spec.NTN.TAInfo.TACommon
-		// Use boolean sentinel so zero-value drift/offset are still emitted.
+		// Emit drift/offset sub-fields only when at least one is non-zero.
 		ta := spec.NTN.TAInfo
 		if ta.TACommonDrift != 0 || ta.TACommonDriftVariant != 0 || ta.TACommonOffset != 0 {
 			data.TAInfoExtended = true

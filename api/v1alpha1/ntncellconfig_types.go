@@ -128,10 +128,11 @@ type NTNParams struct {
 
 // TAInfo provides extended Timing Advance parameters per 3GPP TS 38.213.
 type TAInfo struct {
-	// taCommon is the common Timing Advance value (0-66485757).
+	// taCommon is the common Timing Advance value (0-66485757). Required when
+	// taInfo is set — explicitly provide 0 for GEO satellites.
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:validation:Maximum=66485757
-	TACommon int `json:"taCommon,omitempty"`
+	TACommon int `json:"taCommon"`
 
 	// taCommonDrift is the TA drift rate.
 	// +optional
@@ -164,13 +165,13 @@ type FeederLinkInfo struct {
 	// enableDopplerCompensation enables feeder link Doppler compensation.
 	EnableDopplerCompensation bool `json:"enableDopplerCompensation"`
 
-	// dlFreqHz is the downlink frequency in Hz.
-	// +kubebuilder:validation:Minimum=0
-	DLFreqHz int64 `json:"dlFreqHz,omitempty"`
+	// dlFreqHz is the downlink frequency in Hz. Required when feederLinkInfo is set.
+	// +kubebuilder:validation:Minimum=1
+	DLFreqHz int64 `json:"dlFreqHz"`
 
-	// ulFreqHz is the uplink frequency in Hz.
-	// +kubebuilder:validation:Minimum=0
-	ULFreqHz int64 `json:"ulFreqHz,omitempty"`
+	// ulFreqHz is the uplink frequency in Hz. Required when feederLinkInfo is set.
+	// +kubebuilder:validation:Minimum=1
+	ULFreqHz int64 `json:"ulFreqHz"`
 }
 
 // NTNGatewayLocation specifies the NTN gateway coordinates.
@@ -186,9 +187,8 @@ type NTNGatewayLocation struct {
 	// +kubebuilder:validation:Maximum=1800000
 	Longitude int `json:"longitude"`
 
-	// altitude in metres above sea level.
-	// +optional
-	Altitude int `json:"altitude,omitempty"`
+	// altitude in metres above sea level. Required when ntnGatewayLocation is set.
+	Altitude int `json:"altitude"`
 }
 
 // MovingRefLocation defines the Earth-moving reference location for LEO NTN cells.

@@ -201,21 +201,25 @@ spec:
                       Doppler compensation.
                     properties:
                       dlFreqHz:
-                        description: dlFreqHz is the downlink frequency in Hz.
+                        description: dlFreqHz is the downlink frequency in Hz. Required
+                          when feederLinkInfo is set.
                         format: int64
-                        minimum: 0
+                        minimum: 1
                         type: integer
                       enableDopplerCompensation:
                         description: enableDopplerCompensation enables feeder link
                           Doppler compensation.
                         type: boolean
                       ulFreqHz:
-                        description: ulFreqHz is the uplink frequency in Hz.
+                        description: ulFreqHz is the uplink frequency in Hz. Required
+                          when feederLinkInfo is set.
                         format: int64
-                        minimum: 0
+                        minimum: 1
                         type: integer
                     required:
+                    - dlFreqHz
                     - enableDopplerCompensation
+                    - ulFreqHz
                     type: object
                   movingRefLocation:
                     description: |-
@@ -243,7 +247,8 @@ spec:
                       station) coordinates.
                     properties:
                       altitude:
-                        description: altitude in metres above sea level.
+                        description: altitude in metres above sea level. Required
+                          when ntnGatewayLocation is set.
                         type: integer
                       latitude:
                         description: latitude in 1e-4 degrees (-900000 to 900000).
@@ -256,6 +261,7 @@ spec:
                         minimum: -1800000
                         type: integer
                     required:
+                    - altitude
                     - latitude
                     - longitude
                     type: object
@@ -333,7 +339,9 @@ spec:
                       When set, taInfo.taCommon takes precedence over the top-level taCommon field.
                     properties:
                       taCommon:
-                        description: taCommon is the common Timing Advance value (0-66485757).
+                        description: |-
+                          taCommon is the common Timing Advance value (0-66485757). Required when
+                          taInfo is set — explicitly provide 0 for GEO satellites.
                         maximum: 66485757
                         minimum: 0
                         type: integer
@@ -346,6 +354,8 @@ spec:
                       taCommonOffset:
                         description: taCommonOffset is an additional TA offset.
                         type: integer
+                    required:
+                    - taCommon
                     type: object
                   taReport:
                     description: taReport enables UE TA reporting.
