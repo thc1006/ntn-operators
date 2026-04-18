@@ -119,50 +119,50 @@ cu_cp:
 var parsedTemplate = template.Must(template.New("ocudu-ntn").Parse(configTemplate))
 
 type configData struct {
-	PayloadType              string
-	Koffset                  int
-	TACommon                 int
-	TAInfoExtended           bool
-	TACommonDrift            int
-	TACommonDriftVariant     int
-	TACommonOffset           int
-	UseOrbital               bool
-	EphPosX                  int
-	EphPosY                  int
-	EphPosZ                  int
-	EphVelX                  int
-	EphVelY                  int
-	EphVelZ                  int
-	OrbSemiMajorAxis         int
-	OrbEccentricity          int
-	OrbInclination           int
-	OrbRightAscension        int
-	OrbArgOfPeriapsis        int
-	OrbMeanAnomaly           int
-	EpochTime                bool
-	EpochSFN                 int
-	EpochSubframeNumber      int
-	FeederLink               bool
+	PayloadType               string
+	Koffset                   int
+	TACommon                  int
+	TAInfoExtended            bool
+	TACommonDrift             int
+	TACommonDriftVariant      int
+	TACommonOffset            int
+	UseOrbital                bool
+	EphPosX                   int
+	EphPosY                   int
+	EphPosZ                   int
+	EphVelX                   int
+	EphVelY                   int
+	EphVelZ                   int
+	OrbSemiMajorAxis          int
+	OrbEccentricity           int
+	OrbInclination            int
+	OrbRightAscension         int
+	OrbArgOfPeriapsis         int
+	OrbMeanAnomaly            int
+	EpochTime                 bool
+	EpochSFN                  int
+	EpochSubframeNumber       int
+	FeederLink                bool
 	FeederDopplerCompensation bool
-	FeederDLFreq             int64
-	FeederULFreq             int64
-	GatewayLocation          bool
-	GatewayLatitude          int
-	GatewayLongitude         int
-	GatewayAltitude          int
-	MovingRefLocation        bool
-	MovingRefLatitude        int
-	MovingRefLongitude       int
-	SatSwitchWithResync      bool
-	SatSwitchTargetPCI       int
-	SatSwitchT304            int
-	Polarization             string
-	TAReportSet              bool
-	TAReport                 bool
-	UlSyncValidityDur        int
-	PdschMaxHarqRetxs        int
-	PrachMaxMsg3HarqRetx     int
-	RrcGuardTimeMs           int
+	FeederDLFreq              int64
+	FeederULFreq              int64
+	GatewayLocation           bool
+	GatewayLatitude           int
+	GatewayLongitude          int
+	GatewayAltitude           int
+	MovingRefLocation         bool
+	MovingRefLatitude         int
+	MovingRefLongitude        int
+	SatSwitchWithResync       bool
+	SatSwitchTargetPCI        int
+	SatSwitchT304             int
+	Polarization              string
+	TAReportSet               bool
+	TAReport                  bool
+	UlSyncValidityDur         int
+	PdschMaxHarqRetxs         int
+	PrachMaxMsg3HarqRetx      int
+	RrcGuardTimeMs            int
 }
 
 // GenerateConfig produces srsRAN/OCUDU-compatible NTN configuration YAML
@@ -190,9 +190,9 @@ func GenerateConfig(spec *ntnv1alpha1.NTNCellConfigSpec) ([]byte, error) {
 	// Populate extended TA info fields.
 	if spec.NTN.TAInfo != nil {
 		data.TACommon = spec.NTN.TAInfo.TACommon
-		// Use boolean sentinel to ensure zero-value drift/offset are emitted
-		// when TAInfo is set (0 is a valid TA drift value per 3GPP).
-		if spec.NTN.TAInfo.TACommonDrift != 0 || spec.NTN.TAInfo.TACommonDriftVariant != 0 || spec.NTN.TAInfo.TACommonOffset != 0 {
+		// Use boolean sentinel so zero-value drift/offset are still emitted.
+		ta := spec.NTN.TAInfo
+		if ta.TACommonDrift != 0 || ta.TACommonDriftVariant != 0 || ta.TACommonOffset != 0 {
 			data.TAInfoExtended = true
 			data.TACommonDrift = spec.NTN.TAInfo.TACommonDrift
 			data.TACommonDriftVariant = spec.NTN.TAInfo.TACommonDriftVariant
