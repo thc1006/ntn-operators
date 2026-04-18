@@ -84,7 +84,7 @@ fi
 # Install kubectl
 if ! command -v kubectl &> /dev/null; then
   echo "Installing kubectl..."
-  KUBECTL_VERSION=$(curl -Ls https://dl.k8s.io/release/stable.txt)
+  KUBECTL_VERSION="v1.32.3"
   curl -fLo /usr/local/bin/kubectl "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${ARCH}/kubectl"
   chmod +x /usr/local/bin/kubectl
   echo "kubectl installed successfully"
