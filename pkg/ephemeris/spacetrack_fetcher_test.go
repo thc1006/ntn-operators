@@ -366,12 +366,16 @@ func TestSpaceTrackFetcher_ConcurrentCredsIsolation(t *testing.T) {
 		// GP request — record which session cookie was used.
 		cookie, err := r.Cookie("chocolatechip")
 		if err != nil {
-			http.Error(w, "no session", 401)
+			http.Error(w, "no session", http.StatusUnauthorized)
 			return
 		}
-		identity, _ := cookieToIdentity.Load(cookie.Value)
+		loaded, ok := cookieToIdentity.Load(cookie.Value)
+		if !ok {
+			http.Error(w, "unknown session", http.StatusUnauthorized)
+			return
+		}
 		mu.Lock()
-		gpRequests = append(gpRequests, gpReq{identity: identity.(string)})
+		gpRequests = append(gpRequests, gpReq{identity: loaded.(string)})
 		mu.Unlock()
 
 		w.Header().Set("Content-Type", "application/json")

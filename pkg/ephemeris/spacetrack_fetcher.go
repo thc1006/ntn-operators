@@ -90,9 +90,9 @@ func (f *SpaceTrackFetcher) Fetch(ctx context.Context, gpURL string) (GPFetchRes
 // differ from the current active session and auto-retries on 401.
 //
 // The entire login+fetch sequence is serialized under a mutex to prevent
-// session/cookie interleaving when concurrent reconciles use different
-// credentials. This is safe because controller-runtime defaults to
-// MaxConcurrentReconciles=1, and SpaceTrack fetches are infrequent (every 2h+).
+// cookie/session interleaving when concurrent callers use different
+// credentials. This preserves correctness for the shared authenticated
+// session at the cost of reduced throughput while a fetch is in progress.
 func (f *SpaceTrackFetcher) FetchWithCredentials(
 	ctx context.Context, gpURL, username, password string,
 ) (GPFetchResult, error) {
