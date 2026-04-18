@@ -186,7 +186,7 @@ var _ = Describe("NTNCellConfig Controller", func() {
 				Spec: ntnv1alpha1.NTNCellConfigSpec{
 					Provider: ntnv1alpha1.ProviderRef{Type: "oai"},
 					NTN: ntnv1alpha1.NTNParams{
-						EphemerisECEF: ntnv1alpha1.EphemerisECEF{PosX: 1, PosY: 2, PosZ: 3},
+						EphemerisECEF: &ntnv1alpha1.EphemerisECEF{PosX: 1, PosY: 2, PosZ: 3},
 					},
 				},
 			}
