@@ -140,6 +140,79 @@ func TestGenerateConfig_LEOWithVelocity(t *testing.T) {
 	assertContains(t, yaml, "vel_z: 50")
 }
 
+func TestGenerateConfig_TAInfoExtended(t *testing.T) {
+	spec := &ntnv1alpha1.NTNCellConfigSpec{
+		NTN: ntnv1alpha1.NTNParams{
+			CellSpecificKoffset: 150,
+			TAInfo: &ntnv1alpha1.TAInfo{
+				TACommon:             1000,
+				TACommonDrift:        50,
+				TACommonDriftVariant: 10,
+				TACommonOffset:       200,
+			},
+			EphemerisECEF: ntnv1alpha1.EphemerisECEF{PosX: 1, PosY: 2, PosZ: 3},
+		},
+	}
+
+	data, err := GenerateConfig(spec)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	yaml := string(data)
+	assertContains(t, yaml, "ta_info:")
+	assertContains(t, yaml, "ta_common: 1000")
+	assertContains(t, yaml, "ta_common_drift: 50")
+	assertContains(t, yaml, "ta_common_drift_variant: 10")
+	assertContains(t, yaml, "ta_common_offset: 200")
+}
+
+func TestGenerateConfig_MovingRefLocation(t *testing.T) {
+	spec := &ntnv1alpha1.NTNCellConfigSpec{
+		NTN: ntnv1alpha1.NTNParams{
+			CellSpecificKoffset: 50,
+			EphemerisECEF:       ntnv1alpha1.EphemerisECEF{PosX: 1, PosY: 2, PosZ: 3},
+			MovingRefLocation: &ntnv1alpha1.MovingRefLocation{
+				Latitude:  248500, // 24.85° in 1e-4 degrees
+				Longitude: 1210000, // 121.0° in 1e-4 degrees
+			},
+		},
+	}
+
+	data, err := GenerateConfig(spec)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	yaml := string(data)
+	assertContains(t, yaml, "moving_ref_location:")
+	assertContains(t, yaml, "latitude: 248500")
+	assertContains(t, yaml, "longitude: 1210000")
+}
+
+func TestGenerateConfig_SatSwitchWithResync(t *testing.T) {
+	spec := &ntnv1alpha1.NTNCellConfigSpec{
+		NTN: ntnv1alpha1.NTNParams{
+			CellSpecificKoffset: 50,
+			EphemerisECEF:       ntnv1alpha1.EphemerisECEF{PosX: 1, PosY: 2, PosZ: 3},
+			SatSwitchWithResync: &ntnv1alpha1.SatSwitchWithResync{
+				TargetPCI: 100,
+				T304:      150,
+			},
+		},
+	}
+
+	data, err := GenerateConfig(spec)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	yaml := string(data)
+	assertContains(t, yaml, "sat_switch_with_resync:")
+	assertContains(t, yaml, "target_pci: 100")
+	assertContains(t, yaml, "t304: 150")
+}
+
 func TestGenerateConfig_NilSpec(t *testing.T) {
 	_, err := GenerateConfig(nil)
 	if err == nil {

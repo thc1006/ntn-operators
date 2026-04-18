@@ -60,19 +60,87 @@ type NTNParams struct {
 	CellSpecificKoffset int `json:"cellSpecificKoffset,omitempty"`
 
 	// taCommon sets the common Timing Advance value (0-66485757).
+	// Deprecated: use taInfo.taCommon instead. Kept for backward compatibility;
+	// if taInfo is set, taInfo.taCommon takes precedence.
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:validation:Maximum=66485757
 	// +kubebuilder:default=0
 	TACommon int `json:"taCommon,omitempty"`
 
+	// taInfo provides extended Timing Advance parameters per 3GPP TS 38.213.
+	// When set, taInfo.taCommon takes precedence over the top-level taCommon field.
+	// +optional
+	TAInfo *TAInfo `json:"taInfo,omitempty"`
+
 	// ephemerisECEF defines the satellite position and velocity in ECEF coordinates.
 	// +required
 	EphemerisECEF EphemerisECEF `json:"ephemerisECEF"`
+
+	// movingRefLocation defines the Earth-moving reference location for LEO NTN cells.
+	// 3GPP Release 18 SIB19 field. Used by UEs for timing/Doppler estimation.
+	// +optional
+	MovingRefLocation *MovingRefLocation `json:"movingRefLocation,omitempty"`
+
+	// satSwitchWithResync provides satellite switch handover hints to UEs during
+	// satellite-to-satellite transitions. 3GPP Release 18 SIB19 field.
+	// +optional
+	SatSwitchWithResync *SatSwitchWithResync `json:"satSwitchWithResync,omitempty"`
 
 	// payloadType specifies the satellite payload architecture.
 	// +kubebuilder:validation:Enum=transparent;regenerative
 	// +kubebuilder:default="transparent"
 	PayloadType string `json:"payloadType,omitempty"`
+}
+
+// TAInfo provides extended Timing Advance parameters per 3GPP TS 38.213.
+// Maps to OCUDU's ta_info YAML block.
+type TAInfo struct {
+	// taCommon is the common Timing Advance value (0-66485757).
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=66485757
+	// +kubebuilder:default=0
+	TACommon int `json:"taCommon,omitempty"`
+
+	// taCommonDrift is the TA drift rate in units of TA per second.
+	// Used for LEO satellites where TA changes continuously.
+	// +optional
+	TACommonDrift int `json:"taCommonDrift,omitempty"`
+
+	// taCommonDriftVariant is the TA drift rate variant.
+	// +optional
+	TACommonDriftVariant int `json:"taCommonDriftVariant,omitempty"`
+
+	// taCommonOffset is an additional TA offset.
+	// +optional
+	TACommonOffset int `json:"taCommonOffset,omitempty"`
+}
+
+// MovingRefLocation defines the Earth-moving reference location for LEO NTN cells.
+// 3GPP Release 18 SIB19. Values in 1e-4 degrees per 3GPP TS 38.331.
+type MovingRefLocation struct {
+	// latitude in 1e-4 degrees (-900000 to 900000 = -90° to 90°).
+	// +kubebuilder:validation:Minimum=-900000
+	// +kubebuilder:validation:Maximum=900000
+	Latitude int `json:"latitude"`
+
+	// longitude in 1e-4 degrees (-1800000 to 1800000 = -180° to 180°).
+	// +kubebuilder:validation:Minimum=-1800000
+	// +kubebuilder:validation:Maximum=1800000
+	Longitude int `json:"longitude"`
+}
+
+// SatSwitchWithResync provides handover hints for satellite-to-satellite transitions.
+// 3GPP Release 18 SIB19. Allows UEs to prepare for serving cell change when
+// the current satellite leaves coverage.
+type SatSwitchWithResync struct {
+	// targetPCI is the Physical Cell Identity of the target cell after switch (0-1007).
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=1007
+	TargetPCI int `json:"targetPCI"`
+
+	// t304 is the handover timer value in milliseconds per 3GPP TS 38.331.
+	// +kubebuilder:validation:Enum=50;100;150;200;500;1000;2000;10000
+	T304 int `json:"t304"`
 }
 
 // EphemerisECEF defines the satellite position and velocity in Earth-Centered

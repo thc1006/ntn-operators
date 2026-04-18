@@ -40,6 +40,15 @@ ntn:
   cell_specific_koffset: {{ .Koffset }}
   ta_info:
     ta_common: {{ .TACommon }}
+{{- if .TACommonDrift }}
+    ta_common_drift: {{ .TACommonDrift }}
+{{- end }}
+{{- if .TACommonDriftVariant }}
+    ta_common_drift_variant: {{ .TACommonDriftVariant }}
+{{- end }}
+{{- if .TACommonOffset }}
+    ta_common_offset: {{ .TACommonOffset }}
+{{- end }}
   ephemeris_info_ecef:
     pos_x: {{ .EphPosX }}
     pos_y: {{ .EphPosY }}
@@ -47,6 +56,16 @@ ntn:
     vel_x: {{ .EphVelX }}
     vel_y: {{ .EphVelY }}
     vel_z: {{ .EphVelZ }}
+{{- if .MovingRefLocation }}
+  moving_ref_location:
+    latitude: {{ .MovingRefLatitude }}
+    longitude: {{ .MovingRefLongitude }}
+{{- end }}
+{{- if .SatSwitchWithResync }}
+  sat_switch_with_resync:
+    target_pci: {{ .SatSwitchTargetPCI }}
+    t304: {{ .SatSwitchT304 }}
+{{- end }}
 
 cell_cfg:
   sib:
@@ -71,12 +90,21 @@ type configData struct {
 	PayloadType          string
 	Koffset              int
 	TACommon             int
+	TACommonDrift        int
+	TACommonDriftVariant int
+	TACommonOffset       int
 	EphPosX              int
 	EphPosY              int
 	EphPosZ              int
 	EphVelX              int
 	EphVelY              int
 	EphVelZ              int
+	MovingRefLocation    bool
+	MovingRefLatitude    int
+	MovingRefLongitude   int
+	SatSwitchWithResync  bool
+	SatSwitchTargetPCI   int
+	SatSwitchT304        int
 	PdschMaxHarqRetxs    int
 	PrachMaxMsg3HarqRetx int
 	RrcGuardTimeMs       int
@@ -95,10 +123,16 @@ func GenerateConfig(spec *ntnv1alpha1.NTNCellConfigSpec) ([]byte, error) {
 		payloadType = "transparent"
 	}
 
+	// Resolve TACommon: taInfo takes precedence over top-level taCommon.
+	taCommon := spec.NTN.TACommon
+	if spec.NTN.TAInfo != nil {
+		taCommon = spec.NTN.TAInfo.TACommon
+	}
+
 	data := configData{
 		PayloadType:          payloadType,
 		Koffset:              spec.NTN.CellSpecificKoffset,
-		TACommon:             spec.NTN.TACommon,
+		TACommon:             taCommon,
 		EphPosX:              spec.NTN.EphemerisECEF.PosX,
 		EphPosY:              spec.NTN.EphemerisECEF.PosY,
 		EphPosZ:              spec.NTN.EphemerisECEF.PosZ,
@@ -108,6 +142,25 @@ func GenerateConfig(spec *ntnv1alpha1.NTNCellConfigSpec) ([]byte, error) {
 		PdschMaxHarqRetxs:    0,
 		PrachMaxMsg3HarqRetx: 0,
 		RrcGuardTimeMs:       12800,
+	}
+
+	// Populate extended TA info fields.
+	if spec.NTN.TAInfo != nil {
+		data.TACommonDrift = spec.NTN.TAInfo.TACommonDrift
+		data.TACommonDriftVariant = spec.NTN.TAInfo.TACommonDriftVariant
+		data.TACommonOffset = spec.NTN.TAInfo.TACommonOffset
+	}
+
+	// Populate Rel-18 fields.
+	if spec.NTN.MovingRefLocation != nil {
+		data.MovingRefLocation = true
+		data.MovingRefLatitude = spec.NTN.MovingRefLocation.Latitude
+		data.MovingRefLongitude = spec.NTN.MovingRefLocation.Longitude
+	}
+	if spec.NTN.SatSwitchWithResync != nil {
+		data.SatSwitchWithResync = true
+		data.SatSwitchTargetPCI = spec.NTN.SatSwitchWithResync.TargetPCI
+		data.SatSwitchT304 = spec.NTN.SatSwitchWithResync.T304
 	}
 
 	// Apply custom overrides if provided.
