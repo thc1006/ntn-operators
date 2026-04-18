@@ -186,11 +186,18 @@ func (p *Provider) PushEphemerisUpdate(
 
 	yamlContent, ok := cm.Data["geo_ntn.yml"]
 	if !ok {
-		return fmt.Errorf("ConfigMap missing geo_ntn.yml")
+		return fmt.Errorf(
+			"ConfigMap %s/%s missing geo_ntn.yml",
+			namespace, ConfigMapNameFor(crName))
 	}
 
 	// Replace the ephemeris section in the existing YAML.
-	updated := replaceEphemeris(yamlContent, update)
+	updated, replaced := replaceEphemeris(yamlContent, update)
+	if !replaced {
+		return fmt.Errorf(
+			"ConfigMap %s/%s has no ephemeris block to replace",
+			namespace, ConfigMapNameFor(crName))
+	}
 	cm.Data["geo_ntn.yml"] = updated
 
 	if err := p.client.Update(ctx, cm); err != nil {
@@ -200,9 +207,10 @@ func (p *Provider) PushEphemerisUpdate(
 }
 
 // replaceEphemeris replaces the ephemeris block in OCUDU config YAML.
+// Returns the updated content and whether a replacement was made.
 func replaceEphemeris(
 	content string, update provider.EphemerisUpdate,
-) string {
+) (string, bool) {
 	var newBlock string
 	if update.Orbital != nil {
 		newBlock = fmt.Sprintf(`  ephemeris_orbital:
@@ -238,11 +246,13 @@ func replaceEphemeris(
 	lines := strings.Split(content, "\n")
 	var result []string
 	skip := false
+	found := false
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
 		if trimmed == "ephemeris_info_ecef:" ||
 			trimmed == "ephemeris_orbital:" {
 			skip = true
+			found = true
 			result = append(result, strings.Split(newBlock, "\n")...)
 			continue
 		}
@@ -255,5 +265,5 @@ func replaceEphemeris(
 		}
 		result = append(result, line)
 	}
-	return strings.Join(result, "\n")
+	return strings.Join(result, "\n"), found
 }

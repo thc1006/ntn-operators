@@ -388,3 +388,36 @@ func TestPushEphemerisUpdate_NeitherSet(t *testing.T) {
 		t.Fatal("expected error when neither ECEF nor Orbital is set")
 	}
 }
+
+func TestPushEphemerisUpdate_MissingGeoNtn(t *testing.T) {
+	// ConfigMap exists but without geo_ntn.yml key.
+	scheme := runtime.NewScheme()
+	_ = corev1.AddToScheme(scheme)
+	_ = ntnv1alpha1.AddToScheme(scheme)
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      ConfigMapNameFor("test"),
+			Namespace: "ntn-system",
+		},
+		Data: map[string]string{}, // missing geo_ntn.yml
+	}
+	ns := &corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{Name: "ntn-system"},
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(cm, ns).Build()
+	p := &Provider{client: c}
+
+	update := provider.EphemerisUpdate{
+		ECEF: &ntnv1alpha1.EphemerisECEF{PosX: 1, PosY: 2, PosZ: 3},
+	}
+	err := p.PushEphemerisUpdate(
+		context.Background(), "test", "ntn-system", update,
+	)
+	if err == nil {
+		t.Fatal("expected error for missing geo_ntn.yml")
+	}
+	if !contains(err.Error(), "missing geo_ntn.yml") {
+		t.Errorf("expected 'missing geo_ntn.yml' in error, got: %v", err)
+	}
+}

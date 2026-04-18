@@ -31,9 +31,9 @@ type EphemerisUpdate struct {
 	Orbital *ntnv1alpha1.EphemerisOrbital
 }
 
-// NTNProvider abstracts NTN backend interactions for cell configuration.
-// Ephemeris and ground station lifecycle are handled directly by their
-// respective controllers (not via Provider).
+// NTNProvider abstracts NTN backend interactions for cell configuration
+// and ephemeris updates. Ground station lifecycle is handled directly
+// by its respective controller.
 //
 // Implementations:
 //   - OCUDU: generates geo_ntn.yml and writes to a ConfigMap
