@@ -145,12 +145,12 @@ func TestGenerateConfig_OrbitalEphemeris(t *testing.T) {
 		NTN: ntnv1alpha1.NTNParams{
 			CellSpecificKoffset: 50,
 			EphemerisOrbital: &ntnv1alpha1.EphemerisOrbital{
-				SemiMajorAxis:      6921000,
-				Eccentricity:       1,
-				Inclination:        879000,
-				RightAscension:     1000000,
-				ArgOfPeriapsis:     900000,
-				MeanAnomaly:        2700000,
+				SemiMajorAxis:  6921000,
+				Eccentricity:   1,
+				Inclination:    879000,
+				RightAscension: 1000000,
+				ArgOfPeriapsis: 900000,
+				MeanAnomaly:    2700000,
 			},
 			PayloadType: "transparent",
 		},
