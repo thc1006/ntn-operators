@@ -293,11 +293,14 @@ HELM_VERSION ?= v3.17.4
 .PHONY: install-helm
 install-helm: ## Install Helm (pinned version).
 	@command -v $(HELM) >/dev/null 2>&1 || { \
-		echo "Installing Helm $(HELM_VERSION)..." && \
-		curl -fsSL -o /tmp/helm.tar.gz "https://get.helm.sh/helm-$(HELM_VERSION)-$$(uname -s | tr '[:upper:]' '[:lower:]')-$$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/').tar.gz" && \
-		tar -xzf /tmp/helm.tar.gz -C /tmp && \
-		sudo mv /tmp/"$$(uname -s | tr '[:upper:]' '[:lower:]')"-amd64/helm /usr/local/bin/helm && \
-		rm -rf /tmp/helm.tar.gz /tmp/"$$(uname -s | tr '[:upper:]' '[:lower:]')"-*; \
+		HELM_OS=$$(uname -s | tr '[:upper:]' '[:lower:]') && \
+		HELM_ARCH=$$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/') && \
+		HELM_TMPDIR=$$(mktemp -d) && \
+		echo "Installing Helm $(HELM_VERSION) ($${HELM_OS}/$${HELM_ARCH})..." && \
+		curl -fsSL -o "$${HELM_TMPDIR}/helm.tar.gz" "https://get.helm.sh/helm-$(HELM_VERSION)-$${HELM_OS}-$${HELM_ARCH}.tar.gz" && \
+		tar -xzf "$${HELM_TMPDIR}/helm.tar.gz" -C "$${HELM_TMPDIR}" && \
+		sudo mv "$${HELM_TMPDIR}/$${HELM_OS}-$${HELM_ARCH}/helm" /usr/local/bin/helm && \
+		rm -rf "$${HELM_TMPDIR}"; \
 	}
 
 .PHONY: helm-deploy
