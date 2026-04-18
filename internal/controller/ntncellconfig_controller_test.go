@@ -164,10 +164,10 @@ var _ = Describe("NTNCellConfig Controller", func() {
 		})
 	})
 
-	Context("When provider type is unsupported", func() {
-		BeforeEach(func() {
+	Context("CRD validation: provider type enum", func() {
+		It("should reject creation with unsupported provider type", func() {
 			cr := &ntnv1alpha1.NTNCellConfig{
-				ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: namespace},
+				ObjectMeta: metav1.ObjectMeta{Name: "invalid-provider", Namespace: namespace},
 				Spec: ntnv1alpha1.NTNCellConfigSpec{
 					Provider: ntnv1alpha1.ProviderRef{Type: "aalyria"},
 					NTN: ntnv1alpha1.NTNParams{
@@ -175,25 +175,23 @@ var _ = Describe("NTNCellConfig Controller", func() {
 					},
 				},
 			}
-			Expect(k8sClient.Create(context.Background(), cr)).To(Succeed())
+			err := k8sClient.Create(context.Background(), cr)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("provider"))
 		})
-		AfterEach(func() { deleteCR() })
 
-		It("should set ConfigApplied=False with UnsupportedProvider", func() {
-			mock := &provider.MockProvider{}
-			reconciler := newReconciler(mock)
-
-			_, err := reconcileWithFinalizer(reconciler)
-			Expect(err).NotTo(HaveOccurred())
-
-			updated := &ntnv1alpha1.NTNCellConfig{}
-			Expect(k8sClient.Get(context.Background(), typeNamespacedName, updated)).To(Succeed())
-
-			cond := meta.FindStatusCondition(updated.Status.Conditions, ntnv1alpha1.ConditionConfigApplied)
-			Expect(cond).NotTo(BeNil())
-			Expect(cond.Status).To(Equal(metav1.ConditionFalse))
-			Expect(cond.Reason).To(Equal("UnsupportedProvider"))
-			Expect(mock.ApplyCalls).To(Equal(0))
+		It("should reject oai provider type", func() {
+			cr := &ntnv1alpha1.NTNCellConfig{
+				ObjectMeta: metav1.ObjectMeta{Name: "invalid-oai", Namespace: namespace},
+				Spec: ntnv1alpha1.NTNCellConfigSpec{
+					Provider: ntnv1alpha1.ProviderRef{Type: "oai"},
+					NTN: ntnv1alpha1.NTNParams{
+						EphemerisECEF: ntnv1alpha1.EphemerisECEF{PosX: 1, PosY: 2, PosZ: 3},
+					},
+				},
+			}
+			err := k8sClient.Create(context.Background(), cr)
+			Expect(err).To(HaveOccurred())
 		})
 	})
 
