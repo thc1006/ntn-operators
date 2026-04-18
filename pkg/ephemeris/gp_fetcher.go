@@ -80,7 +80,7 @@ func NewCelesTrakFetcher(httpClient *http.Client) *CelesTrakFetcher {
 // Returns ErrRateLimited on HTTP 403 (CelesTrak bandwidth policy).
 func (f *CelesTrakFetcher) Fetch(ctx context.Context, url string) (GPFetchResult, error) {
 	log := logr.FromContextOrDiscard(ctx)
-	log.V(1).Info("fetching GP data", "url", url)
+	log.V(2).Info("fetching GP data", "url", url)
 	fetchStart := time.Now()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {

@@ -497,7 +497,8 @@ func (r *GroundStationLifecycleReconciler) checkHTTPEndpoint(ctx context.Context
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
-		log.V(1).Info("invalid endpoint URL", "err", err)
+		// Log without err details — the error may contain the full URL with credentials.
+		log.V(1).Info("invalid endpoint URL")
 		return false
 	}
 	if req.URL.Scheme != "http" && req.URL.Scheme != "https" {
