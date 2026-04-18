@@ -241,6 +241,54 @@ func TestEvaluateFailover_AllTriggersInvalid(t *testing.T) {
 	}
 }
 
+func TestEvaluate_AllOperatorsAndMetrics(t *testing.T) {
+	m := Metrics{RSRP: -110, LatencyMs: 50, PacketLossPercent: 2.0}
+
+	tests := []struct {
+		trigger  Trigger
+		expected bool
+	}{
+		// >= operator
+		{Trigger{Metric: "rsrp", Operator: ">=", Value: -110}, true},
+		{Trigger{Metric: "rsrp", Operator: ">=", Value: -109}, false},
+		// <= operator
+		{Trigger{Metric: "latency", Operator: "<=", Value: 50}, true},
+		{Trigger{Metric: "latency", Operator: "<=", Value: 49}, false},
+		// terrestrialLatency alias
+		{Trigger{Metric: "terrestrialLatency", Operator: ">", Value: 40}, true},
+		// terrestrialPacketLoss alias
+		{Trigger{Metric: "terrestrialPacketLoss", Operator: ">", Value: 1}, true},
+		// unknown metric → false
+		{Trigger{Metric: "unknown", Operator: "<", Value: 0}, false},
+		// unknown operator → false
+		{Trigger{Metric: "rsrp", Operator: "!=", Value: 0}, false},
+	}
+	for _, tc := range tests {
+		got := tc.trigger.Evaluate(m)
+		if got != tc.expected {
+			t.Errorf("Evaluate(%s %s %v) = %v, want %v",
+				tc.trigger.Metric, tc.trigger.Operator, tc.trigger.Value, got, tc.expected)
+		}
+	}
+}
+
+func TestParseTrigger_GeOperator(t *testing.T) {
+	tr, err := ParseTrigger("rsrp >= -100")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tr.Operator != ">=" {
+		t.Errorf("expected >=, got %s", tr.Operator)
+	}
+}
+
+func TestParseTrigger_NoOperator(t *testing.T) {
+	_, err := ParseTrigger("rsrp -120")
+	if err == nil {
+		t.Fatal("expected error for missing operator")
+	}
+}
+
 func TestEvaluateFailover_EmptyPath_Degraded_Failover(t *testing.T) {
 	// Empty path normalized to terrestrial, triggers fire, satellite available → failover.
 	result := EvaluateFailover(

@@ -169,6 +169,82 @@ func TestApplyCellConfig_EmptyNamespace(t *testing.T) {
 	}
 }
 
+func TestApplyCellConfig_UpdateExisting(t *testing.T) {
+	p := newTestProvider(t)
+	ctx := context.Background()
+
+	// First apply creates the ConfigMap.
+	spec := geoSpec()
+	if err := p.ApplyCellConfig(ctx, "test-cr", spec); err != nil {
+		t.Fatalf("first apply: %v", err)
+	}
+
+	// Second apply with different koffset should update.
+	spec.NTN.CellSpecificKoffset = 200
+	if err := p.ApplyCellConfig(ctx, "test-cr", spec); err != nil {
+		t.Fatalf("second apply: %v", err)
+	}
+
+	// Verify updated.
+	cm := &corev1.ConfigMap{}
+	key := types.NamespacedName{Name: ConfigMapNameFor("test-cr"), Namespace: spec.Provider.Namespace}
+	if err := p.client.Get(ctx, key, cm); err != nil {
+		t.Fatal(err)
+	}
+	if cm.Annotations["ntn.operators.dev/koffset"] != "200" {
+		t.Errorf("expected koffset=200, got %s", cm.Annotations["ntn.operators.dev/koffset"])
+	}
+}
+
+func TestApplyCellConfig_NilSpec(t *testing.T) {
+	p := newTestProvider(t)
+	err := p.ApplyCellConfig(context.Background(), "cr", nil)
+	if err == nil {
+		t.Fatal("expected error for nil spec")
+	}
+}
+
+func TestConfigMapNameFor_Truncation(t *testing.T) {
+	// CR name with 250 chars should be truncated
+	longName := strings.Repeat("a", 250)
+	name := ConfigMapNameFor(longName)
+	if len(name) > maxK8sNameLen {
+		t.Errorf("name length %d exceeds %d", len(name), maxK8sNameLen)
+	}
+	if strings.HasSuffix(name, "-") || strings.HasSuffix(name, ".") {
+		t.Errorf("name ends with invalid char: %q", name)
+	}
+}
+
+func TestConfigMapNameFor_Short(t *testing.T) {
+	name := ConfigMapNameFor("my-cell")
+	if name != "ocudu-ntn-my-cell" {
+		t.Errorf("expected ocudu-ntn-my-cell, got %s", name)
+	}
+}
+
+func TestGetCellStatus_MissingGeoNtn(t *testing.T) {
+	// ConfigMap exists but missing geo_ntn.yml key.
+	scheme := runtime.NewScheme()
+	_ = corev1.AddToScheme(scheme)
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      ConfigMapNameFor("test"),
+			Namespace: "ns",
+			Annotations: map[string]string{
+				"ntn.operators.dev/koffset": "100",
+			},
+		},
+		Data: map[string]string{}, // missing geo_ntn.yml
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(cm).Build()
+	p := &Provider{client: c}
+	_, err := p.GetCellStatus(context.Background(), "test", "ns")
+	if err == nil {
+		t.Fatal("expected error for missing geo_ntn.yml")
+	}
+}
+
 func contains(s, substr string) bool {
 	return strings.Contains(s, substr)
 }
