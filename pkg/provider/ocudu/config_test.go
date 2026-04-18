@@ -290,6 +290,50 @@ func TestGenerateConfig_GatewayLocation(t *testing.T) {
 	assertContains(t, yaml, "altitude: 100")
 }
 
+func TestGenerateConfig_Polarization(t *testing.T) {
+	spec := &ntnv1alpha1.NTNCellConfigSpec{
+		NTN: ntnv1alpha1.NTNParams{
+			EphemerisECEF: &ntnv1alpha1.EphemerisECEF{PosX: 1, PosY: 2, PosZ: 3},
+			Polarization:  "circular",
+		},
+	}
+	data, err := GenerateConfig(spec)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	assertContains(t, string(data), "polarization: circular")
+}
+
+func TestGenerateConfig_TAReport(t *testing.T) {
+	enabled := true
+	spec := &ntnv1alpha1.NTNCellConfigSpec{
+		NTN: ntnv1alpha1.NTNParams{
+			EphemerisECEF: &ntnv1alpha1.EphemerisECEF{PosX: 1, PosY: 2, PosZ: 3},
+			TAReport:      &enabled,
+		},
+	}
+	data, err := GenerateConfig(spec)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	assertContains(t, string(data), "ta_report: true")
+}
+
+func TestGenerateConfig_NTNUlSyncValidityDur(t *testing.T) {
+	dur := 60
+	spec := &ntnv1alpha1.NTNCellConfigSpec{
+		NTN: ntnv1alpha1.NTNParams{
+			EphemerisECEF:        &ntnv1alpha1.EphemerisECEF{PosX: 1, PosY: 2, PosZ: 3},
+			NTNUlSyncValidityDur: &dur,
+		},
+	}
+	data, err := GenerateConfig(spec)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	assertContains(t, string(data), "ntn_ul_sync_validity_dur: 60")
+}
+
 func TestGenerateConfig_NilSpec(t *testing.T) {
 	_, err := GenerateConfig(nil)
 	if err == nil {
