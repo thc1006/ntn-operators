@@ -4,9 +4,9 @@ Release: {{ .Release.Name }}
 Namespace: {{ .Release.Namespace }}
 
 Custom Resource Definitions:
-  - SatelliteEphemeris (sateph)  — satellite orbit tracking via CelesTrak OMM
+  - SatelliteEphemeris (sateph)  — satellite orbit tracking via CelesTrak/SpaceTrack
   - GroundStationLifecycle (gs)  — ground station node management
-  - NTNCellConfig (ncc)          — OCUDU/srsRAN gNB NTN cell configuration
+  - NTNCellConfig (ntncc)        — OCUDU/srsRAN gNB NTN cell configuration
   - NTNSlice (nts)               — terrestrial-satellite slice failover
 
 Verify the installation:

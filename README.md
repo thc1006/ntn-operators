@@ -299,6 +299,10 @@ docs/                   # API reference (auto-generated)
 - **Providers**: Only OCUDU/srsRAN is implemented. OAI and Aalyria are planned for v0.2.
 - **Firmware updates**: The controller monitors node annotations for firmware versions but does not directly trigger OTA. An external agent on the node manages the actual update.
 
+## Grafana Dashboard
+
+Import `config/grafana/ntn-operators-dashboard.json` into your Grafana instance to visualize all 6 custom metrics (failover events, satellite pass availability, ground station health, fetch duration, satellite count, config errors).
+
 ## API Reference
 
 See [docs/api-reference.md](docs/api-reference.md) for the complete CRD field reference.
