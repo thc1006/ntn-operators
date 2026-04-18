@@ -284,8 +284,8 @@ func TestSpaceTrackFetcher_SessionExpiredAutoRetry(t *testing.T) {
 	}
 }
 
-func TestSpaceTrackFetcher_ConcurrentCredsIsolation(t *testing.T) {
-	// Prove that two callers with different credentials don't interfere.
+func TestSpaceTrackFetcher_FetchWithCredentials_Isolation(t *testing.T) {
+	// Verify FetchWithCredentials uses the provided credentials, not shared state.
 	var loginIdentities []string
 	var mu sync.Mutex
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -306,25 +306,28 @@ func TestSpaceTrackFetcher_ConcurrentCredsIsolation(t *testing.T) {
 
 	fetcher := NewSpaceTrackFetcher(&http.Client{}, server.URL)
 
-	// Simulate two CRs with different credentials calling sequentially.
-	// CR-A sets alice, CR-B sets bob, then CR-A fetches — should use alice, not bob.
-	fetcher.SetCredentials("alice", "pass-a")
-	fetcher.SetCredentials("bob", "pass-b") // overwrites!
+	// FetchWithCredentials should use alice, regardless of shared state.
+	_, err := fetcher.FetchWithCredentials(context.Background(), server.URL+"/gp", "alice", "pass-a")
+	if err != nil {
+		t.Fatal(err)
+	}
 
-	_, err := fetcher.Fetch(context.Background(), server.URL+"/gp")
+	// Then fetch as bob — should re-login as bob.
+	_, err = fetcher.FetchWithCredentials(context.Background(), server.URL+"/gp", "bob", "pass-b")
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	mu.Lock()
-	firstLogin := loginIdentities[0]
-	mu.Unlock()
-
-	// BUG: This will be "bob" because SetCredentials overwrites shared state.
-	// After fix, Fetch should use request-scoped credentials, not shared state.
-	// For now, this test documents the bug.
-	if firstLogin == "bob" {
-		t.Log("BUG CONFIRMED: alice's fetch used bob's credentials due to shared state")
+	defer mu.Unlock()
+	if len(loginIdentities) < 2 {
+		t.Fatalf("expected 2 logins, got %d", len(loginIdentities))
+	}
+	if loginIdentities[0] != "alice" {
+		t.Errorf("first login should be alice, got %s", loginIdentities[0])
+	}
+	if loginIdentities[1] != "bob" {
+		t.Errorf("second login should be bob, got %s", loginIdentities[1])
 	}
 }
 

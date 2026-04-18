@@ -85,8 +85,11 @@ func (f *SpaceTrackFetcher) Fetch(ctx context.Context, gpURL string) (GPFetchRes
 }
 
 // FetchWithCredentials retrieves GP data with request-scoped credentials.
-// This prevents credential interleaving when multiple CRs share a fetcher.
-// It manages session cookies per credential pair and auto-retries on 401.
+// It re-authenticates the shared session when the requested credentials
+// differ from the current active session and auto-retries on 401.
+// Note: the underlying cookie jar is shared; truly concurrent calls with
+// different credentials may still bleed sessions. For full isolation,
+// use separate SpaceTrackFetcher instances per credential pair.
 func (f *SpaceTrackFetcher) FetchWithCredentials(
 	ctx context.Context, gpURL, username, password string,
 ) (GPFetchResult, error) {
