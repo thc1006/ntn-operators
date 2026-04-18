@@ -175,6 +175,32 @@ func TestGenerateConfig_OrbitalEphemeris(t *testing.T) {
 	assertContains(t, yaml, "mean_anomaly: 2700000")
 }
 
+func TestGenerateConfig_BothEphemerisSet(t *testing.T) {
+	spec := &ntnv1alpha1.NTNCellConfigSpec{
+		NTN: ntnv1alpha1.NTNParams{
+			EphemerisECEF:    &ntnv1alpha1.EphemerisECEF{PosX: 1, PosY: 2, PosZ: 3},
+			EphemerisOrbital: &ntnv1alpha1.EphemerisOrbital{SemiMajorAxis: 6921000},
+		},
+	}
+	_, err := GenerateConfig(spec)
+	if err == nil {
+		t.Fatal("expected error when both ephemeris types are set")
+	}
+	assertContains(t, err.Error(), "mutually exclusive")
+}
+
+func TestGenerateConfig_NeitherEphemerisSet(t *testing.T) {
+	spec := &ntnv1alpha1.NTNCellConfigSpec{
+		NTN: ntnv1alpha1.NTNParams{
+			CellSpecificKoffset: 150,
+		},
+	}
+	_, err := GenerateConfig(spec)
+	if err == nil {
+		t.Fatal("expected error when neither ephemeris type is set")
+	}
+}
+
 func TestGenerateConfig_NilSpec(t *testing.T) {
 	_, err := GenerateConfig(nil)
 	if err == nil {

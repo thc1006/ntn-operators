@@ -121,6 +121,10 @@ func GenerateConfig(spec *ntnv1alpha1.NTNCellConfigSpec) ([]byte, error) {
 		RrcGuardTimeMs:       12800,
 	}
 
+	if spec.NTN.EphemerisECEF != nil && spec.NTN.EphemerisOrbital != nil {
+		return nil, fmt.Errorf("ephemerisECEF and ephemerisOrbital are mutually exclusive")
+	}
+
 	switch {
 	case spec.NTN.EphemerisOrbital != nil:
 		data.UseOrbital = true
