@@ -68,10 +68,8 @@ func IsPrivateIP(ip net.IP) bool {
 // ErrPrivateIP is returned when a dial attempts to connect to a private IP.
 var ErrPrivateIP = fmt.Errorf("connection to private/reserved IP address is blocked")
 
-// NewSafeHTTPClient creates an HTTP client that rejects connections to
-// private/reserved IP addresses at the TCP dial level, preventing SSRF
-// even against DNS rebinding attacks.
-// safeDialContext creates a DialContext function that validates resolved IPs.
+// safeDialContext creates a DialContext function that validates resolved IPs
+// against private/reserved ranges before connecting.
 func safeDialContext(dialer *net.Dialer) func(ctx context.Context, network, addr string) (net.Conn, error) {
 	return func(ctx context.Context, network, addr string) (net.Conn, error) {
 		host, port, err := net.SplitHostPort(addr)
