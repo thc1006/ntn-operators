@@ -40,13 +40,9 @@ ntn:
   cell_specific_koffset: {{ .Koffset }}
   ta_info:
     ta_common: {{ .TACommon }}
-{{- if .TACommonDrift }}
+{{- if .TAInfoExtended }}
     ta_common_drift: {{ .TACommonDrift }}
-{{- end }}
-{{- if .TACommonDriftVariant }}
     ta_common_drift_variant: {{ .TACommonDriftVariant }}
-{{- end }}
-{{- if .TACommonOffset }}
     ta_common_offset: {{ .TACommonOffset }}
 {{- end }}
 {{- if .UseOrbital }}
@@ -116,6 +112,7 @@ type configData struct {
 	PayloadType              string
 	Koffset                  int
 	TACommon                 int
+	TAInfoExtended           bool
 	TACommonDrift            int
 	TACommonDriftVariant     int
 	TACommonOffset           int
@@ -177,9 +174,14 @@ func GenerateConfig(spec *ntnv1alpha1.NTNCellConfigSpec) ([]byte, error) {
 	// Populate extended TA info fields.
 	if spec.NTN.TAInfo != nil {
 		data.TACommon = spec.NTN.TAInfo.TACommon
-		data.TACommonDrift = spec.NTN.TAInfo.TACommonDrift
-		data.TACommonDriftVariant = spec.NTN.TAInfo.TACommonDriftVariant
-		data.TACommonOffset = spec.NTN.TAInfo.TACommonOffset
+		// Use boolean sentinel to ensure zero-value drift/offset are emitted
+		// when TAInfo is set (0 is a valid TA drift value per 3GPP).
+		if spec.NTN.TAInfo.TACommonDrift != 0 || spec.NTN.TAInfo.TACommonDriftVariant != 0 || spec.NTN.TAInfo.TACommonOffset != 0 {
+			data.TAInfoExtended = true
+			data.TACommonDrift = spec.NTN.TAInfo.TACommonDrift
+			data.TACommonDriftVariant = spec.NTN.TAInfo.TACommonDriftVariant
+			data.TACommonOffset = spec.NTN.TAInfo.TACommonOffset
+		}
 	}
 
 	// Populate Stage 2 optional fields.
