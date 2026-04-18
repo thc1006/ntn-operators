@@ -110,7 +110,7 @@ cu_cp:
 **來源**：
 1. [OCUDU Helm blog](https://nilsfuerste.com/2026/02/02/ocudu-on-kubernetes-0-introducing-ocudu-and-helm-chart-architecture/)
 2. [srsRAN K8s docs](https://docs.srsran.com/projects/project/en/latest/tutorials/source/k8s/source/index.html)
-3. [srsRAN Helm repo](https://github.com/srsran/srsRAN_Project_helm) (archived; see [OCUDU GitLab](https://gitlab.com/ocudu/ocudu))
+3. [srsRAN Helm repo](https://github.com/srsran/srsRAN_Project_helm) (archived; see gitlab.com/ocudu/ocudu)
 4. [OCUDU GitLab](https://gitlab.com/ocudu/ocudu)
 5. [OCUDU Docs](https://ocudu-docs-604e90.gitlab.io/)
 
