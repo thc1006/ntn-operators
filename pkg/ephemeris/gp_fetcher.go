@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/akhenakh/sgp4"
+	"github.com/go-logr/logr"
 )
 
 // Sentinel errors returned by GPFetcher implementations.
@@ -78,6 +79,9 @@ func NewCelesTrakFetcher(httpClient *http.Client) *CelesTrakFetcher {
 // It uses conditional GET (If-None-Match) when a cached ETag exists.
 // Returns ErrRateLimited on HTTP 403 (CelesTrak bandwidth policy).
 func (f *CelesTrakFetcher) Fetch(ctx context.Context, url string) (GPFetchResult, error) {
+	log := logr.FromContextOrDiscard(ctx)
+	log.V(1).Info("fetching GP data", "url", url)
+	fetchStart := time.Now()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return GPFetchResult{}, fmt.Errorf("creating request: %w", err)
@@ -99,6 +103,7 @@ func (f *CelesTrakFetcher) Fetch(ctx context.Context, url string) (GPFetchResult
 
 	switch resp.StatusCode {
 	case http.StatusNotModified:
+		log.V(2).Info("ETag cache hit (304)", "url", url, "duration", time.Since(fetchStart))
 		var cached []sgp4.OMM
 		if v, ok := f.ommCache.Load(url); ok {
 			cached = v.([]sgp4.OMM)
@@ -131,6 +136,7 @@ func (f *CelesTrakFetcher) Fetch(ctx context.Context, url string) (GPFetchResult
 			f.etagCache.Store(url, newETag)
 		}
 
+		log.V(1).Info("fetch complete", "satellites", len(omms), "bytes", len(body), "duration", time.Since(fetchStart))
 		return GPFetchResult{
 			OMMs:           omms,
 			SatelliteCount: len(omms),
