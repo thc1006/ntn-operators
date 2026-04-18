@@ -71,12 +71,9 @@ var ErrPrivateIP = fmt.Errorf("connection to private/reserved IP address is bloc
 // NewSafeHTTPClient creates an HTTP client that rejects connections to
 // private/reserved IP addresses at the TCP dial level, preventing SSRF
 // even against DNS rebinding attacks.
-func NewSafeHTTPClient(timeout time.Duration) *http.Client {
-	dialer := &net.Dialer{Timeout: 5 * time.Second}
-
-	// Clone DefaultTransport to preserve proxy, connection pooling, and TLS settings.
-	transport := http.DefaultTransport.(*http.Transport).Clone()
-	transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+// safeDialContext creates a DialContext function that validates resolved IPs.
+func safeDialContext(dialer *net.Dialer) func(ctx context.Context, network, addr string) (net.Conn, error) {
+	return func(ctx context.Context, network, addr string) (net.Conn, error) {
 		host, port, err := net.SplitHostPort(addr)
 		if err != nil {
 			return nil, fmt.Errorf("invalid address %q: %w", addr, err)
@@ -109,6 +106,17 @@ func NewSafeHTTPClient(timeout time.Duration) *http.Client {
 		}
 		return nil, fmt.Errorf("all resolved IPs for %q failed to connect: %w", host, lastErr)
 	}
+}
+
+// NewSafeHTTPClient creates an HTTP client that rejects connections to
+// private/reserved IP addresses at the TCP dial level, preventing SSRF
+// even against DNS rebinding attacks.
+func NewSafeHTTPClient(timeout time.Duration) *http.Client {
+	dialer := &net.Dialer{Timeout: 5 * time.Second}
+
+	// Clone DefaultTransport to preserve proxy, connection pooling, and TLS settings.
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.DialContext = safeDialContext(dialer)
 
 	return &http.Client{
 		Timeout:   timeout,

@@ -158,6 +158,43 @@ func TestNewSafeHTTPClient_ContextCancelled(t *testing.T) {
 	}
 }
 
+func TestSafeDialContext_BlocksPrivateIP(t *testing.T) {
+	dial := safeDialContext(&net.Dialer{Timeout: 2 * time.Second})
+	// 127.0.0.1 is private — should be blocked.
+	_, err := dial(context.Background(), "tcp", "127.0.0.1:80")
+	if err == nil {
+		t.Fatal("expected error for private IP")
+	}
+}
+
+func TestSafeDialContext_InvalidAddress(t *testing.T) {
+	dial := safeDialContext(&net.Dialer{Timeout: 2 * time.Second})
+	_, err := dial(context.Background(), "tcp", "no-port")
+	if err == nil {
+		t.Fatal("expected error for invalid address (no port)")
+	}
+}
+
+func TestSafeDialContext_AllIPsFail(t *testing.T) {
+	// Connect to a public IP on a port that won't respond (fast timeout).
+	dial := safeDialContext(&net.Dialer{Timeout: 100 * time.Millisecond})
+	_, err := dial(context.Background(), "tcp", "8.8.8.8:1") // port 1 won't respond
+	if err == nil {
+		t.Fatal("expected error when all IPs fail to connect")
+	}
+	if !containsStr(err.Error(), "failed to connect") {
+		t.Errorf("expected 'failed to connect' in error, got: %v", err)
+	}
+}
+
+func TestSafeDialContext_DNSFailure(t *testing.T) {
+	dial := safeDialContext(&net.Dialer{Timeout: 2 * time.Second})
+	_, err := dial(context.Background(), "tcp", "this-domain-does-not-exist-xyz123.invalid:80")
+	if err == nil {
+		t.Fatal("expected error for DNS failure")
+	}
+}
+
 func TestErrPrivateIP_IsSentinel(t *testing.T) {
 	// Verify ErrPrivateIP is usable as a sentinel error.
 	wrapped := fmt.Errorf("dial failed: %w", ErrPrivateIP)
