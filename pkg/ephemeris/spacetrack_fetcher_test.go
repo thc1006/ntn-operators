@@ -284,8 +284,8 @@ func TestSpaceTrackFetcher_SessionExpiredAutoRetry(t *testing.T) {
 	}
 }
 
-func TestSpaceTrackFetcher_FetchWithCredentials_Isolation(t *testing.T) {
-	// Verify FetchWithCredentials uses the provided credentials, not shared state.
+func TestSpaceTrackFetcher_FetchWithCredentials_SequentialSwitch(t *testing.T) {
+	// Verify FetchWithCredentials re-authenticates when credentials change.
 	var loginIdentities []string
 	var mu sync.Mutex
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -331,41 +331,97 @@ func TestSpaceTrackFetcher_FetchWithCredentials_Isolation(t *testing.T) {
 	}
 }
 
-func TestSpaceTrackFetcher_FetchWithCredentials(t *testing.T) {
-	var lastIdentity string
+func TestSpaceTrackFetcher_ConcurrentCredsIsolation(t *testing.T) {
+	// Regression test: exercises concurrent FetchWithCredentials calls with
+	// different credentials to verify that the serialized lock prevents
+	// session/cookie interleaving.
+	//
+	// Each login sets a per-identity cookie. The GP handler checks which
+	// cookie was sent and records the identity. Both alice and bob must
+	// fetch under their own identity.
+
+	type gpReq struct {
+		identity string // identity that the session cookie maps to
+	}
+	var gpRequests []gpReq
 	var mu sync.Mutex
+
+	// Map cookie value → identity for session tracking.
+	cookieToIdentity := sync.Map{}
+
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == loginPath {
-			if err := r.ParseForm(); err == nil {
-				mu.Lock()
-				lastIdentity = r.FormValue("identity")
-				mu.Unlock()
+			if err := r.ParseForm(); err != nil {
+				http.Error(w, "bad form", 400)
+				return
 			}
-			http.SetCookie(w, &http.Cookie{Name: "chocolatechip", Value: "s", Path: "/"})
+			identity := r.FormValue("identity")
+			cookieVal := identity + "-session"
+			cookieToIdentity.Store(cookieVal, identity)
+
+			http.SetCookie(w, &http.Cookie{Name: "chocolatechip", Value: cookieVal, Path: "/"})
 			_, _ = fmt.Fprint(w, `""`)
 			return
 		}
+		// GP request — record which session cookie was used.
+		cookie, err := r.Cookie("chocolatechip")
+		if err != nil {
+			http.Error(w, "no session", 401)
+			return
+		}
+		identity, _ := cookieToIdentity.Load(cookie.Value)
+		mu.Lock()
+		gpRequests = append(gpRequests, gpReq{identity: identity.(string)})
+		mu.Unlock()
+
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = fmt.Fprint(w, sampleOMMJSON)
 	}))
 	defer server.Close()
 
 	fetcher := NewSpaceTrackFetcher(&http.Client{}, server.URL)
+	gpURL := server.URL + "/gp"
 
-	// FetchWithCredentials passes creds per-call — no interleave possible.
-	result, err := fetcher.FetchWithCredentials(context.Background(), server.URL+"/gp", "alice", "pass-a")
-	if err != nil {
-		t.Fatalf("FetchWithCredentials failed: %v", err)
-	}
-	if result.SatelliteCount != 1 {
-		t.Errorf("expected 1 satellite, got %d", result.SatelliteCount)
+	var wg sync.WaitGroup
+	errs := make([]error, 2)
+
+	// Launch alice and bob concurrently.
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		_, errs[0] = fetcher.FetchWithCredentials(context.Background(), gpURL, "alice", "pass-a")
+	}()
+	go func() {
+		defer wg.Done()
+		_, errs[1] = fetcher.FetchWithCredentials(context.Background(), gpURL, "bob", "pass-b")
+	}()
+
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("goroutine %d failed: %v", i, err)
+		}
 	}
 
+	// Verify each GP request used the correct session.
 	mu.Lock()
-	if lastIdentity != "alice" {
-		t.Errorf("expected login as alice, got %s", lastIdentity)
+	defer mu.Unlock()
+	if len(gpRequests) < 2 {
+		t.Fatalf("expected at least 2 GP requests, got %d", len(gpRequests))
 	}
-	mu.Unlock()
+
+	// Both alice and bob should have fetched under their own identity.
+	identities := map[string]bool{}
+	for _, req := range gpRequests {
+		identities[req.identity] = true
+	}
+	if !identities["alice"] {
+		t.Error("alice's GP request did not use alice's session cookie")
+	}
+	if !identities["bob"] {
+		t.Error("bob's GP request did not use bob's session cookie")
+	}
 }
 
 func TestSpaceTrackFetcher_CredentialsUnchangedNoRelogin(t *testing.T) {

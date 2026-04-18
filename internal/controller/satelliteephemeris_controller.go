@@ -373,8 +373,9 @@ func (r *SatelliteEphemerisReconciler) fetcherForSource(
 	}
 }
 
-// boundSpaceTrackFetcher wraps SpaceTrackFetcher with request-scoped credentials
-// to prevent credential interleaving across concurrent reconciles.
+// boundSpaceTrackFetcher wraps SpaceTrackFetcher with request-scoped credentials.
+// FetchWithCredentials serializes login+fetch under a mutex, preventing
+// cookie/session interleaving across concurrent reconciles.
 type boundSpaceTrackFetcher struct {
 	fetcher  *ephemeris.SpaceTrackFetcher
 	username string
