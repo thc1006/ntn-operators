@@ -18,6 +18,8 @@ package ocudu
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"strconv"
 	"strings"
@@ -38,12 +40,16 @@ const ConfigMapPrefix = "ocudu-ntn-"
 const maxK8sNameLen = 253
 
 // ConfigMapNameFor returns the ConfigMap name for a given NTNCellConfig CR name.
-// If the resulting name exceeds K8s limits, it is truncated and trailing
-// invalid characters ('-', '.') are stripped to produce a valid DNS-1123 name.
+// If the resulting name exceeds K8s limits, it is truncated with a 8-char hash
+// suffix to prevent collisions between different long CR names.
 func ConfigMapNameFor(crName string) string {
 	name := ConfigMapPrefix + crName
 	if len(name) > maxK8sNameLen {
-		name = strings.TrimRight(name[:maxK8sNameLen], "-.")
+		h := sha256.Sum256([]byte(name))
+		suffix := hex.EncodeToString(h[:4]) // 8 hex chars
+		// Truncate to leave room for "-" + 8-char hash
+		truncLen := maxK8sNameLen - 9 // 253 - 9 = 244
+		name = strings.TrimRight(name[:truncLen], "-.") + "-" + suffix
 	}
 	return name
 }
