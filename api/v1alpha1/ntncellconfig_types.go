@@ -79,10 +79,106 @@ type NTNParams struct {
 	// +optional
 	EphemerisOrbital *EphemerisOrbital `json:"ephemerisOrbital,omitempty"`
 
+	// taInfo provides extended Timing Advance parameters per 3GPP TS 38.213.
+	// When set, taInfo.taCommon takes precedence over the top-level taCommon field.
+	// +optional
+	TAInfo *TAInfo `json:"taInfo,omitempty"`
+
+	// epochTime defines the SFN/subframe reference for NTN timing alignment.
+	// +optional
+	EpochTime *EpochTime `json:"epochTime,omitempty"`
+
+	// feederLinkInfo provides feeder link parameters for Doppler compensation.
+	// +optional
+	FeederLinkInfo *FeederLinkInfo `json:"feederLinkInfo,omitempty"`
+
+	// ntnGatewayLocation specifies the NTN gateway (ground station) coordinates.
+	// +optional
+	NTNGatewayLocation *NTNGatewayLocation `json:"ntnGatewayLocation,omitempty"`
+
+	// polarization specifies the antenna polarization.
+	// +kubebuilder:validation:Enum=linear;circular
+	// +optional
+	Polarization string `json:"polarization,omitempty"`
+
+	// taReport enables UE TA reporting.
+	// +optional
+	TAReport *bool `json:"taReport,omitempty"`
+
+	// ntnUlSyncValidityDur sets the UL synchronization validity duration in seconds.
+	// +kubebuilder:validation:Enum=5;10;15;20;25;30;35;40;45;50;55;60;120;180;240;900
+	// +optional
+	NTNUlSyncValidityDur *int `json:"ntnUlSyncValidityDur,omitempty"`
+
 	// payloadType specifies the satellite payload architecture.
 	// +kubebuilder:validation:Enum=transparent;regenerative
 	// +kubebuilder:default="transparent"
 	PayloadType string `json:"payloadType,omitempty"`
+}
+
+// TAInfo provides extended Timing Advance parameters per 3GPP TS 38.213.
+type TAInfo struct {
+	// taCommon is the common Timing Advance value (0-66485757).
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=66485757
+	TACommon int `json:"taCommon,omitempty"`
+
+	// taCommonDrift is the TA drift rate.
+	// +optional
+	TACommonDrift int `json:"taCommonDrift,omitempty"`
+
+	// taCommonDriftVariant is the TA drift rate variant.
+	// +optional
+	TACommonDriftVariant int `json:"taCommonDriftVariant,omitempty"`
+
+	// taCommonOffset is an additional TA offset.
+	// +optional
+	TACommonOffset int `json:"taCommonOffset,omitempty"`
+}
+
+// EpochTime defines the SFN/subframe reference for NTN timing.
+type EpochTime struct {
+	// sfn is the System Frame Number (0-1023).
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=1023
+	SFN int `json:"sfn"`
+
+	// subframeNumber is the subframe within the SFN (0-9).
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=9
+	SubframeNumber int `json:"subframeNumber"`
+}
+
+// FeederLinkInfo provides feeder link parameters for Doppler compensation.
+type FeederLinkInfo struct {
+	// enableDopplerCompensation enables feeder link Doppler compensation.
+	EnableDopplerCompensation bool `json:"enableDopplerCompensation"`
+
+	// dlFreqHz is the downlink frequency in Hz.
+	// +kubebuilder:validation:Minimum=0
+	DLFreqHz int64 `json:"dlFreqHz,omitempty"`
+
+	// ulFreqHz is the uplink frequency in Hz.
+	// +kubebuilder:validation:Minimum=0
+	ULFreqHz int64 `json:"ulFreqHz,omitempty"`
+}
+
+// NTNGatewayLocation specifies the NTN gateway coordinates.
+// Values in 1e-4 degrees for latitude/longitude, metres for altitude.
+type NTNGatewayLocation struct {
+	// latitude in 1e-4 degrees (-900000 to 900000).
+	// +kubebuilder:validation:Minimum=-900000
+	// +kubebuilder:validation:Maximum=900000
+	Latitude int `json:"latitude"`
+
+	// longitude in 1e-4 degrees (-1800000 to 1800000).
+	// +kubebuilder:validation:Minimum=-1800000
+	// +kubebuilder:validation:Maximum=1800000
+	Longitude int `json:"longitude"`
+
+	// altitude in metres above sea level.
+	// +optional
+	Altitude int `json:"altitude,omitempty"`
 }
 
 // EphemerisOrbital defines the satellite orbit using Keplerian elements,

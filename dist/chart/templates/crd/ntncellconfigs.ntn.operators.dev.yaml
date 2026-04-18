@@ -177,6 +177,88 @@ spec:
                     - rightAscension
                     - semiMajorAxis
                     type: object
+                  epochTime:
+                    description: epochTime defines the SFN/subframe reference for
+                      NTN timing alignment.
+                    properties:
+                      sfn:
+                        description: sfn is the System Frame Number (0-1023).
+                        maximum: 1023
+                        minimum: 0
+                        type: integer
+                      subframeNumber:
+                        description: subframeNumber is the subframe within the SFN
+                          (0-9).
+                        maximum: 9
+                        minimum: 0
+                        type: integer
+                    required:
+                    - sfn
+                    - subframeNumber
+                    type: object
+                  feederLinkInfo:
+                    description: feederLinkInfo provides feeder link parameters for
+                      Doppler compensation.
+                    properties:
+                      dlFreqHz:
+                        description: dlFreqHz is the downlink frequency in Hz.
+                        format: int64
+                        minimum: 0
+                        type: integer
+                      enableDopplerCompensation:
+                        description: enableDopplerCompensation enables feeder link
+                          Doppler compensation.
+                        type: boolean
+                      ulFreqHz:
+                        description: ulFreqHz is the uplink frequency in Hz.
+                        format: int64
+                        minimum: 0
+                        type: integer
+                    required:
+                    - enableDopplerCompensation
+                    type: object
+                  ntnGatewayLocation:
+                    description: ntnGatewayLocation specifies the NTN gateway (ground
+                      station) coordinates.
+                    properties:
+                      altitude:
+                        description: altitude in metres above sea level.
+                        type: integer
+                      latitude:
+                        description: latitude in 1e-4 degrees (-900000 to 900000).
+                        maximum: 900000
+                        minimum: -900000
+                        type: integer
+                      longitude:
+                        description: longitude in 1e-4 degrees (-1800000 to 1800000).
+                        maximum: 1800000
+                        minimum: -1800000
+                        type: integer
+                    required:
+                    - latitude
+                    - longitude
+                    type: object
+                  ntnUlSyncValidityDur:
+                    description: ntnUlSyncValidityDur sets the UL synchronization
+                      validity duration in seconds.
+                    enum:
+                    - 5
+                    - 10
+                    - 15
+                    - 20
+                    - 25
+                    - 30
+                    - 35
+                    - 40
+                    - 45
+                    - 50
+                    - 55
+                    - 60
+                    - 120
+                    - 180
+                    - 240
+                    - 900
+                    type: integer
                   payloadType:
                     default: transparent
                     description: payloadType specifies the satellite payload architecture.
@@ -184,12 +266,41 @@ spec:
                     - transparent
                     - regenerative
                     type: string
+                  polarization:
+                    description: polarization specifies the antenna polarization.
+                    enum:
+                    - linear
+                    - circular
+                    type: string
                   taCommon:
                     default: 0
                     description: taCommon sets the common Timing Advance value (0-66485757).
                     maximum: 66485757
                     minimum: 0
                     type: integer
+                  taInfo:
+                    description: |-
+                      taInfo provides extended Timing Advance parameters per 3GPP TS 38.213.
+                      When set, taInfo.taCommon takes precedence over the top-level taCommon field.
+                    properties:
+                      taCommon:
+                        description: taCommon is the common Timing Advance value (0-66485757).
+                        maximum: 66485757
+                        minimum: 0
+                        type: integer
+                      taCommonDrift:
+                        description: taCommonDrift is the TA drift rate.
+                        type: integer
+                      taCommonDriftVariant:
+                        description: taCommonDriftVariant is the TA drift rate variant.
+                        type: integer
+                      taCommonOffset:
+                        description: taCommonOffset is an additional TA offset.
+                        type: integer
+                    type: object
+                  taReport:
+                    description: taReport enables UE TA reporting.
+                    type: boolean
                 type: object
                 x-kubernetes-validations:
                 - message: exactly one of ephemerisECEF or ephemerisOrbital must be
