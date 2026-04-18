@@ -292,7 +292,7 @@ HELM_EXTRA_ARGS ?=
 HELM_VERSION ?= v3.17.4
 .PHONY: install-helm
 install-helm: $(LOCALBIN) ## Install Helm (pinned version).
-	@test -x "$(HELM)" || { \
+	@command -v "$(HELM)" > /dev/null 2>&1 || { \
 		HELM_OS=$$(uname -s | tr '[:upper:]' '[:lower:]') && \
 		HELM_ARCH=$$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/') && \
 		HELM_TMPDIR=$$(mktemp -d) && \
