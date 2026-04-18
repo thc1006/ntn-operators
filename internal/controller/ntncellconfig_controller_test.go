@@ -165,7 +165,7 @@ var _ = Describe("NTNCellConfig Controller", func() {
 	})
 
 	Context("CRD validation: provider type enum", func() {
-		It("should reject creation with unsupported provider type", func() {
+		It("should reject creation with unsupported provider type aalyria", func() {
 			cr := &ntnv1alpha1.NTNCellConfig{
 				ObjectMeta: metav1.ObjectMeta{Name: "invalid-provider", Namespace: namespace},
 				Spec: ntnv1alpha1.NTNCellConfigSpec{
@@ -177,7 +177,7 @@ var _ = Describe("NTNCellConfig Controller", func() {
 			}
 			err := k8sClient.Create(context.Background(), cr)
 			Expect(err).To(HaveOccurred())
-			Expect(err.Error()).To(ContainSubstring("provider"))
+			Expect(apierrors.IsInvalid(err)).To(BeTrue(), "expected Invalid API error, got: %v", err)
 		})
 
 		It("should reject oai provider type", func() {
@@ -192,6 +192,7 @@ var _ = Describe("NTNCellConfig Controller", func() {
 			}
 			err := k8sClient.Create(context.Background(), cr)
 			Expect(err).To(HaveOccurred())
+			Expect(apierrors.IsInvalid(err)).To(BeTrue(), "expected Invalid API error, got: %v", err)
 		})
 	})
 
