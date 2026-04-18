@@ -283,12 +283,16 @@ func (r *GroundStationLifecycleReconciler) reconcileHealth(
 		ObservedGeneration: gs.Generation,
 	})
 
-	// Determine phase. Updating is preserved over Degraded so firmware
-	// completion can proceed even under transient resource pressure.
+	// Determine phase. Updating and firmware-uncertain Degraded are preserved
+	// so firmware lifecycle can proceed even under transient resource pressure.
+	fwCond := meta.FindStatusCondition(gs.Status.Conditions, ntnv1alpha1.ConditionFirmwareUpToDate)
+	firmwareUncertain := fwCond != nil && (fwCond.Reason == "UpdateInterrupted" || fwCond.Reason == "UpdateTimedOut")
 	if !nodeReady {
 		gs.Status.Phase = ntnv1alpha1.PhaseOffline
 	} else if gs.Status.Phase == ntnv1alpha1.PhaseUpdating {
 		// Preserve Updating phase during firmware update.
+	} else if gs.Status.Phase == ntnv1alpha1.PhaseDegraded && firmwareUncertain {
+		// Preserve Degraded when firmware state is uncertain.
 	} else if memPressure || diskPressure || pidPressure {
 		gs.Status.Phase = ntnv1alpha1.PhaseDegraded
 	} else {
