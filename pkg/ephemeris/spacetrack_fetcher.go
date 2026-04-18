@@ -98,13 +98,14 @@ func (f *SpaceTrackFetcher) FetchWithCredentials(
 ) (GPFetchResult, error) {
 	if username == "" || password == "" {
 		return GPFetchResult{}, fmt.Errorf(
-			"SpaceTrack credentials not set; use SetCredentials or FetchWithCredentials")
+			"SpaceTrack username and password must be non-empty")
 	}
 
 	log := logr.FromContextOrDiscard(ctx)
 
-	// Serialize login + HTTP request to prevent cookie/session interleaving.
-	// JSON parsing is done outside the lock to reduce contention.
+	// Serialize login + HTTP request to keep session/cookie state consistent
+	// across the login+fetch sequence when sharing a single authenticated
+	// session. JSON parsing is done outside the lock to reduce contention.
 	f.mu.Lock()
 	now := time.Now()
 
@@ -184,7 +185,7 @@ func isSessionExpired(err error) bool {
 }
 
 // doFetchGPRaw performs the authenticated HTTP request and returns the raw
-// response body. Caller must hold f.mu (the cookie jar is used during .Do).
+// response body. Caller must hold f.mu to keep session state consistent.
 // On non-OK status, returns an appropriate error (draining the body first).
 func (f *SpaceTrackFetcher) doFetchGPRaw(ctx context.Context, gpURL string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, gpURL, nil)

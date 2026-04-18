@@ -411,8 +411,8 @@ func TestSpaceTrackFetcher_ConcurrentCredsIsolation(t *testing.T) {
 	// Verify each GP request used the correct session.
 	mu.Lock()
 	defer mu.Unlock()
-	if len(gpRequests) < 2 {
-		t.Fatalf("expected at least 2 GP requests, got %d", len(gpRequests))
+	if len(gpRequests) != 2 {
+		t.Fatalf("expected exactly 2 GP requests, got %d", len(gpRequests))
 	}
 
 	// Both alice and bob should have fetched under their own identity.
@@ -420,11 +420,8 @@ func TestSpaceTrackFetcher_ConcurrentCredsIsolation(t *testing.T) {
 	for _, req := range gpRequests {
 		identities[req.identity] = true
 	}
-	if !identities["alice"] {
-		t.Error("alice's GP request did not use alice's session cookie")
-	}
-	if !identities["bob"] {
-		t.Error("bob's GP request did not use bob's session cookie")
+	if !identities["alice"] || !identities["bob"] {
+		t.Errorf("expected {alice, bob}, got %v", gpRequests)
 	}
 }
 
