@@ -43,7 +43,7 @@ jobs:
         run: make install-helm
 
       - name: Lint Helm Chart
-        run: helm lint ./dist/chart
+        run: ./bin/helm lint ./dist/chart
 
       - name: Deploy manager via Helm
         run: make helm-deploy IMG=controller:latest HELM_EXTRA_ARGS="--set manager.image.pullPolicy=Never"
