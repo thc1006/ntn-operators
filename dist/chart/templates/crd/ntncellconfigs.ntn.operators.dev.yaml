@@ -75,6 +75,13 @@ spec:
                       in ms.
                     type: integer
                 type: object
+              ephemerisRef:
+                description: |-
+                  ephemerisRef is the name of a SatelliteEphemeris CR in the same namespace
+                  whose ephemeris data will be used for dynamic NTN parameter updates.
+                  When set, the controller watches the referenced SatelliteEphemeris and
+                  re-reconciles when its status changes.
+                type: string
               ntn:
                 description: ntn contains NTN-specific radio parameters per 3GPP TS
                   38.213 / OCUDU geo_ntn.yml.

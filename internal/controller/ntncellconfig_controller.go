@@ -24,10 +24,13 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	"github.com/prometheus/client_golang/prometheus"
 	corev1 "k8s.io/api/core/v1"
@@ -50,6 +53,7 @@ type NTNCellConfigReconciler struct {
 // +kubebuilder:rbac:groups=ntn.operators.dev,resources=ntncellconfigs,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=ntn.operators.dev,resources=ntncellconfigs/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=ntn.operators.dev,resources=ntncellconfigs/finalizers,verbs=update
+// +kubebuilder:rbac:groups=ntn.operators.dev,resources=satelliteephemeris,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
@@ -232,9 +236,46 @@ func (r *NTNCellConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 }
 
 // SetupWithManager sets up the controller with the Manager.
+// Watches SatelliteEphemeris changes to trigger re-reconciliation
+// when a referenced ephemeris is updated.
 func (r *NTNCellConfigReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&ntnv1alpha1.NTNCellConfig{}).
+		Watches(&ntnv1alpha1.SatelliteEphemeris{},
+			handler.EnqueueRequestsFromMapFunc(r.ephemerisToNTNCellConfig),
+		).
 		Named("ntncellconfig").
 		Complete(r)
+}
+
+// ephemerisToNTNCellConfig maps a SatelliteEphemeris change to all
+// NTNCellConfig resources that reference it via spec.ephemerisRef.
+func (r *NTNCellConfigReconciler) ephemerisToNTNCellConfig(
+	ctx context.Context, obj client.Object,
+) []reconcile.Request {
+	eph, ok := obj.(*ntnv1alpha1.SatelliteEphemeris)
+	if !ok {
+		return nil
+	}
+
+	log := logf.FromContext(ctx)
+
+	var ccList ntnv1alpha1.NTNCellConfigList
+	if err := r.List(ctx, &ccList, client.InNamespace(eph.Namespace)); err != nil {
+		log.Error(err, "Failed to list NTNCellConfigs for ephemeris mapper")
+		return nil
+	}
+
+	var requests []reconcile.Request
+	for _, cc := range ccList.Items {
+		if cc.Spec.EphemerisRef == eph.Name {
+			requests = append(requests, reconcile.Request{
+				NamespacedName: types.NamespacedName{
+					Name:      cc.Name,
+					Namespace: cc.Namespace,
+				},
+			})
+		}
+	}
+	return requests
 }

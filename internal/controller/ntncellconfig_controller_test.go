@@ -186,7 +186,7 @@ var _ = Describe("NTNCellConfig Controller", func() {
 				Spec: ntnv1alpha1.NTNCellConfigSpec{
 					Provider: ntnv1alpha1.ProviderRef{Type: "oai"},
 					NTN: ntnv1alpha1.NTNParams{
-						EphemerisECEF: ntnv1alpha1.EphemerisECEF{PosX: 1, PosY: 2, PosZ: 3},
+						EphemerisECEF: &ntnv1alpha1.EphemerisECEF{PosX: 1, PosY: 2, PosZ: 3},
 					},
 				},
 			}
@@ -399,6 +399,133 @@ var _ = Describe("NTNCellConfig Controller", func() {
 
 			// Clean up ConfigMap.
 			_ = k8sClient.Delete(context.Background(), cm)
+		})
+	})
+
+	Context("When creating NTNCellConfig with ephemerisRef", func() {
+		const ephRefName = "test-eph-ref-cell"
+		ephRefNN := types.NamespacedName{Name: ephRefName, Namespace: namespace}
+
+		AfterEach(func() {
+			cr := &ntnv1alpha1.NTNCellConfig{}
+			err := k8sClient.Get(context.Background(), ephRefNN, cr)
+			if apierrors.IsNotFound(err) {
+				return
+			}
+			Expect(err).NotTo(HaveOccurred())
+			if controllerutil.ContainsFinalizer(cr, "ntn.operators.dev/configmap-cleanup") {
+				controllerutil.RemoveFinalizer(cr, "ntn.operators.dev/configmap-cleanup")
+				Expect(k8sClient.Update(context.Background(), cr)).To(Succeed())
+			}
+			Expect(k8sClient.Delete(context.Background(), cr)).To(Succeed())
+		})
+
+		It("should accept a CR with ephemerisRef set", func() {
+			cr := &ntnv1alpha1.NTNCellConfig{
+				ObjectMeta: metav1.ObjectMeta{Name: ephRefName, Namespace: namespace},
+				Spec: ntnv1alpha1.NTNCellConfigSpec{
+					Provider: ntnv1alpha1.ProviderRef{Type: "ocudu", Namespace: namespace},
+					NTN: ntnv1alpha1.NTNParams{
+						CellSpecificKoffset: 150,
+						EphemerisECEF: &ntnv1alpha1.EphemerisECEF{
+							PosX: 20922195, PosY: 1967783, PosZ: 19770302,
+						},
+						PayloadType: "transparent",
+					},
+					EphemerisRef: "my-sat-ephemeris",
+				},
+			}
+			Expect(k8sClient.Create(context.Background(), cr)).To(Succeed())
+
+			// Verify it was persisted correctly.
+			fetched := &ntnv1alpha1.NTNCellConfig{}
+			Expect(k8sClient.Get(context.Background(), ephRefNN, fetched)).To(Succeed())
+			Expect(fetched.Spec.EphemerisRef).To(Equal("my-sat-ephemeris"))
+		})
+	})
+
+	Context("ephemerisToNTNCellConfig mapper", func() {
+		const (
+			ccWithRef    = "cc-with-ref"
+			ccWithoutRef = "cc-without-ref"
+			ephName      = "test-eph-mapper"
+		)
+
+		BeforeEach(func() {
+			// Create a NTNCellConfig that references the ephemeris.
+			cr1 := &ntnv1alpha1.NTNCellConfig{
+				ObjectMeta: metav1.ObjectMeta{Name: ccWithRef, Namespace: namespace},
+				Spec: ntnv1alpha1.NTNCellConfigSpec{
+					Provider: ntnv1alpha1.ProviderRef{Type: "ocudu", Namespace: namespace},
+					NTN: ntnv1alpha1.NTNParams{
+						CellSpecificKoffset: 150,
+						EphemerisECEF: &ntnv1alpha1.EphemerisECEF{
+							PosX: 20922195, PosY: 1967783, PosZ: 19770302,
+						},
+						PayloadType: "transparent",
+					},
+					EphemerisRef: ephName,
+				},
+			}
+			Expect(k8sClient.Create(context.Background(), cr1)).To(Succeed())
+
+			// Create a NTNCellConfig without ephemerisRef.
+			cr2 := &ntnv1alpha1.NTNCellConfig{
+				ObjectMeta: metav1.ObjectMeta{Name: ccWithoutRef, Namespace: namespace},
+				Spec: ntnv1alpha1.NTNCellConfigSpec{
+					Provider: ntnv1alpha1.ProviderRef{Type: "ocudu", Namespace: namespace},
+					NTN: ntnv1alpha1.NTNParams{
+						CellSpecificKoffset: 150,
+						EphemerisECEF: &ntnv1alpha1.EphemerisECEF{
+							PosX: 20922195, PosY: 1967783, PosZ: 19770302,
+						},
+						PayloadType: "transparent",
+					},
+				},
+			}
+			Expect(k8sClient.Create(context.Background(), cr2)).To(Succeed())
+		})
+
+		AfterEach(func() {
+			for _, name := range []string{ccWithRef, ccWithoutRef} {
+				cr := &ntnv1alpha1.NTNCellConfig{}
+				nn := types.NamespacedName{Name: name, Namespace: namespace}
+				err := k8sClient.Get(context.Background(), nn, cr)
+				if apierrors.IsNotFound(err) {
+					continue
+				}
+				Expect(err).NotTo(HaveOccurred())
+				if controllerutil.ContainsFinalizer(cr, "ntn.operators.dev/configmap-cleanup") {
+					controllerutil.RemoveFinalizer(cr, "ntn.operators.dev/configmap-cleanup")
+					Expect(k8sClient.Update(context.Background(), cr)).To(Succeed())
+				}
+				Expect(k8sClient.Delete(context.Background(), cr)).To(Succeed())
+			}
+		})
+
+		It("should return requests only for NTNCellConfigs that reference the ephemeris", func() {
+			reconciler := newReconciler(&provider.MockProvider{})
+
+			// Simulate a SatelliteEphemeris object.
+			eph := &ntnv1alpha1.SatelliteEphemeris{
+				ObjectMeta: metav1.ObjectMeta{Name: ephName, Namespace: namespace},
+			}
+
+			requests := reconciler.ephemerisToNTNCellConfig(context.Background(), eph)
+			Expect(requests).To(HaveLen(1))
+			Expect(requests[0].NamespacedName.Name).To(Equal(ccWithRef))
+			Expect(requests[0].NamespacedName.Namespace).To(Equal(namespace))
+		})
+
+		It("should return empty requests when no NTNCellConfigs reference the ephemeris", func() {
+			reconciler := newReconciler(&provider.MockProvider{})
+
+			eph := &ntnv1alpha1.SatelliteEphemeris{
+				ObjectMeta: metav1.ObjectMeta{Name: "nonexistent-eph", Namespace: namespace},
+			}
+
+			requests := reconciler.ephemerisToNTNCellConfig(context.Background(), eph)
+			Expect(requests).To(BeEmpty())
 		})
 	})
 
