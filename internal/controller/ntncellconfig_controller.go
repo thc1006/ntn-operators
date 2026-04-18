@@ -56,11 +56,6 @@ type NTNCellConfigReconciler struct {
 // Reconcile applies NTN cell configuration to the specified provider backend.
 func (r *NTNCellConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
-	log.V(1).Info("reconciling")
-	reconcileStart := time.Now()
-	defer func() {
-		log.V(1).Info("reconcile complete", "duration", time.Since(reconcileStart))
-	}()
 
 	// Step 1: Get the NTNCellConfig resource.
 	cc := &ntnv1alpha1.NTNCellConfig{}

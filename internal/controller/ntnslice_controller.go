@@ -60,11 +60,6 @@ type NTNSliceReconciler struct {
 // Reconcile evaluates failover policy and manages path switching.
 func (r *NTNSliceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
-	log.V(1).Info("reconciling")
-	reconcileStart := time.Now()
-	defer func() {
-		log.V(1).Info("reconcile complete", "duration", time.Since(reconcileStart))
-	}()
 
 	// Step 1: Get the NTNSlice resource.
 	ns := &ntnv1alpha1.NTNSlice{}

@@ -63,11 +63,6 @@ type SatelliteEphemerisReconciler struct {
 // Reconcile fetches GP data, computes pass predictions, and updates status.
 func (r *SatelliteEphemerisReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
-	log.V(1).Info("reconciling")
-	reconcileStart := time.Now()
-	defer func() {
-		log.V(1).Info("reconcile complete", "duration", time.Since(reconcileStart))
-	}()
 
 	// Step 1: Get the SatelliteEphemeris resource.
 	eph := &ntnv1alpha1.SatelliteEphemeris{}
