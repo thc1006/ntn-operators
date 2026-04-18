@@ -279,7 +279,7 @@ ko-push: ## Build and push multi-arch image with ko.
 ##@ Helm Deployment
 
 ## Helm binary to use for deploying the chart
-HELM ?= helm
+HELM ?= $(LOCALBIN)/helm
 ## Namespace to deploy the Helm release
 HELM_NAMESPACE ?= ntn-operators-system
 ## Name of the Helm release
@@ -291,16 +291,18 @@ HELM_EXTRA_ARGS ?=
 
 HELM_VERSION ?= v3.17.4
 .PHONY: install-helm
-install-helm: ## Install Helm (pinned version).
-	@command -v $(HELM) >/dev/null 2>&1 || { \
+install-helm: $(LOCALBIN) ## Install Helm (pinned version).
+	@test -x "$(HELM)" || { \
 		HELM_OS=$$(uname -s | tr '[:upper:]' '[:lower:]') && \
 		HELM_ARCH=$$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/') && \
 		HELM_TMPDIR=$$(mktemp -d) && \
+		trap "rm -rf \"$${HELM_TMPDIR}\"" EXIT && \
 		echo "Installing Helm $(HELM_VERSION) ($${HELM_OS}/$${HELM_ARCH})..." && \
 		curl -fsSL -o "$${HELM_TMPDIR}/helm.tar.gz" "https://get.helm.sh/helm-$(HELM_VERSION)-$${HELM_OS}-$${HELM_ARCH}.tar.gz" && \
+		curl -fsSL -o "$${HELM_TMPDIR}/helm.tar.gz.sha256" "https://get.helm.sh/helm-$(HELM_VERSION)-$${HELM_OS}-$${HELM_ARCH}.tar.gz.sha256" && \
+		echo "$$(cat $${HELM_TMPDIR}/helm.tar.gz.sha256)  $${HELM_TMPDIR}/helm.tar.gz" | sha256sum -c - && \
 		tar -xzf "$${HELM_TMPDIR}/helm.tar.gz" -C "$${HELM_TMPDIR}" && \
-		sudo mv "$${HELM_TMPDIR}/$${HELM_OS}-$${HELM_ARCH}/helm" /usr/local/bin/helm && \
-		rm -rf "$${HELM_TMPDIR}"; \
+		mv "$${HELM_TMPDIR}/$${HELM_OS}-$${HELM_ARCH}/helm" "$(HELM)"; \
 	}
 
 .PHONY: helm-deploy
