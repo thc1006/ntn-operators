@@ -96,6 +96,16 @@ type NTNParams struct {
 	// +optional
 	NTNGatewayLocation *NTNGatewayLocation `json:"ntnGatewayLocation,omitempty"`
 
+	// movingRefLocation defines the Earth-moving reference location for LEO NTN cells.
+	// 3GPP Release 18 SIB19 field. Used by UEs for timing/Doppler estimation.
+	// +optional
+	MovingRefLocation *MovingRefLocation `json:"movingRefLocation,omitempty"`
+
+	// satSwitchWithResync provides satellite switch handover hints to UEs during
+	// satellite-to-satellite transitions. 3GPP Release 18 SIB19 field.
+	// +optional
+	SatSwitchWithResync *SatSwitchWithResync `json:"satSwitchWithResync,omitempty"`
+
 	// polarization specifies the antenna polarization.
 	// +kubebuilder:validation:Enum=linear;circular
 	// +optional
@@ -179,6 +189,34 @@ type NTNGatewayLocation struct {
 	// altitude in metres above sea level.
 	// +optional
 	Altitude int `json:"altitude,omitempty"`
+}
+
+// MovingRefLocation defines the Earth-moving reference location for LEO NTN cells.
+// 3GPP Release 18 SIB19. Values in 1e-4 degrees per 3GPP TS 38.331.
+type MovingRefLocation struct {
+	// latitude in 1e-4 degrees (-900000 to 900000 = -90° to 90°).
+	// +kubebuilder:validation:Minimum=-900000
+	// +kubebuilder:validation:Maximum=900000
+	Latitude int `json:"latitude"`
+
+	// longitude in 1e-4 degrees (-1800000 to 1800000 = -180° to 180°).
+	// +kubebuilder:validation:Minimum=-1800000
+	// +kubebuilder:validation:Maximum=1800000
+	Longitude int `json:"longitude"`
+}
+
+// SatSwitchWithResync provides handover hints for satellite-to-satellite transitions.
+// 3GPP Release 18 SIB19. Allows UEs to prepare for serving cell change when
+// the current satellite leaves coverage.
+type SatSwitchWithResync struct {
+	// targetPCI is the Physical Cell Identity of the target cell after switch (0-1007).
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=1007
+	TargetPCI int `json:"targetPCI"`
+
+	// t304 is the handover timer value in milliseconds per 3GPP TS 38.331.
+	// +kubebuilder:validation:Enum=50;100;150;200;500;1000;2000;10000
+	T304 int `json:"t304"`
 }
 
 // EphemerisOrbital defines the satellite orbit using Keplerian elements,

@@ -217,6 +217,27 @@ spec:
                     required:
                     - enableDopplerCompensation
                     type: object
+                  movingRefLocation:
+                    description: |-
+                      movingRefLocation defines the Earth-moving reference location for LEO NTN cells.
+                      3GPP Release 18 SIB19 field. Used by UEs for timing/Doppler estimation.
+                    properties:
+                      latitude:
+                        description: latitude in 1e-4 degrees (-900000 to 900000 =
+                          -90° to 90°).
+                        maximum: 900000
+                        minimum: -900000
+                        type: integer
+                      longitude:
+                        description: longitude in 1e-4 degrees (-1800000 to 1800000
+                          = -180° to 180°).
+                        maximum: 1800000
+                        minimum: -1800000
+                        type: integer
+                    required:
+                    - latitude
+                    - longitude
+                    type: object
                   ntnGatewayLocation:
                     description: ntnGatewayLocation specifies the NTN gateway (ground
                       station) coordinates.
@@ -272,6 +293,34 @@ spec:
                     - linear
                     - circular
                     type: string
+                  satSwitchWithResync:
+                    description: |-
+                      satSwitchWithResync provides satellite switch handover hints to UEs during
+                      satellite-to-satellite transitions. 3GPP Release 18 SIB19 field.
+                    properties:
+                      t304:
+                        description: t304 is the handover timer value in milliseconds
+                          per 3GPP TS 38.331.
+                        enum:
+                        - 50
+                        - 100
+                        - 150
+                        - 200
+                        - 500
+                        - 1000
+                        - 2000
+                        - 10000
+                        type: integer
+                      targetPCI:
+                        description: targetPCI is the Physical Cell Identity of the
+                          target cell after switch (0-1007).
+                        maximum: 1007
+                        minimum: 0
+                        type: integer
+                    required:
+                    - t304
+                    - targetPCI
+                    type: object
                   taCommon:
                     default: 0
                     description: taCommon sets the common Timing Advance value (0-66485757).

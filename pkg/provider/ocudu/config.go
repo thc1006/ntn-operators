@@ -85,6 +85,16 @@ ntn:
 {{- if .TAReportSet }}
   ta_report: {{ .TAReport }}
 {{- end }}
+{{- if .MovingRefLocation }}
+  moving_ref_location:
+    latitude: {{ .MovingRefLatitude }}
+    longitude: {{ .MovingRefLongitude }}
+{{- end }}
+{{- if .SatSwitchWithResync }}
+  sat_switch_with_resync:
+    target_pci: {{ .SatSwitchTargetPCI }}
+    t304: {{ .SatSwitchT304 }}
+{{- end }}
 {{- if .UlSyncValidityDur }}
   ntn_ul_sync_validity_dur: {{ .UlSyncValidityDur }}
 {{- end }}
@@ -140,6 +150,12 @@ type configData struct {
 	GatewayLatitude          int
 	GatewayLongitude         int
 	GatewayAltitude          int
+	MovingRefLocation        bool
+	MovingRefLatitude        int
+	MovingRefLongitude       int
+	SatSwitchWithResync      bool
+	SatSwitchTargetPCI       int
+	SatSwitchT304            int
 	Polarization             string
 	TAReportSet              bool
 	TAReport                 bool
@@ -201,6 +217,16 @@ func GenerateConfig(spec *ntnv1alpha1.NTNCellConfigSpec) ([]byte, error) {
 		data.GatewayLatitude = spec.NTN.NTNGatewayLocation.Latitude
 		data.GatewayLongitude = spec.NTN.NTNGatewayLocation.Longitude
 		data.GatewayAltitude = spec.NTN.NTNGatewayLocation.Altitude
+	}
+	if spec.NTN.MovingRefLocation != nil {
+		data.MovingRefLocation = true
+		data.MovingRefLatitude = spec.NTN.MovingRefLocation.Latitude
+		data.MovingRefLongitude = spec.NTN.MovingRefLocation.Longitude
+	}
+	if spec.NTN.SatSwitchWithResync != nil {
+		data.SatSwitchWithResync = true
+		data.SatSwitchTargetPCI = spec.NTN.SatSwitchWithResync.TargetPCI
+		data.SatSwitchT304 = spec.NTN.SatSwitchWithResync.T304
 	}
 	if spec.NTN.Polarization != "" {
 		data.Polarization = spec.NTN.Polarization

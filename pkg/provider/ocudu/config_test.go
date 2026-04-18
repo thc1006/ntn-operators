@@ -334,6 +334,46 @@ func TestGenerateConfig_NTNUlSyncValidityDur(t *testing.T) {
 	assertContains(t, string(data), "ntn_ul_sync_validity_dur: 60")
 }
 
+func TestGenerateConfig_MovingRefLocation(t *testing.T) {
+	spec := &ntnv1alpha1.NTNCellConfigSpec{
+		NTN: ntnv1alpha1.NTNParams{
+			EphemerisECEF: &ntnv1alpha1.EphemerisECEF{PosX: 1, PosY: 2, PosZ: 3},
+			MovingRefLocation: &ntnv1alpha1.MovingRefLocation{
+				Latitude:  248500,  // 24.85° in 1e-4 degrees
+				Longitude: 1210000, // 121.0° in 1e-4 degrees
+			},
+		},
+	}
+	data, err := GenerateConfig(spec)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	yaml := string(data)
+	assertContains(t, yaml, "moving_ref_location:")
+	assertContains(t, yaml, "latitude: 248500")
+	assertContains(t, yaml, "longitude: 1210000")
+}
+
+func TestGenerateConfig_SatSwitchWithResync(t *testing.T) {
+	spec := &ntnv1alpha1.NTNCellConfigSpec{
+		NTN: ntnv1alpha1.NTNParams{
+			EphemerisECEF: &ntnv1alpha1.EphemerisECEF{PosX: 1, PosY: 2, PosZ: 3},
+			SatSwitchWithResync: &ntnv1alpha1.SatSwitchWithResync{
+				TargetPCI: 100,
+				T304:      150,
+			},
+		},
+	}
+	data, err := GenerateConfig(spec)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	yaml := string(data)
+	assertContains(t, yaml, "sat_switch_with_resync:")
+	assertContains(t, yaml, "target_pci: 100")
+	assertContains(t, yaml, "t304: 150")
+}
+
 func TestGenerateConfig_NilSpec(t *testing.T) {
 	_, err := GenerateConfig(nil)
 	if err == nil {
