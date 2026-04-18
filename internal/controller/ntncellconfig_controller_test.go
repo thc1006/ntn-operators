@@ -403,12 +403,12 @@ var _ = Describe("NTNCellConfig Controller", func() {
 	})
 
 	Context("When creating NTNCellConfig with ephemerisRef", func() {
-		const ephRefName = "test-eph-ref-cell"
-		ephRefNN := types.NamespacedName{Name: ephRefName, Namespace: namespace}
+		const cellWithRefName = "test-eph-ref-cell"
+		cellWithRefNN := types.NamespacedName{Name: cellWithRefName, Namespace: namespace}
 
 		AfterEach(func() {
 			cr := &ntnv1alpha1.NTNCellConfig{}
-			err := k8sClient.Get(context.Background(), ephRefNN, cr)
+			err := k8sClient.Get(context.Background(), cellWithRefNN, cr)
 			if apierrors.IsNotFound(err) {
 				return
 			}
@@ -422,7 +422,7 @@ var _ = Describe("NTNCellConfig Controller", func() {
 
 		It("should accept a CR with ephemerisRef set", func() {
 			cr := &ntnv1alpha1.NTNCellConfig{
-				ObjectMeta: metav1.ObjectMeta{Name: ephRefName, Namespace: namespace},
+				ObjectMeta: metav1.ObjectMeta{Name: cellWithRefName, Namespace: namespace},
 				Spec: ntnv1alpha1.NTNCellConfigSpec{
 					Provider: ntnv1alpha1.ProviderRef{Type: "ocudu", Namespace: namespace},
 					NTN: ntnv1alpha1.NTNParams{
@@ -439,7 +439,7 @@ var _ = Describe("NTNCellConfig Controller", func() {
 
 			// Verify it was persisted correctly.
 			fetched := &ntnv1alpha1.NTNCellConfig{}
-			Expect(k8sClient.Get(context.Background(), ephRefNN, fetched)).To(Succeed())
+			Expect(k8sClient.Get(context.Background(), cellWithRefNN, fetched)).To(Succeed())
 			Expect(fetched.Spec.EphemerisRef).To(Equal("my-sat-ephemeris"))
 		})
 	})

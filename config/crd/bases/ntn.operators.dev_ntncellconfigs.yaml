@@ -83,6 +83,7 @@ spec:
                   ephemeris data for dynamic NTN parameter updates; currently this field
                   only triggers reconciliation. The static ephemeris in spec.ntn
                   (ephemerisECEF or ephemerisOrbital) remains required.
+                minLength: 1
                 type: string
               ntn:
                 description: ntn contains NTN-specific radio parameters per 3GPP TS

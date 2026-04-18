@@ -40,6 +40,7 @@ type NTNCellConfigSpec struct {
 	// ephemeris data for dynamic NTN parameter updates; currently this field
 	// only triggers reconciliation. The static ephemeris in spec.ntn
 	// (ephemerisECEF or ephemerisOrbital) remains required.
+	// +kubebuilder:validation:MinLength=1
 	// +optional
 	EphemerisRef string `json:"ephemerisRef,omitempty"`
 }
