@@ -43,11 +43,8 @@ func warnError(err error) {
 func Run(cmd *exec.Cmd) (string, error) {
 	dir, _ := GetProjectDir()
 	cmd.Dir = dir
-
-	if err := os.Chdir(cmd.Dir); err != nil {
-		_, _ = fmt.Fprintf(GinkgoWriter, "chdir dir: %q\n", err)
-	}
-
+	// Note: cmd.Dir sets working directory for the subprocess only.
+	// os.Chdir was removed to avoid global side effects (see #16).
 	cmd.Env = append(os.Environ(), "GO111MODULE=on")
 	command := strings.Join(cmd.Args, " ")
 	_, _ = fmt.Fprintf(GinkgoWriter, "running: %q\n", command)
