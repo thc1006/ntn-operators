@@ -18,15 +18,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6.0.2
 
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6.4.0
         with:
           go-version-file: go.mod
 
       - name: Cache golangci-lint binary
-        uses: actions/cache@v4
+        uses: actions/cache@v5.0.5
         with:
           path: bin/golangci-lint*
           key: golangci-lint-${{ hashFiles('.custom-gcl.yml', '.golangci.yml', 'go.sum') }}

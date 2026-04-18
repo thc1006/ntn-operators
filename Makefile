@@ -260,7 +260,7 @@ CRDOC ?= $(LOCALBIN)/crdoc
 
 .PHONY: docs
 docs: ## Generate API reference documentation from CRDs.
-	@command -v $(CRDOC) >/dev/null 2>&1 || GOBIN="$(LOCALBIN)" go install fybrik.io/crdoc@latest
+	@command -v $(CRDOC) >/dev/null 2>&1 || GOBIN="$(LOCALBIN)" go install fybrik.io/crdoc@v0.6.4
 	$(CRDOC) --resources config/crd/bases --output docs/api-reference.md
 
 ##@ ko Build
@@ -289,11 +289,15 @@ HELM_CHART_DIR ?= dist/chart
 ## Additional arguments to pass to helm commands
 HELM_EXTRA_ARGS ?=
 
+HELM_VERSION ?= v3.17.4
 .PHONY: install-helm
-install-helm: ## Install the latest version of Helm.
+install-helm: ## Install Helm (pinned version).
 	@command -v $(HELM) >/dev/null 2>&1 || { \
-		echo "Installing Helm..." && \
-		curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash; \
+		echo "Installing Helm $(HELM_VERSION)..." && \
+		curl -fsSL -o /tmp/helm.tar.gz "https://get.helm.sh/helm-$(HELM_VERSION)-$$(uname -s | tr '[:upper:]' '[:lower:]')-$$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/').tar.gz" && \
+		tar -xzf /tmp/helm.tar.gz -C /tmp && \
+		sudo mv /tmp/"$$(uname -s | tr '[:upper:]' '[:lower:]')"-amd64/helm /usr/local/bin/helm && \
+		rm -rf /tmp/helm.tar.gz /tmp/"$$(uname -s | tr '[:upper:]' '[:lower:]')"-*; \
 	}
 
 .PHONY: helm-deploy
