@@ -28,8 +28,6 @@ import (
 //
 // Implementations:
 //   - OCUDU: generates geo_ntn.yml and writes to a ConfigMap (future: Helm values overlay / O1 NETCONF)
-//   - OAI: generates OAI NTN config via oai-operators Helm (planned)
-//   - Aalyria: applies config via Spacetime gRPC API, pin v21.0 (planned)
 type NTNProvider interface {
 	// ApplyCellConfig applies NTN radio parameters to the backend.
 	// crName is the NTNCellConfig CR name (used to scope resources like ConfigMaps).

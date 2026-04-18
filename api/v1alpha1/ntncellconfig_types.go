@@ -37,8 +37,8 @@ type NTNCellConfigSpec struct {
 
 // ProviderRef identifies the NTN backend provider.
 type ProviderRef struct {
-	// type is the provider type.
-	// +kubebuilder:validation:Enum=ocudu;oai;aalyria
+	// type is the provider type. Currently only "ocudu" is supported.
+	// +kubebuilder:validation:Enum=ocudu
 	Type string `json:"type"`
 
 	// namespace where the provider resources (e.g., OCUDU gNB) are deployed.
@@ -150,7 +150,7 @@ const (
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
 // NTNCellConfig manages NTN-specific radio parameters for a gNB cell,
-// delegating configuration to the specified NTN backend provider (OCUDU, OAI, Aalyria).
+// delegating configuration to the specified NTN backend provider.
 type NTNCellConfig struct {
 	metav1.TypeMeta `json:",inline"`
 

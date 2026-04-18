@@ -1,12 +1,8 @@
-{{- if .Values.crd.enable }}
 ---
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   annotations:
-    {{- if .Values.crd.keep }}
-    "helm.sh/resource-policy": keep
-    {{- end }}
     controller-gen.kubebuilder.io/version: v0.20.1
   name: ntncellconfigs.ntn.operators.dev
 spec:
@@ -38,7 +34,7 @@ spec:
       openAPIV3Schema:
         description: |-
           NTNCellConfig manages NTN-specific radio parameters for a gNB cell,
-          delegating configuration to the specified NTN backend provider (OCUDU, OAI, Aalyria).
+          delegating configuration to the specified NTN backend provider.
         properties:
           apiVersion:
             description: |-
@@ -164,11 +160,10 @@ spec:
                       gNB) are deployed.
                     type: string
                   type:
-                    description: type is the provider type.
+                    description: type is the provider type. Currently only "ocudu"
+                      is supported.
                     enum:
                     - ocudu
-                    - oai
-                    - aalyria
                     type: string
                 required:
                 - type
@@ -256,4 +251,3 @@ spec:
     storage: true
     subresources:
       status: {}
-{{- end }}

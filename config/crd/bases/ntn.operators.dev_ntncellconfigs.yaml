@@ -34,7 +34,7 @@ spec:
       openAPIV3Schema:
         description: |-
           NTNCellConfig manages NTN-specific radio parameters for a gNB cell,
-          delegating configuration to the specified NTN backend provider (OCUDU, OAI, Aalyria).
+          delegating configuration to the specified NTN backend provider.
         properties:
           apiVersion:
             description: |-
@@ -160,11 +160,10 @@ spec:
                       gNB) are deployed.
                     type: string
                   type:
-                    description: type is the provider type.
+                    description: type is the provider type. Currently only "ocudu"
+                      is supported.
                     enum:
                     - ocudu
-                    - oai
-                    - aalyria
                     type: string
                 required:
                 - type
