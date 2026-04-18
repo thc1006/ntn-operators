@@ -1,10 +1,10 @@
 #!/bin/bash
 # Pre-commit hook: runs gofmt + go build + golangci-lint before commit.
 # Install: git config core.hooksPath .githooks
-set -e
+set -euo pipefail
 
 echo "==> pre-commit: gofmt check"
-GOFMT_OUT=$(gofmt -l . 2>&1 | grep -v vendor || true)
+GOFMT_OUT=$(gofmt -l . 2>&1 | grep -v vendor) || true
 if [ -n "$GOFMT_OUT" ]; then
   echo "gofmt: files not formatted:"
   echo "$GOFMT_OUT"
