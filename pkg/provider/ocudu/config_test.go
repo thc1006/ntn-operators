@@ -258,6 +258,145 @@ func TestGenerateConfig_MatchesLiveGNBFormat(t *testing.T) {
 	}
 }
 
+func TestGenerateConfig_NCells(t *testing.T) {
+	spec := &ntnv1alpha1.NTNCellConfigSpec{
+		NTN: ntnv1alpha1.NTNParams{
+			CellSpecificKoffset: 150,
+			EphemerisECEF: &ntnv1alpha1.EphemerisECEF{
+				PosX: 1, PosY: 2, PosZ: 3,
+			},
+			NCells: []ntnv1alpha1.NTNNeighborCell{
+				{PhysicalCellID: 100, Frequency: 632628},
+				{PhysicalCellID: 200},
+			},
+		},
+	}
+
+	data, err := GenerateConfig(spec)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	yaml := string(data)
+	assertContains(t, yaml, "ncells:")
+	assertContains(t, yaml, "phys_cell_id: 100")
+	assertContains(t, yaml, "frequency: 632628")
+	assertContains(t, yaml, "phys_cell_id: 200")
+	// Second cell has no frequency — must not emit frequency line.
+	// Count occurrences of "frequency:" — should be exactly 1.
+	if strings.Count(yaml, "frequency:") != 1 {
+		t.Errorf(
+			"expected exactly 1 frequency line, got %d\n%s",
+			strings.Count(yaml, "frequency:"), yaml,
+		)
+	}
+}
+
+func TestGenerateConfig_NCellsOmittedWhenEmpty(t *testing.T) {
+	spec := &ntnv1alpha1.NTNCellConfigSpec{
+		NTN: ntnv1alpha1.NTNParams{
+			CellSpecificKoffset: 150,
+			EphemerisECEF: &ntnv1alpha1.EphemerisECEF{
+				PosX: 1, PosY: 2, PosZ: 3,
+			},
+		},
+	}
+
+	data, err := GenerateConfig(spec)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	assertNotContains(t, string(data), "ncells:")
+}
+
+func TestGenerateConfig_ReferenceLocation(t *testing.T) {
+	spec := &ntnv1alpha1.NTNCellConfigSpec{
+		NTN: ntnv1alpha1.NTNParams{
+			CellSpecificKoffset: 150,
+			EphemerisECEF: &ntnv1alpha1.EphemerisECEF{
+				PosX: 1, PosY: 2, PosZ: 3,
+			},
+			ReferenceLocation: &ntnv1alpha1.ReferenceLocation{
+				Latitude:  248500,
+				Longitude: 1210000,
+			},
+		},
+	}
+
+	data, err := GenerateConfig(spec)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	yaml := string(data)
+	assertContains(t, yaml, "reference_location:")
+	assertContains(t, yaml, "latitude: 248500")
+	assertContains(t, yaml, "longitude: 1210000")
+}
+
+func TestGenerateConfig_ReferenceLocationOmittedWhenNil(t *testing.T) {
+	spec := &ntnv1alpha1.NTNCellConfigSpec{
+		NTN: ntnv1alpha1.NTNParams{
+			CellSpecificKoffset: 150,
+			EphemerisECEF: &ntnv1alpha1.EphemerisECEF{
+				PosX: 1, PosY: 2, PosZ: 3,
+			},
+		},
+	}
+
+	data, err := GenerateConfig(spec)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	assertNotContains(t, string(data), "reference_location:")
+}
+
+func TestGenerateConfig_DistanceThresholdAndTService(t *testing.T) {
+	dist := 5000
+	tsvc := 600
+	spec := &ntnv1alpha1.NTNCellConfigSpec{
+		NTN: ntnv1alpha1.NTNParams{
+			CellSpecificKoffset: 150,
+			EphemerisECEF: &ntnv1alpha1.EphemerisECEF{
+				PosX: 1, PosY: 2, PosZ: 3,
+			},
+			DistanceThreshold: &dist,
+			TService:          &tsvc,
+		},
+	}
+
+	data, err := GenerateConfig(spec)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	yaml := string(data)
+	assertContains(t, yaml, "distance_threshold: 5000")
+	assertContains(t, yaml, "t_service: 600")
+}
+
+func TestGenerateConfig_DistanceThresholdAndTServiceOmitted(t *testing.T) {
+	spec := &ntnv1alpha1.NTNCellConfigSpec{
+		NTN: ntnv1alpha1.NTNParams{
+			CellSpecificKoffset: 150,
+			EphemerisECEF: &ntnv1alpha1.EphemerisECEF{
+				PosX: 1, PosY: 2, PosZ: 3,
+			},
+		},
+	}
+
+	data, err := GenerateConfig(spec)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	yaml := string(data)
+	assertNotContains(t, yaml, "distance_threshold:")
+	assertNotContains(t, yaml, "t_service:")
+}
+
 func assertContains(t *testing.T, haystack, needle string) {
 	t.Helper()
 	if !strings.Contains(haystack, needle) {

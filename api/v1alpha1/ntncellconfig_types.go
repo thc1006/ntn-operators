@@ -83,6 +83,23 @@ type NTNParams struct {
 	// +kubebuilder:validation:Enum=transparent;regenerative
 	// +kubebuilder:default="transparent"
 	PayloadType string `json:"payloadType,omitempty"`
+
+	// ncells lists neighbor NTN cells for measurement/handover.
+	// +optional
+	NCells []NTNNeighborCell `json:"ncells,omitempty"`
+
+	// referenceLocation defines the NTN cell reference location.
+	// +optional
+	ReferenceLocation *ReferenceLocation `json:"referenceLocation,omitempty"`
+
+	// distanceThreshold sets the distance threshold for cell
+	// selection in metres.
+	// +optional
+	DistanceThreshold *int `json:"distanceThreshold,omitempty"`
+
+	// tService sets the expected NTN service duration in seconds.
+	// +optional
+	TService *int `json:"tService,omitempty"`
 }
 
 // EphemerisOrbital defines the satellite orbit using Keplerian elements,
@@ -138,6 +155,31 @@ type EphemerisECEF struct {
 	// velZ is the Z velocity of the satellite (0 for GEO).
 	// +kubebuilder:default=0
 	VelZ int `json:"velZ,omitempty"`
+}
+
+// NTNNeighborCell describes a neighbor NTN cell.
+type NTNNeighborCell struct {
+	// physicalCellID of the neighbor (0-1007).
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=1007
+	PhysicalCellID int `json:"physicalCellID"`
+
+	// frequency is the neighbor cell's ARFCN.
+	// +optional
+	Frequency int `json:"frequency,omitempty"`
+}
+
+// ReferenceLocation defines the NTN cell reference location.
+type ReferenceLocation struct {
+	// latitude in 1e-4 degrees (-900000 to 900000).
+	// +kubebuilder:validation:Minimum=-900000
+	// +kubebuilder:validation:Maximum=900000
+	Latitude int `json:"latitude"`
+
+	// longitude in 1e-4 degrees (-1800000 to 1800000).
+	// +kubebuilder:validation:Minimum=-1800000
+	// +kubebuilder:validation:Maximum=1800000
+	Longitude int `json:"longitude"`
 }
 
 // CellOverrides allows fine-tuning cell parameters for NTN.
