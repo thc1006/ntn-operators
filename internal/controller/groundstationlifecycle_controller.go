@@ -504,8 +504,8 @@ func (r *GroundStationLifecycleReconciler) checkHTTPEndpoint(ctx context.Context
 		log.V(1).Info("unsupported URL scheme", "scheme", req.URL.Scheme)
 		return false
 	}
-	// Log only scheme+host to avoid leaking credentials/tokens in URL.
-	safeEndpoint := req.URL.Scheme + "://" + req.URL.Host + req.URL.Path
+	// Log only scheme+host to avoid leaking credentials/tokens in URL path or query.
+	safeEndpoint := req.URL.Scheme + "://" + req.URL.Host
 	resp, err := r.HTTPClient.Do(req)
 	if err != nil {
 		log.V(2).Info("health check failed", "endpoint", safeEndpoint, "err", err)
