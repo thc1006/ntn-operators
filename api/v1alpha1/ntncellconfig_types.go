@@ -94,10 +94,12 @@ type NTNParams struct {
 
 	// distanceThreshold sets the distance threshold for cell
 	// selection in metres.
+	// +kubebuilder:validation:Minimum=0
 	// +optional
 	DistanceThreshold *int `json:"distanceThreshold,omitempty"`
 
 	// tService sets the expected NTN service duration in seconds.
+	// +kubebuilder:validation:Minimum=1
 	// +optional
 	TService *int `json:"tService,omitempty"`
 }

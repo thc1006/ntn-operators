@@ -90,6 +90,7 @@ spec:
                     description: |-
                       distanceThreshold sets the distance threshold for cell
                       selection in metres.
+                    minimum: 0
                     type: integer
                   ephemerisECEF:
                     description: |-
@@ -227,6 +228,7 @@ spec:
                   tService:
                     description: tService sets the expected NTN service duration in
                       seconds.
+                    minimum: 1
                     type: integer
                   taCommon:
                     default: 0
