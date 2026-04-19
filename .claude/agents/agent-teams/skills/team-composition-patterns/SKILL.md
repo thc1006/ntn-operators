@@ -85,8 +85,8 @@ When spawning teammates with the `Agent` tool, choose `subagent_type` based on w
 | `general-purpose`              | All tools (Read, Write, Edit, Bash, etc.) | Implementation, debugging, any task requiring file changes |
 | `Explore`                      | Read-only tools (Read, Grep, Glob)        | Research, code exploration, analysis                       |
 | `Plan`                         | Read-only tools                           | Architecture planning, task decomposition                  |
-| `agent-teams:team-reviewer`    | Read, Glob, Grep, Bash                    | Code review with structured findings                       |
-| `agent-teams:team-debugger`    | Read, Glob, Grep, Bash                    | Hypothesis-driven investigation                            |
+| `agent-teams:team-reviewer`    | All tools                                 | Code review with structured findings                       |
+| `agent-teams:team-debugger`    | All tools                                 | Hypothesis-driven investigation                            |
 | `agent-teams:team-implementer` | All tools                                 | Building features within file ownership boundaries         |
 | `agent-teams:team-lead`        | All tools                                 | Team orchestration and coordination                        |
 
