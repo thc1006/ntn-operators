@@ -107,12 +107,21 @@ func temeVelToECEF(ecefX, ecefY, vxTEME, vyTEME, vzTEME, gmst float64) (float64,
 	return vxRot + omegaE*ecefY, vyRot - omegaE*ecefX, vzRot
 }
 
+// quantize converts a float64 to int with explicit overflow guard.
+func quantize(val, step float64) int {
+	r := math.Round(val / step)
+	if r > math.MaxInt64 || r < math.MinInt64 || math.IsNaN(r) || math.IsInf(r, 0) {
+		return math.MaxInt
+	}
+	return int(r)
+}
+
 // kmToPos converts km to 3GPP position integer (1 LSB = ECEFPositionStep m).
 func kmToPos(km float64) int {
-	return int(math.Round(km * 1000.0 / ntnv1alpha1.ECEFPositionStep))
+	return quantize(km*1000.0, ntnv1alpha1.ECEFPositionStep)
 }
 
 // kmsToVel converts km/s to 3GPP velocity integer (1 LSB = ECEFVelocityStep m/s).
 func kmsToVel(kms float64) int {
-	return int(math.Round(kms * 1000.0 / ntnv1alpha1.ECEFVelocityStep))
+	return quantize(kms*1000.0, ntnv1alpha1.ECEFVelocityStep)
 }
