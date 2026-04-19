@@ -8,6 +8,7 @@ on:
 permissions:
   contents: write
   packages: write
+  id-token: write  # Required for cosign keyless signing via OIDC
 
 env:
   REGISTRY: ghcr.io
@@ -31,6 +32,12 @@ jobs:
       - name: Setup ko
         uses: ko-build/setup-ko@d006021bd0c28d1ce33a07e7943d48b079944c8d # v0.9
 
+      - name: Install cosign
+        uses: sigstore/cosign-installer@3454372be43b8aaf1a781145e41e40d45c4a91e0 # v3.8.2
+
+      - name: Install syft
+        uses: anchore/sbom-action/download-syft@f325610c9f50a54015d37c8d16cb3b0e3c8f0c08 # v0.18.0
+
       - name: Login to GHCR
         uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
         with:
@@ -43,13 +50,46 @@ jobs:
         run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
 
       - name: Build and push multi-arch image with ko
+        id: ko-build
         env:
           KO_DOCKER_REPO: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
         run: |
-          ko build ./cmd/ \
+          DIGEST=$(ko build ./cmd/ \
             --platform=linux/amd64,linux/arm64 \
             --tags=${{ github.ref_name }},latest \
-            --bare
+            --bare)
+          echo "DIGEST=${DIGEST}" >> "$GITHUB_OUTPUT"
+          echo "Image digest: ${DIGEST}"
+
+      # --- Supply chain security: scan, sign, SBOM (#61 #62) ---
+
+      - name: Scan image for vulnerabilities (Trivy)
+        # Pin to known-safe SHA after March 2026 supply chain compromise.
+        # See: https://www.stepsecurity.io/blog/trivy-compromised-a-second-time
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0 (safe)
+        with:
+          image-ref: ${{ steps.ko-build.outputs.DIGEST }}
+          format: 'table'
+          exit-code: '1'
+          severity: 'CRITICAL,HIGH'
+          timeout: '10m'
+
+      - name: Sign image with cosign (keyless OIDC)
+        run: cosign sign --yes ${{ steps.ko-build.outputs.DIGEST }}
+
+      - name: Generate SBOM (SPDX)
+        run: |
+          syft ${{ steps.ko-build.outputs.DIGEST }} \
+            -o spdx-json=sbom.spdx.json
+
+      - name: Attest SBOM to image
+        run: |
+          cosign attest --yes \
+            --type spdxjson \
+            --predicate sbom.spdx.json \
+            ${{ steps.ko-build.outputs.DIGEST }}
+
+      # --- Helm chart packaging ---
 
       - name: Install Helm
         env:
@@ -81,3 +121,4 @@ jobs:
           generate_release_notes: true
           files: |
             ntn-operators-${{ steps.version.outputs.VERSION }}.tgz
+            sbom.spdx.json
