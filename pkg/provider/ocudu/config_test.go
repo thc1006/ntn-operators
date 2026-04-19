@@ -20,7 +20,7 @@ import (
 	"strings"
 	"testing"
 
-	"sigs.k8s.io/yaml"
+	k8syaml "sigs.k8s.io/yaml"
 
 	ntnv1alpha1 "github.com/thc1006/ntn-operators/api/v1alpha1"
 )
@@ -924,7 +924,7 @@ func TestGenerateConfig_YAMLRoundTrip(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	var parsed map[string]any
-	if err := yaml.Unmarshal(data, &parsed); err != nil {
+	if err := k8syaml.Unmarshal(data, &parsed); err != nil {
 		t.Fatalf("rendered output is not valid YAML: %v\n\n%s", err, data)
 	}
 	if _, ok := parsed["ntn"]; !ok {
@@ -953,7 +953,7 @@ func TestGenerateConfig_PolarizationStringInjectionResistant(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	var parsed map[string]any
-	if err := yaml.Unmarshal(data, &parsed); err != nil {
+	if err := k8syaml.Unmarshal(data, &parsed); err != nil {
 		t.Fatalf("injection corrupted YAML structure: %v\n\n%s", err, data)
 	}
 	ntn, _ := parsed["ntn"].(map[string]any)
@@ -985,7 +985,7 @@ func TestGenerateConfig_PayloadTypeStringInjectionResistant(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	var parsed map[string]any
-	if err := yaml.Unmarshal(data, &parsed); err != nil {
+	if err := k8syaml.Unmarshal(data, &parsed); err != nil {
 		t.Fatalf("injection corrupted YAML structure: %v\n\n%s", err, data)
 	}
 	if _, leaked := parsed["forbidden_top_level"]; leaked {
