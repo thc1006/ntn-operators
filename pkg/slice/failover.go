@@ -114,7 +114,7 @@ func (t Trigger) EvaluateRecovery(m Metrics, margin float64) bool {
 	case "packetLoss", "terrestrialPacketLoss":
 		actual = m.PacketLossPercent
 	default:
-		return true // unknown metric — assume recovered
+		return false // unknown metric — fail-safe, assume NOT recovered
 	}
 
 	switch t.Operator {
@@ -127,7 +127,7 @@ func (t Trigger) EvaluateRecovery(m Metrics, margin float64) bool {
 	case ">=":
 		return actual < t.Value-margin
 	default:
-		return true
+		return false // unknown operator — fail-safe
 	}
 }
 
@@ -345,7 +345,7 @@ func EvaluateFailoverWithContext(
 // During switchback (satellite → terrestrial), triggers require the metric to clear
 // the threshold by the hysteresis margin before considering recovery.
 //
-// Example: trigger "rsrp < -120" with hysteresisDB=10 means failover fires at
+// Example: trigger "rsrp < -120" with hysteresisMargin=10 means failover fires at
 // RSRP < -120 dBm, but switchback requires RSRP >= -110 dBm (10 dB dead-band).
 func EvaluateFailoverWithHysteresis(
 	ctx context.Context,
@@ -356,10 +356,10 @@ func EvaluateFailoverWithHysteresis(
 	switchbackDelay time.Duration,
 	lastFailover time.Time,
 	now time.Time,
-	hysteresisDB float64,
+	hysteresisMargin float64,
 ) FailoverResult {
 	// If not on satellite or no hysteresis, delegate to the standard evaluator.
-	if currentPath != PathSatellite || hysteresisDB <= 0 {
+	if currentPath != PathSatellite || hysteresisMargin <= 0 {
 		return EvaluateFailoverWithContext(
 			ctx, currentPath, triggers, metrics,
 			satelliteAvailable, switchbackDelay, lastFailover, now,
@@ -368,7 +368,7 @@ func EvaluateFailoverWithHysteresis(
 
 	log := logr.FromContextOrDiscard(ctx)
 	log.V(2).Info("evaluate failover with hysteresis",
-		"hysteresisMargin", hysteresisDB,
+		"hysteresisMargin", hysteresisMargin,
 		"currentPath", currentPath,
 	)
 	finish := func(res FailoverResult) FailoverResult {
@@ -392,7 +392,7 @@ func EvaluateFailoverWithHysteresis(
 			continue
 		}
 		parsed = append(parsed, trigger)
-		if trigger.Evaluate(metrics) {
+		if !anyTriggered && trigger.Evaluate(metrics) {
 			anyTriggered = true
 		}
 	}
@@ -437,7 +437,7 @@ func EvaluateFailoverWithHysteresis(
 	// Check hysteresis: have ALL valid triggers recovered past the dead-band?
 	allRecovered := true
 	for _, t := range parsed {
-		if !t.EvaluateRecovery(metrics, hysteresisDB) {
+		if !t.EvaluateRecovery(metrics, hysteresisMargin) {
 			allRecovered = false
 			break
 		}
@@ -448,7 +448,7 @@ func EvaluateFailoverWithHysteresis(
 			Decision: DecisionStay,
 			Reason: fmt.Sprintf(
 				"Terrestrial in hysteresis dead-band (margin=%g), staying on satellite%s",
-				hysteresisDB, parseSuffix),
+				hysteresisMargin, parseSuffix),
 			TargetPath: PathSatellite,
 		})
 	}

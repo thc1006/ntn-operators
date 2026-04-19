@@ -446,3 +446,77 @@ func TestEvaluateWithHysteresis_PassEnds_ForceSwitchback(t *testing.T) {
 		t.Errorf("expected Switchback (pass ended), got %s: %s", result.Decision, result.Reason)
 	}
 }
+
+func TestEvaluateWithHysteresis_MultipleTriggers_RequiresAllRecovered(t *testing.T) {
+	// rsrp recovered past dead-band (-109 >= -110), but latency still in dead-band:
+	// "latency > 200" with margin 10 → recovery at <= 190. Latency 195 > 190 → NOT recovered.
+	result := EvaluateFailoverWithHysteresis(
+		context.Background(),
+		PathSatellite,
+		[]string{"rsrp < -120", "latency > 200"},
+		Metrics{RSRP: -109, LatencyMs: 195, PacketLossPercent: 0.1},
+		true, 60*time.Second, now.Add(-90*time.Second), now, 10,
+	)
+	if result.Decision != DecisionStay {
+		t.Errorf("expected Stay (not all triggers recovered), got %s: %s",
+			result.Decision, result.Reason)
+	}
+}
+
+func TestEvaluateWithHysteresis_RSRPRecovery_BoundarySemantics(t *testing.T) {
+	t.Run("at recovery threshold stays", func(t *testing.T) {
+		// rsrp < -120, margin 10 → recovery at >= -110. At exactly -110: NOT recovered.
+		result := EvaluateFailoverWithHysteresis(
+			context.Background(),
+			PathSatellite, []string{"rsrp < -120"},
+			Metrics{RSRP: -110, LatencyMs: 20, PacketLossPercent: 0.1},
+			true, 60*time.Second, now.Add(-90*time.Second), now, 10,
+		)
+		if result.Decision != DecisionSwitchback {
+			t.Errorf("expected Switchback at exact boundary, got %s: %s",
+				result.Decision, result.Reason)
+		}
+	})
+
+	t.Run("past recovery threshold switches back", func(t *testing.T) {
+		result := EvaluateFailoverWithHysteresis(
+			context.Background(),
+			PathSatellite, []string{"rsrp < -120"},
+			Metrics{RSRP: -109, LatencyMs: 20, PacketLossPercent: 0.1},
+			true, 60*time.Second, now.Add(-90*time.Second), now, 10,
+		)
+		if result.Decision != DecisionSwitchback {
+			t.Errorf("expected Switchback past boundary, got %s: %s",
+				result.Decision, result.Reason)
+		}
+	})
+}
+
+func TestEvaluateWithHysteresis_LatencyRecovery_BoundarySemantics(t *testing.T) {
+	t.Run("at recovery threshold stays", func(t *testing.T) {
+		// latency > 200, margin 30 → recovery at <= 170. At exactly 170: recovered.
+		result := EvaluateFailoverWithHysteresis(
+			context.Background(),
+			PathSatellite, []string{"latency > 200"},
+			Metrics{RSRP: -90, LatencyMs: 170, PacketLossPercent: 0.1},
+			true, 60*time.Second, now.Add(-90*time.Second), now, 30,
+		)
+		if result.Decision != DecisionSwitchback {
+			t.Errorf("expected Switchback at exact boundary, got %s: %s",
+				result.Decision, result.Reason)
+		}
+	})
+
+	t.Run("past recovery threshold switches back", func(t *testing.T) {
+		result := EvaluateFailoverWithHysteresis(
+			context.Background(),
+			PathSatellite, []string{"latency > 200"},
+			Metrics{RSRP: -90, LatencyMs: 169, PacketLossPercent: 0.1},
+			true, 60*time.Second, now.Add(-90*time.Second), now, 30,
+		)
+		if result.Decision != DecisionSwitchback {
+			t.Errorf("expected Switchback past boundary, got %s: %s",
+				result.Decision, result.Reason)
+		}
+	})
+}

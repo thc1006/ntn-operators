@@ -113,7 +113,13 @@ func (r *NTNSliceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	// Parse hysteresis margin from spec (string → float64, default 0).
 	var hysteresisMargin float64
 	if ns.Spec.FailoverPolicy.HysteresisMargin != "" {
-		if v, err := strconv.ParseFloat(ns.Spec.FailoverPolicy.HysteresisMargin, 64); err == nil {
+		if v, err := strconv.ParseFloat(ns.Spec.FailoverPolicy.HysteresisMargin, 64); err != nil {
+			log.Error(err, "invalid failoverPolicy.hysteresisMargin; defaulting to 0",
+				"hysteresisMargin", ns.Spec.FailoverPolicy.HysteresisMargin)
+		} else if math.IsNaN(v) || math.IsInf(v, 0) || v < 0 {
+			log.Info("non-finite or negative failoverPolicy.hysteresisMargin; defaulting to 0",
+				"hysteresisMargin", ns.Spec.FailoverPolicy.HysteresisMargin)
+		} else {
 			hysteresisMargin = v
 		}
 	}
