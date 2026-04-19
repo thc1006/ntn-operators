@@ -97,7 +97,7 @@ type FirmwareSpec struct {
 
 	// maintenanceWindow is the time window for updates.
 	// Format: "HH:MM-HH:MM UTC" (e.g., "02:00-04:00 UTC").
-	// +kubebuilder:validation:Pattern=`^\d{2}:\d{2}-\d{2}:\d{2}\s+UTC$`
+	// +kubebuilder:validation:Pattern=`^([01][0-9]|2[0-3]):[0-5][0-9]-([01][0-9]|2[0-3]):[0-5][0-9]\s+UTC$`
 	// +optional
 	MaintenanceWindow string `json:"maintenanceWindow,omitempty"`
 }

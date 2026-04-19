@@ -115,6 +115,7 @@ type QoSMapping struct {
 	// maxLatencyBudget is the maximum acceptable latency including
 	// satellite propagation delay.
 	// +kubebuilder:default="150ms"
+	// +kubebuilder:validation:Format=duration
 	MaxLatencyBudget metav1.Duration `json:"maxLatencyBudget,omitempty"`
 }
 

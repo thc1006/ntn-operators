@@ -65,8 +65,6 @@ type ProviderRef struct {
 // +kubebuilder:validation:XValidation:rule="has(self.ephemerisECEF) || has(self.ephemerisOrbital)",message="exactly one of ephemerisECEF or ephemerisOrbital must be set"
 // +kubebuilder:validation:XValidation:rule="!(has(self.ephemerisECEF) && has(self.ephemerisOrbital))",message="ephemerisECEF and ephemerisOrbital are mutually exclusive"
 // +kubebuilder:validation:XValidation:rule="!has(self.ephemerisECEF) || self.ephemerisECEF.posX != 0 || self.ephemerisECEF.posY != 0 || self.ephemerisECEF.posZ != 0",message="ephemerisECEF position must not be all zeros"
-// +kubebuilder:validation:XValidation:rule="!has(self.movingRefLocation) || has(self.ephemerisOrbital) || has(self.ephemerisECEF)",message="movingRefLocation requires ephemeris data"
-// +kubebuilder:validation:XValidation:rule="!has(self.satSwitchWithResync) || has(self.ephemerisOrbital) || has(self.ephemerisECEF)",message="satSwitchWithResync requires ephemeris data"
 type NTNParams struct {
 	// cellSpecificKoffset sets the cell-specific k-offset for NTN (0-1023).
 	// +kubebuilder:validation:Minimum=0

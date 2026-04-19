@@ -121,6 +121,7 @@ spec:
                     description: |-
                       maxLatencyBudget is the maximum acceptable latency including
                       satellite propagation delay.
+                    format: duration
                     type: string
                   satelliteQCI:
                     default: best-effort
