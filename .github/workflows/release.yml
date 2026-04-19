@@ -83,6 +83,19 @@ jobs:
           echo "DIGEST=${DIGEST}" >> "$GITHUB_OUTPUT"
           echo "Image digest: ${DIGEST}"
 
+      - name: Scan multi-arch image per platform (Trivy)
+        # Scan both platforms of the pushed image to catch arch-specific CVEs.
+        run: |
+          for platform in linux/amd64 linux/arm64; do
+            echo "=== Scanning ${platform} ==="
+            trivy image \
+              --platform "${platform}" \
+              --severity CRITICAL,HIGH \
+              --exit-code 1 \
+              --timeout 10m \
+              ${{ steps.ko-push.outputs.DIGEST }}
+          done
+
       - name: Sign image with cosign (keyless OIDC)
         run: cosign sign --yes ${{ steps.ko-push.outputs.DIGEST }}
 
