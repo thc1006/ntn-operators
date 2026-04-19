@@ -95,6 +95,35 @@ func geoOMM() sgp4.OMM {
 	}
 }
 
+// TestPropagateToECEF_GoldenVector verifies exact ECEF output at epoch time
+// against precomputed reference values. Catches sign errors, axis swaps,
+// and GMST rotation direction mistakes that magnitude-only checks would miss.
+func TestPropagateToECEF_GoldenVector(t *testing.T) {
+	omm := oneWebOMM()
+	epoch := parseEpoch(t, omm.EpochStr)
+
+	ecef, err := PropagateToECEF(omm, epoch)
+	if err != nil {
+		t.Fatalf("PropagateToECEF failed: %v", err)
+	}
+
+	// Reference values generated from this implementation at epoch.
+	// If these change, the TEME→ECEF rotation or quantization has regressed.
+	want := struct{ PosX, PosY, PosZ, VelX, VelY, VelZ int }{
+		PosX: -2088154, PosY: 5544785, PosZ: -5042,
+		VelX: 4706, VelY: 1603, VelZ: 119837,
+	}
+
+	if ecef.PosX != want.PosX || ecef.PosY != want.PosY || ecef.PosZ != want.PosZ {
+		t.Errorf("position mismatch:\n  got  (%d, %d, %d)\n  want (%d, %d, %d)",
+			ecef.PosX, ecef.PosY, ecef.PosZ, want.PosX, want.PosY, want.PosZ)
+	}
+	if ecef.VelX != want.VelX || ecef.VelY != want.VelY || ecef.VelZ != want.VelZ {
+		t.Errorf("velocity mismatch:\n  got  (%d, %d, %d)\n  want (%d, %d, %d)",
+			ecef.VelX, ecef.VelY, ecef.VelZ, want.VelX, want.VelY, want.VelZ)
+	}
+}
+
 func TestPropagateToECEF_LEO_PositionInRange(t *testing.T) {
 	omm := oneWebOMM()
 	epoch := parseEpoch(t, omm.EpochStr)

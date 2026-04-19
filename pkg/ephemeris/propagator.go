@@ -50,7 +50,7 @@ func PropagateToECEF(omm sgp4.OMM, t time.Time) (*ntnv1alpha1.EphemerisECEF, err
 	gmst := eci.GreenwichSiderealTime()
 	ecefX, ecefY, ecefZ := rotateZ(eci.Position.X, eci.Position.Y, eci.Position.Z, gmst)
 	ecefVX, ecefVY, ecefVZ := temeVelToECEF(
-		eci.Position.X, eci.Position.Y,
+		ecefX, ecefY,
 		eci.Velocity.X, eci.Velocity.Y, eci.Velocity.Z,
 		gmst,
 	)
@@ -94,16 +94,17 @@ func rotateZ(x, y, z, gmst float64) (float64, float64, float64) {
 // temeVelToECEF converts TEME velocity to ECEF velocity.
 // v_ecef = R(gmst) * v_teme - omega_e x r_ecef
 // where omega_e = [0, 0, 7.2921150e-5] rad/s
-func temeVelToECEF(xTEME, yTEME, vxTEME, vyTEME, vzTEME, gmst float64) (float64, float64, float64) {
+//
+// ecefX/ecefY are the already-rotated position components from rotateZ,
+// avoiding redundant trig computation.
+func temeVelToECEF(ecefX, ecefY, vxTEME, vyTEME, vzTEME, gmst float64) (float64, float64, float64) {
 	// Rotate velocity TEME → ECEF
 	vxRot, vyRot, vzRot := rotateZ(vxTEME, vyTEME, vzTEME, gmst)
 
 	// Subtract Earth rotation: omega_e x r_ecef
-	const omegaE = 7.2921150e-5 // rad/s
-	xECEF, yECEF, _ := rotateZ(xTEME, yTEME, 0, gmst)
-
 	// cross product [0, 0, omega_e] x [x, y, z] = [-omega_e*y, omega_e*x, 0]
-	return vxRot + omegaE*yECEF, vyRot - omegaE*xECEF, vzRot
+	const omegaE = 7.2921150e-5 // rad/s
+	return vxRot + omegaE*ecefY, vyRot - omegaE*ecefX, vzRot
 }
 
 // kmToPos converts km to 3GPP position integer (1 LSB = ECEFPositionStep m).
