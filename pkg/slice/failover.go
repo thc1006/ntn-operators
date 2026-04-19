@@ -17,11 +17,14 @@ limitations under the License.
 package slice
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/go-logr/logr"
 )
 
 // PathType represents the active network path.
@@ -145,6 +148,46 @@ func EvaluateFailover(
 	lastFailover time.Time,
 	now time.Time,
 ) FailoverResult {
+	return EvaluateFailoverWithContext(
+		context.Background(),
+		currentPath,
+		triggers,
+		metrics,
+		satelliteAvailable,
+		switchbackDelay,
+		lastFailover,
+		now,
+	)
+}
+
+// EvaluateFailoverWithContext is the context-aware variant of EvaluateFailover.
+// It emits structured package-level logs for trigger parsing and decision outcomes.
+func EvaluateFailoverWithContext(
+	ctx context.Context,
+	currentPath PathType,
+	triggers []string,
+	metrics Metrics,
+	satelliteAvailable bool,
+	switchbackDelay time.Duration,
+	lastFailover time.Time,
+	now time.Time,
+) FailoverResult {
+	log := logr.FromContextOrDiscard(ctx)
+	log.V(2).Info("evaluate failover",
+		"currentPath", currentPath,
+		"triggerCount", len(triggers),
+		"satelliteAvailable", satelliteAvailable,
+		"switchbackDelay", switchbackDelay,
+	)
+	finish := func(res FailoverResult) FailoverResult {
+		log.V(1).Info("failover decision",
+			"decision", res.Decision,
+			"targetPath", res.TargetPath,
+			"reason", res.Reason,
+		)
+		return res
+	}
+
 	// Parse and evaluate all triggers (OR logic).
 	anyTriggered := false
 	parseErrors := 0
@@ -152,10 +195,12 @@ func EvaluateFailover(
 		trigger, err := ParseTrigger(triggerStr)
 		if err != nil {
 			parseErrors++
+			log.V(1).Info("invalid trigger expression", "trigger", triggerStr, "error", err.Error())
 			continue
 		}
 		if trigger.Evaluate(metrics) {
 			anyTriggered = true
+			log.V(2).Info("trigger matched", "trigger", triggerStr)
 			break
 		}
 	}
@@ -169,11 +214,11 @@ func EvaluateFailover(
 	parseSuffix := ""
 	if parseErrors > 0 {
 		if parseErrors == len(triggers) {
-			return FailoverResult{
+			return finish(FailoverResult{
 				Decision:   DecisionStay,
 				Reason:     fmt.Sprintf("All %d trigger expressions are invalid", parseErrors),
 				TargetPath: currentPath,
-			}
+			})
 		}
 		parseSuffix = fmt.Sprintf(" (%d of %d triggers had parse errors)", parseErrors, len(triggers))
 	}
@@ -181,84 +226,84 @@ func EvaluateFailover(
 	switch currentPath {
 	case PathTerrestrial:
 		if !anyTriggered {
-			return FailoverResult{
+			return finish(FailoverResult{
 				Decision:   DecisionStay,
 				Reason:     "Terrestrial path healthy" + parseSuffix,
 				TargetPath: PathTerrestrial,
-			}
+			})
 		}
 		if !satelliteAvailable {
-			return FailoverResult{
+			return finish(FailoverResult{
 				Decision:   DecisionStay,
 				Reason:     "Terrestrial degraded but no satellite pass available" + parseSuffix,
 				TargetPath: PathTerrestrial,
-			}
+			})
 		}
-		return FailoverResult{
+		return finish(FailoverResult{
 			Decision:   DecisionFailover,
 			Reason:     "Terrestrial path degraded, satellite pass available" + parseSuffix,
 			TargetPath: PathSatellite,
-		}
+		})
 
 	case PathSatellite:
 		// If satellite pass ended, must switch back regardless.
 		if !satelliteAvailable {
 			if anyTriggered {
-				return FailoverResult{
+				return finish(FailoverResult{
 					Decision:   DecisionSwitchback,
 					Reason:     "Satellite pass ended, falling back to degraded terrestrial" + parseSuffix,
 					TargetPath: PathTerrestrial,
-				}
+				})
 			}
-			return FailoverResult{
+			return finish(FailoverResult{
 				Decision:   DecisionSwitchback,
 				Reason:     "Satellite pass ended, terrestrial recovered" + parseSuffix,
 				TargetPath: PathTerrestrial,
-			}
+			})
 		}
 		if anyTriggered {
 			// Terrestrial still degraded, stay on satellite.
-			return FailoverResult{
+			return finish(FailoverResult{
 				Decision:   DecisionStay,
 				Reason:     "Terrestrial still degraded, staying on satellite" + parseSuffix,
 				TargetPath: PathSatellite,
-			}
+			})
 		}
 		// Terrestrial recovered — check switchback delay.
 		if !lastFailover.IsZero() && now.Sub(lastFailover) < switchbackDelay {
-			return FailoverResult{
+			return finish(FailoverResult{
 				Decision: DecisionStay,
 				Reason: fmt.Sprintf("Terrestrial recovered but switchback delay not elapsed (%s remaining)%s",
 					switchbackDelay-now.Sub(lastFailover), parseSuffix),
 				TargetPath: PathSatellite,
-			}
+			})
 		}
-		return FailoverResult{
+		return finish(FailoverResult{
 			Decision:   DecisionSwitchback,
 			Reason:     "Terrestrial recovered, switchback delay elapsed" + parseSuffix,
 			TargetPath: PathTerrestrial,
-		}
+		})
 
 	default:
 		// Unknown or unavailable path — try terrestrial first.
 		if !anyTriggered {
-			return FailoverResult{
+			return finish(FailoverResult{
 				Decision:   DecisionSwitchback,
 				Reason:     "Initializing on terrestrial path" + parseSuffix,
 				TargetPath: PathTerrestrial,
-			}
+			})
 		}
 		if satelliteAvailable {
-			return FailoverResult{
+			return finish(FailoverResult{
 				Decision:   DecisionFailover,
 				Reason:     "Terrestrial unavailable, using satellite" + parseSuffix,
 				TargetPath: PathSatellite,
-			}
+			})
 		}
-		return FailoverResult{
+		return finish(FailoverResult{
 			Decision:   DecisionStay,
 			Reason:     "Both paths degraded" + parseSuffix,
 			TargetPath: PathUnavailable,
-		}
+		})
 	}
 }

@@ -25,6 +25,8 @@ import (
 	"net"
 	"net/http"
 	"time"
+
+	"github.com/go-logr/logr"
 )
 
 // privateRanges are CIDR blocks that should never be accessed by the operator.
@@ -72,6 +74,7 @@ var ErrPrivateIP = fmt.Errorf("connection to private/reserved IP address is bloc
 // against private/reserved ranges before connecting.
 func safeDialContext(dialer *net.Dialer) func(ctx context.Context, network, addr string) (net.Conn, error) {
 	return func(ctx context.Context, network, addr string) (net.Conn, error) {
+		log := logr.FromContextOrDiscard(ctx)
 		host, port, err := net.SplitHostPort(addr)
 		if err != nil {
 			return nil, fmt.Errorf("invalid address %q: %w", addr, err)
@@ -85,10 +88,12 @@ func safeDialContext(dialer *net.Dialer) func(ctx context.Context, network, addr
 		if len(ips) == 0 {
 			return nil, fmt.Errorf("DNS resolution for %q returned no addresses", host)
 		}
+		log.V(2).Info("resolved outbound host", "host", host, "ipCount", len(ips))
 
 		// Validate ALL resolved IPs before connecting.
 		for _, ipAddr := range ips {
 			if IsPrivateIP(ipAddr.IP) {
+				log.V(1).Info("blocked outbound dial to private/reserved IP", "host", host, "ip", ipAddr.IP.String())
 				return nil, fmt.Errorf("%w: %s resolves to %s", ErrPrivateIP, host, ipAddr.IP)
 			}
 		}
@@ -98,6 +103,7 @@ func safeDialContext(dialer *net.Dialer) func(ctx context.Context, network, addr
 		for _, ipAddr := range ips {
 			conn, dialErr := dialer.DialContext(ctx, network, net.JoinHostPort(ipAddr.IP.String(), port))
 			if dialErr == nil {
+				log.V(2).Info("outbound dial succeeded", "host", host, "ip", ipAddr.IP.String())
 				return conn, nil
 			}
 			lastErr = dialErr
@@ -121,6 +127,7 @@ func NewSafeHTTPClient(timeout time.Duration) *http.Client {
 		Transport: transport,
 		// Validate redirect targets against private IP ranges (defense in depth).
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			log := logr.FromContextOrDiscard(req.Context())
 			if len(via) >= 3 {
 				return fmt.Errorf("too many redirects")
 			}
@@ -132,9 +139,11 @@ func NewSafeHTTPClient(timeout time.Duration) *http.Client {
 			}
 			for _, ipAddr := range ips {
 				if IsPrivateIP(ipAddr.IP) {
+					log.V(1).Info("blocked redirect to private/reserved IP", "host", host, "ip", ipAddr.IP.String())
 					return fmt.Errorf("%w: redirect to %s resolves to %s", ErrPrivateIP, host, ipAddr.IP)
 				}
 			}
+			log.V(2).Info("redirect target allowed", "host", host, "ipCount", len(ips))
 			return nil
 		},
 	}

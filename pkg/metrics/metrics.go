@@ -89,4 +89,7 @@ func init() {
 		GPFetchDuration,
 		GPSatelliteCount,
 	)
+	// Note: logging here is intentionally omitted because init() runs
+	// before controller-runtime's logger is configured. Registration
+	// success is verified by the metrics_test.go suite.
 }

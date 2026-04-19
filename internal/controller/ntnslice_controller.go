@@ -110,7 +110,8 @@ func (r *NTNSliceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		lastFailover = ns.Status.LastFailover.Time
 	}
 
-	result := slice.EvaluateFailover(
+	result := slice.EvaluateFailoverWithContext(
+		ctx,
 		currentPath,
 		ns.Spec.FailoverPolicy.Triggers,
 		metrics,

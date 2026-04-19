@@ -17,6 +17,7 @@ limitations under the License.
 package slice
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
@@ -302,5 +303,21 @@ func TestEvaluateFailover_EmptyPath_Degraded_Failover(t *testing.T) {
 	}
 	if result.TargetPath != PathSatellite {
 		t.Errorf("expected satellite, got %s", result.TargetPath)
+	}
+}
+
+func TestEvaluateFailoverWithContext_MatchesLegacyBehavior(t *testing.T) {
+	metrics := Metrics{RSRP: -125, LatencyMs: 250, PacketLossPercent: 0.1}
+	want := EvaluateFailover(
+		PathTerrestrial, triggers, metrics,
+		true, 60*time.Second, time.Time{}, now,
+	)
+	got := EvaluateFailoverWithContext(
+		context.Background(),
+		PathTerrestrial, triggers, metrics,
+		true, 60*time.Second, time.Time{}, now,
+	)
+	if got != want {
+		t.Fatalf("EvaluateFailoverWithContext mismatch: got %+v want %+v", got, want)
 	}
 }
