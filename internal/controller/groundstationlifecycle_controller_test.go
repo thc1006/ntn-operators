@@ -659,7 +659,7 @@ var _ = Describe("GroundStationLifecycle Controller", func() {
 			val := groundStationLabelValue(ns, name)
 			Expect(len(val)).To(BeNumerically("<=", 63))
 			// Pure hash — 16 hex chars, no dot separator.
-			Expect(len(val)).To(Equal(16))
+			Expect(val).To(HaveLen(16))
 		})
 	})
 })

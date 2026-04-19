@@ -195,6 +195,10 @@ func groundStationLabelValue(namespace, gsName string) string {
 	h := sha256.Sum256([]byte(labelValue))
 	suffix := hex.EncodeToString(h[:4])
 	truncName := strings.TrimRight(gsName[:remaining], "-.")
+	if truncName == "" {
+		// gsName was entirely "-." chars — use hash only.
+		return prefix + suffix
+	}
 	return prefix + truncName + "-" + suffix
 }
 
