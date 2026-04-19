@@ -97,6 +97,7 @@ spec:
                     description: |-
                       switchbackDelay is how long to wait after terrestrial recovers
                       before switching back (prevents flapping).
+                    format: duration
                     type: string
                   triggers:
                     description: |-
@@ -108,6 +109,7 @@ spec:
                     maxItems: 10
                     minItems: 1
                     type: array
+                    x-kubernetes-list-type: set
                 required:
                 - triggers
                 type: object

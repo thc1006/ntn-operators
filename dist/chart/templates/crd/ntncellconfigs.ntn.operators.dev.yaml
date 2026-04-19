@@ -431,6 +431,12 @@ spec:
                   rule: '!has(self.ephemerisECEF) || self.ephemerisECEF.posX != 0
                     || self.ephemerisECEF.posY != 0 || self.ephemerisECEF.posZ !=
                     0'
+                - message: movingRefLocation requires ephemeris data
+                  rule: '!has(self.movingRefLocation) || has(self.ephemerisOrbital)
+                    || has(self.ephemerisECEF)'
+                - message: satSwitchWithResync requires ephemeris data
+                  rule: '!has(self.satSwitchWithResync) || has(self.ephemerisOrbital)
+                    || has(self.ephemerisECEF)'
               provider:
                 description: provider specifies which NTN backend to configure.
                 properties:

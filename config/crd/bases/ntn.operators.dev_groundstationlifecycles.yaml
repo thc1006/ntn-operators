@@ -119,8 +119,10 @@ spec:
                       "beta").
                     type: string
                   maintenanceWindow:
-                    description: maintenanceWindow is the time window for updates
-                      (e.g., "02:00-04:00 UTC").
+                    description: |-
+                      maintenanceWindow is the time window for updates.
+                      Format: "HH:MM-HH:MM UTC" (e.g., "02:00-04:00 UTC").
+                    pattern: ^\d{2}:\d{2}-\d{2}:\d{2}\s+UTC$
                     type: string
                 type: object
               hardware:

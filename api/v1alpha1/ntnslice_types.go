@@ -86,11 +86,13 @@ type FailoverPolicy struct {
 	// Validated at runtime by the failover engine (pkg/slice.ParseTrigger).
 	// +kubebuilder:validation:MinItems=1
 	// +kubebuilder:validation:MaxItems=10
+	// +listType=set
 	Triggers []string `json:"triggers"`
 
 	// switchbackDelay is how long to wait after terrestrial recovers
 	// before switching back (prevents flapping).
 	// +kubebuilder:default="60s"
+	// +kubebuilder:validation:Format=duration
 	SwitchbackDelay metav1.Duration `json:"switchbackDelay,omitempty"`
 
 	// sessionContinuity preserves active sessions during failover.
