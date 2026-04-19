@@ -198,19 +198,20 @@ func (r *NTNCellConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	} else {
 		pushed, marker, err := r.pushEphemerisUpdateIfNeeded(ctx, cc, spec)
 		if err != nil {
-			log.Error(err, "failed to push ephemeris update")
+			pushErr := err
+			log.Error(pushErr, "failed to push ephemeris update")
 			meta.SetStatusCondition(&cc.Status.Conditions, metav1.Condition{
 				Type:               ntnv1alpha1.ConditionEphemerisPushed,
 				Status:             metav1.ConditionFalse,
 				Reason:             "PushFailed",
-				Message:            err.Error(),
+				Message:            pushErr.Error(),
 				ObservedGeneration: cc.Generation,
 			})
-			if r.Recorder != nil {
-				r.Recorder.Eventf(cc, nil, "Warning", "EphemerisPushFailed", "EphemerisPushFailed", "%s", err.Error())
-			}
 			if err := r.Status().Update(ctx, cc); err != nil {
 				return ctrl.Result{}, err
+			}
+			if r.Recorder != nil {
+				r.Recorder.Eventf(cc, nil, "Warning", "EphemerisPushFailed", "EphemerisPushFailed", "%s", pushErr.Error())
 			}
 			return ctrl.Result{RequeueAfter: time.Minute}, nil
 		}
