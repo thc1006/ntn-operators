@@ -303,9 +303,10 @@ func TestGenerateConfig_PolarizationBoth(t *testing.T) {
 	}
 	yaml := string(data)
 	// Nested OCUDU layout: polarization: { dl:, ul: }
+	// Values are quoted via yamlQuote for YAML-injection defense-in-depth.
 	assertContains(t, yaml, "polarization:")
-	assertContains(t, yaml, "    dl: rhcp")
-	assertContains(t, yaml, "    ul: lhcp")
+	assertContains(t, yaml, `    dl: "rhcp"`)
+	assertContains(t, yaml, `    ul: "lhcp"`)
 	// MUST NOT emit the old flat scalar form.
 	assertNotContains(t, yaml, "polarization: rhcp")
 	assertNotContains(t, yaml, "polarization: lhcp")
@@ -325,7 +326,7 @@ func TestGenerateConfig_PolarizationDLOnly(t *testing.T) {
 	}
 	yaml := string(data)
 	assertContains(t, yaml, "polarization:")
-	assertContains(t, yaml, "    dl: linear")
+	assertContains(t, yaml, `    dl: "linear"`)
 	assertNotContains(t, yaml, "ul:")
 }
 
@@ -342,7 +343,7 @@ func TestGenerateConfig_PolarizationULOnly(t *testing.T) {
 	}
 	yaml := string(data)
 	assertContains(t, yaml, "polarization:")
-	assertContains(t, yaml, "    ul: rhcp")
+	assertContains(t, yaml, `    ul: "rhcp"`)
 	assertNotContains(t, yaml, "dl:")
 }
 
@@ -372,6 +373,48 @@ func TestGenerateConfig_PolarizationOmittedWhenBothEmpty(t *testing.T) {
 	}
 	// Empty struct → no DL/UL set → omit entire block (matches OCUDU's if-guarded writer).
 	assertNotContains(t, string(data), "polarization:")
+}
+
+func TestGenerateConfig_PolarizationStringInjectionResistant(t *testing.T) {
+	// Defense-in-depth: even if apiserver enum validation is bypassed and a
+	// malicious polarization value somehow reaches GenerateConfig, the rendered
+	// YAML MUST NOT allow the injected string to break out and create sibling
+	// YAML keys. yamlQuote escapes newlines and colons into a quoted scalar.
+	spec := &ntnv1alpha1.NTNCellConfigSpec{
+		NTN: ntnv1alpha1.NTNParams{
+			EphemerisECEF: &ntnv1alpha1.EphemerisECEF{PosX: 1, PosY: 2, PosZ: 3},
+			Polarization: &ntnv1alpha1.NTNPolarization{
+				DL: "rhcp\ninjected_key: pwned",
+				UL: "lhcp",
+			},
+		},
+	}
+	data, err := GenerateConfig(spec)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	yaml := string(data)
+	// The injection MUST be inside a quoted string, not a bare scalar.
+	assertNotContains(t, yaml, "\ninjected_key: pwned")
+	assertContains(t, yaml, `\n`) // escape sequence inside the quoted string
+}
+
+func TestGenerateConfig_PayloadTypeStringInjectionResistant(t *testing.T) {
+	// The # Payload type: ... comment line is line-terminated; yamlQuote does
+	// not protect it. sanitizeComment replaces control chars with spaces so
+	// no newline / CR can terminate the comment and inject real YAML keys.
+	spec := &ntnv1alpha1.NTNCellConfigSpec{
+		NTN: ntnv1alpha1.NTNParams{
+			EphemerisECEF: &ntnv1alpha1.EphemerisECEF{PosX: 1, PosY: 2, PosZ: 3},
+			PayloadType:   "transparent\ninjected_key: pwned",
+		},
+	}
+	data, err := GenerateConfig(spec)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	yaml := string(data)
+	assertNotContains(t, yaml, "\ninjected_key: pwned")
 }
 
 func TestGenerateConfig_TAReport(t *testing.T) {
