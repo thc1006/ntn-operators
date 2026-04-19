@@ -8,9 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- **SIB11 per-neighbor reselection** (#47): `NTNNeighborCell.reselectionInfo`
+- **Per-neighbor idle-mode reselection** (#47): `NTNNeighborCell.reselectionInfo`
   carries `qHyst`, `qOffsetCell`, `sIntraSearchP`, `threshServingLowP` per
-  3GPP TS 38.331 `IntraFreqCellReselectionInfo`.
+  3GPP TS 38.331 `IntraFreqCellReselectionInfo`, rendered via OCUDU's
+  SIB2/SIB3 surface. SIB11 (connected-mode `MeasConfig`) is upstream-blocked
+  — see `docs/adr/0001-sib11-measurement-config.md`.
 - **SIB19 scheduling overrides** (#46): `CellOverrides.sibSchedule` with
   `siWindowLength`, `siPeriod`, `siWindowPosition` (previously hardcoded).
 - **Table-driven TS 38.331 conformance test** mapping rendered YAML

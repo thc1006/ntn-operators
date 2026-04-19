@@ -304,10 +304,12 @@ spec:
                     type: object
                   neighborCells:
                     description: |-
-                      neighborCells lists neighbor NTN cells for measurement/handover.
+                      neighborCells lists neighbor NTN cells for idle-mode reselection.
                       OCUDU YAML renders as "ncells:" for compatibility.
-                      MaxItems=32 caps rendered SIB4/SIB11 payload size (3GPP caps at 16;
-                      32 is a generous guard) and bounds reconciler memory.
+                      MaxItems=32 caps rendered SIB3/SIB4 intraFreqNeighCellList size
+                      (3GPP caps at 16; 32 is a generous guard) and bounds reconciler
+                      memory. SIB11 (connected-mode MeasConfig) is unsupported upstream
+                      today — see docs/adr/0001-sib11-measurement-config.md.
                     items:
                       description: NTNNeighborCell describes a neighbor NTN cell.
                       properties:
@@ -323,10 +325,13 @@ spec:
                           type: integer
                         reselectionInfo:
                           description: |-
-                            reselectionInfo carries SIB11-style per-neighbor cell reselection
-                            parameters per 3GPP TS 38.331 IntraFreqCellReselectionInfo. All
-                            sub-fields are optional; unset fields are omitted from the rendered
-                            config so OCUDU falls back to its internal defaults.
+                            reselectionInfo carries per-neighbor idle-mode reselection parameters
+                            per 3GPP TS 38.331 IntraFreqCellReselectionInfo, exposed through
+                            OCUDU's SIB2/SIB3 configuration surface. SIB11 (connected-mode
+                            MeasConfig / handover) is unsupported upstream today — see
+                            docs/adr/0001-sib11-measurement-config.md. All sub-fields are
+                            optional; unset fields are omitted from the rendered config so
+                            OCUDU falls back to its internal defaults.
                           properties:
                             qHyst:
                               description: |-

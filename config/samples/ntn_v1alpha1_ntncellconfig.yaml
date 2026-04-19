@@ -27,7 +27,9 @@ spec:
     polarization:
       dl: rhcp
       ul: lhcp
-    # SIB11 per-neighbor reselection: omit reselectionInfo entirely to
+    # Per-neighbor idle-mode reselection (SIB2/SIB3 surface). SIB11
+    # (connected-mode MeasConfig) is upstream-blocked, see
+    # docs/adr/0001-sib11-measurement-config.md. Omit reselectionInfo to
     # accept OCUDU defaults, or set one or more sub-fields.
     neighborCells:
       - physicalCellID: 7

@@ -137,10 +137,12 @@ type NTNParams struct {
 	// +kubebuilder:default="transparent"
 	PayloadType string `json:"payloadType,omitempty"`
 
-	// neighborCells lists neighbor NTN cells for measurement/handover.
+	// neighborCells lists neighbor NTN cells for idle-mode reselection.
 	// OCUDU YAML renders as "ncells:" for compatibility.
-	// MaxItems=32 caps rendered SIB4/SIB11 payload size (3GPP caps at 16;
-	// 32 is a generous guard) and bounds reconciler memory.
+	// MaxItems=32 caps rendered SIB3/SIB4 intraFreqNeighCellList size
+	// (3GPP caps at 16; 32 is a generous guard) and bounds reconciler
+	// memory. SIB11 (connected-mode MeasConfig) is unsupported upstream
+	// today — see docs/adr/0001-sib11-measurement-config.md.
 	// +listType=map
 	// +listMapKey=physicalCellID
 	// +kubebuilder:validation:MaxItems=32
@@ -340,16 +342,25 @@ type NTNNeighborCell struct {
 	// +optional
 	Frequency int `json:"frequency,omitempty"`
 
-	// reselectionInfo carries SIB11-style per-neighbor cell reselection
-	// parameters per 3GPP TS 38.331 IntraFreqCellReselectionInfo. All
-	// sub-fields are optional; unset fields are omitted from the rendered
-	// config so OCUDU falls back to its internal defaults.
+	// reselectionInfo carries per-neighbor idle-mode reselection parameters
+	// per 3GPP TS 38.331 IntraFreqCellReselectionInfo, exposed through
+	// OCUDU's SIB2/SIB3 configuration surface. SIB11 (connected-mode
+	// MeasConfig / handover) is unsupported upstream today — see
+	// docs/adr/0001-sib11-measurement-config.md. All sub-fields are
+	// optional; unset fields are omitted from the rendered config so
+	// OCUDU falls back to its internal defaults.
 	// +optional
 	ReselectionInfo *NeighborReselectionInfo `json:"reselectionInfo,omitempty"`
 }
 
-// NeighborReselectionInfo models the SIB11 per-neighbor reselection
-// parameters that NTN operators tune for handover behavior.
+// NeighborReselectionInfo models per-neighbor idle-mode reselection
+// parameters that NTN operators tune for cell reselection behavior.
+// Per ADR 0001: qHyst / sIntraSearchP / threshServingLowP land in SIB2
+// (cellReselectionInfoCommon); qOffsetCell lands in SIB3
+// (intraFreqNeighCellInfo). This struct keeps all four together for
+// per-neighbor composability even though SIB2 values are cell-wide;
+// a future `neighborMobility` redesign (see ADR 0001 §Option C) will
+// split them.
 // +kubebuilder:validation:XValidation:rule="has(self.qHyst) || has(self.qOffsetCell) || has(self.sIntraSearchP) || has(self.threshServingLowP)",message="at least one reselection sub-field (qHyst, qOffsetCell, sIntraSearchP, threshServingLowP) must be set"
 type NeighborReselectionInfo struct {
 	// qHyst is the reselection hysteresis in dB (TS 38.331 Q-Hyst enum:

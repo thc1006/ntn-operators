@@ -803,9 +803,12 @@ func TestGenerateConfig_NeighborReselectionInfoOmittedWhenNil(t *testing.T) {
 }
 
 // TestGenerateConfig_TS38331Conformance maps rendered YAML fragments back to
-// their TS 38.331 IE origin so future SIB19/SIB11 additions extend by appending
-// a row. Fragments are presence-only where the exact value is already covered
-// by a dedicated test, keeping this suite stable as IE serializations evolve.
+// their TS 38.331 IE origin so future SIB19 and idle-mode reselection
+// additions (SIB2/SIB3/SIB4-derived IEs) extend by appending a row. SIB11 is
+// intentionally excluded — upstream OCUDU has no SIB11 surface; see
+// docs/adr/0001-sib11-measurement-config.md. Fragments are presence-only where
+// the exact value is already covered by a dedicated test, keeping this suite
+// stable as IE serializations evolve.
 func TestGenerateConfig_TS38331Conformance(t *testing.T) {
 	dur := 900
 	qhyst := 2
@@ -856,8 +859,8 @@ func TestGenerateConfig_TS38331Conformance(t *testing.T) {
 		{"movingRefLocation-r18", "SIB19-v1800", "moving_ref_location:"},
 		{"satSwitchWithResync-r18", "SIB19-v1800", "sat_switch_with_resync:"},
 		{"SIB19 scheduling", "SI-SchedulingInfo", "sib_mapping: 19"},
-		{"q-Hyst (SIB11)", "IntraFreqCellReselectionInfo", "q_hyst: 2"},
-		{"reselection_info block (SIB11)", "IntraFreqCellReselectionInfo", "reselection_info:"},
+		{"q-Hyst (SIB2 cellReselectionInfoCommon)", "IntraFreqCellReselectionInfo", "q_hyst: 2"},
+		{"reselection_info block (SIB2/SIB3)", "IntraFreqCellReselectionInfo", "reselection_info:"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
