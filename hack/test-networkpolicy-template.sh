@@ -45,13 +45,13 @@ if ! echo "$output" | grep -q '8081'; then
   fail "ingress should allow port 8081 (health probes)"
 fi
 
-# Test 7: Egress allows HTTPS port 443
-if ! echo "$output" | grep -q '443'; then
+# Test 7: Egress allows HTTPS port 443 (not just 8443)
+if ! echo "$output" | grep -qF 'port: 443'; then
   fail "egress should allow port 443 (HTTPS)"
 fi
 
-# Test 8: Egress allows DNS port 53
-if ! echo "$output" | grep -q '53'; then
+# Test 8: Egress allows DNS port 53 (exact match)
+if ! echo "$output" | grep -qF 'port: 53'; then
   fail "egress should allow port 53 (DNS)"
 fi
 
