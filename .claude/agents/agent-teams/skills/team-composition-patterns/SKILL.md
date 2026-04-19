@@ -88,7 +88,7 @@ When spawning teammates with the `Agent` tool, choose `subagent_type` based on w
 | `agent-teams:team-reviewer`    | Read, Glob, Grep, Bash                    | Code review with structured findings                       |
 | `agent-teams:team-debugger`    | Read, Glob, Grep, Bash                    | Hypothesis-driven investigation                            |
 | `agent-teams:team-implementer` | All tools                                 | Building features within file ownership boundaries         |
-| `agent-teams:team-lead`        | Read, Glob, Grep, Bash                    | Team orchestration and coordination                        |
+| `agent-teams:team-lead`        | All tools                                 | Team orchestration and coordination                        |
 
 **Key distinction**: Read-only agents (Explore, Plan) cannot modify files. Never assign implementation tasks to read-only agents.
 
