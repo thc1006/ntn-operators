@@ -36,6 +36,7 @@ import (
 	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -75,10 +76,11 @@ func (e *ambiguousNodeError) Error() string {
 // GroundStationLifecycleReconciler reconciles a GroundStationLifecycle object
 type GroundStationLifecycleReconciler struct {
 	client.Client
-	Scheme     *runtime.Scheme
-	Recorder   events.EventRecorder
-	HTTPClient *http.Client
-	Now        func() time.Time // injectable clock; nil defaults to time.Now
+	Scheme                  *runtime.Scheme
+	Recorder                events.EventRecorder
+	MaxConcurrentReconciles int
+	HTTPClient              *http.Client
+	Now                     func() time.Time // injectable clock; nil defaults to time.Now
 }
 
 // +kubebuilder:rbac:groups=ntn.operators.dev,resources=groundstationlifecycles,verbs=get;list;watch;create;update;patch;delete
@@ -580,6 +582,7 @@ func (r *GroundStationLifecycleReconciler) SetupWithManager(mgr ctrl.Manager) er
 			handler.EnqueueRequestsFromMapFunc(r.nodeToGroundStation),
 		).
 		Named("groundstationlifecycle").
+		WithOptions(controller.Options{MaxConcurrentReconciles: r.MaxConcurrentReconciles}).
 		Complete(r)
 }
 

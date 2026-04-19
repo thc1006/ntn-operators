@@ -22,6 +22,11 @@ manager:
   args:
     - --leader-elect
 
+  ## Maximum concurrent reconciles per controller (default: 1).
+  ## Increase for large deployments (100+ ground stations, multiple constellations).
+  ##
+  maxConcurrentReconciles: 1
+
   ## Environment variables
   ##
   env: []
