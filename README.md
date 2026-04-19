@@ -11,7 +11,7 @@ Kubernetes-native management framework for Non-Terrestrial Networks (NTN). Decla
 |-----|-----------|-------------|
 | **SatelliteEphemeris** | `sateph` | Auto-fetches GP data (OMM JSON) from CelesTrak or SpaceTrack, runs SGP4 pass prediction |
 | **GroundStationLifecycle** | `gs` | Manages edge ground station nodes — health checks, firmware OTA with timeout, K8s integration |
-| **NTNCellConfig** | `ntncc` | Configures NTN gNB cells via OCUDU/srsRAN provider (generates ConfigMap with OwnerReference) |
+| **NTNCellConfig** | `ntncc` | Configures NTN gNB cells via OCUDU provider (generates ConfigMap with OwnerReference) |
 | **NTNSlice** | `nts` | Manages terrestrial-satellite slice failover, QoS mapping, security policy, billing |
 
 ## Architecture
@@ -48,12 +48,12 @@ graph TB
     CL[CelesTrak API] -.-> SE
     ST[SpaceTrack API] -.-> SE
     ND[K8s Node] -.-> GS
-    CM -.-> GNB[srsRAN gNB]
+    CM -.-> GNB[OCUDU gNB]
 ```
 
 **Data sources**: SatelliteEphemeris supports CelesTrak (public, no auth) and SpaceTrack (requires credentials via K8s Secret). Both use the same OMM JSON format parsed by SGP4.
 
-**Provider pattern**: NTNCellConfig uses a pluggable provider interface (currently OCUDU/srsRAN). OAI and Aalyria providers are planned for v0.2.
+**Provider pattern**: NTNCellConfig uses a pluggable provider interface (currently OCUDU). Additional providers may be added in future releases.
 
 **Failover engine**: NTNSlice evaluates trigger conditions (RSRP, latency, packet loss) and manages terrestrial-satellite path switching with configurable switchback delay. QoS, security, and billing parameters are tracked per active path.
 
@@ -106,7 +106,7 @@ kubectl apply -f config/samples/ntn_v1alpha1_satelliteephemeris.yaml
 kubectl apply -f config/samples/ntn_v1alpha1_groundstationlifecycle.yaml
 kubectl apply -f config/samples/ntn_v1alpha1_groundstationlifecycle_hsinchu.yaml
 
-# NTN cell configuration (OCUDU/srsRAN)
+# NTN cell configuration (OCUDU)
 kubectl apply -f config/samples/ntn_v1alpha1_ntncellconfig.yaml
 
 # Terrestrial-satellite slice failover
@@ -280,7 +280,7 @@ make test-e2e   # Run E2E tests on Kind cluster
 api/v1alpha1/           # CRD type definitions (with CEL validation rules)
 internal/controller/    # Reconciler implementations
 pkg/ephemeris/          # CelesTrak + SpaceTrack GP fetchers, SGP4 pass prediction
-pkg/provider/ocudu/     # OCUDU/srsRAN provider (config generation)
+pkg/provider/ocudu/     # OCUDU provider (config generation)
 pkg/slice/              # Failover state machine + trigger parser
 pkg/netutil/            # SSRF-safe HTTP client
 pkg/metrics/            # Custom Prometheus metrics
@@ -296,7 +296,7 @@ docs/                   # API reference (auto-generated)
 - **Metrics source**: Failover trigger metrics are read from CR annotations (`ntn.operators.dev/simulated-*`). Production UPF/Prometheus integration is planned for v0.2.
 - **Antenna health**: `AntennaReady` condition is simulated as True when the node exists. Real hardware integration requires vendor-specific agents.
 - **Session continuity**: The `sessionContinuity` field is tracked but not enforced at the data plane level.
-- **Providers**: Only OCUDU/srsRAN is implemented. OAI and Aalyria are planned for v0.2.
+- **Providers**: Only OCUDU is implemented. Additional providers may be added in future releases.
 - **Firmware updates**: The controller monitors node annotations for firmware versions but does not directly trigger OTA. An external agent on the node manages the actual update.
 
 ## Grafana Dashboard

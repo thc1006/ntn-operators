@@ -18,6 +18,8 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -171,14 +173,40 @@ func (r *GroundStationLifecycleReconciler) healthCheckInterval(gs *ntnv1alpha1.G
 // maxLabelValueLen is the Kubernetes label value length limit.
 const maxLabelValueLen = 63
 
+// groundStationLabelValue returns the label value for a ground station.
+// If namespace.name exceeds the 63-char K8s label limit, the gsName part
+// is truncated with a hash suffix while preserving "namespace." prefix.
+// This ensures nodeToGroundStation can always parse the namespace back.
+func groundStationLabelValue(namespace, gsName string) string {
+	labelValue := namespace + "." + gsName
+	if len(labelValue) <= maxLabelValueLen {
+		return labelValue
+	}
+	// Preserve namespace + "." prefix, truncate+hash only the name part.
+	prefix := namespace + "."
+	remaining := maxLabelValueLen - len(prefix) - 9 // room for "-" + 8-char hash
+	if remaining < 1 {
+		// Namespace alone is too long (≥54 chars) — hash the whole thing.
+		// Note: this loses the "." separator so nodeToGroundStation won't
+		// parse it. The GS controller still works via periodic reconcile.
+		h := sha256.Sum256([]byte(labelValue))
+		return hex.EncodeToString(h[:4]) + hex.EncodeToString(h[4:8])
+	}
+	h := sha256.Sum256([]byte(labelValue))
+	suffix := hex.EncodeToString(h[:4])
+	truncName := strings.TrimRight(gsName[:remaining], "-.")
+	if truncName == "" {
+		// gsName was entirely "-." chars — use hash only.
+		return prefix + suffix
+	}
+	return prefix + truncName + "-" + suffix
+}
+
 // findMatchingNode finds a Node labeled ntn.operators.dev/groundstation=<namespace>.<name>.
+// For long names, the label value is truncated+hashed via groundStationLabelValue.
 func (r *GroundStationLifecycleReconciler) findMatchingNode(ctx context.Context, namespace, gsName string) (*corev1.Node, error) {
 	log := logf.FromContext(ctx)
-	labelValue := namespace + "." + gsName
-	if len(labelValue) > maxLabelValueLen {
-		log.V(1).Info("label value exceeds limit", "value", labelValue, "length", len(labelValue))
-		return nil, fmt.Errorf("label value %q exceeds %d-character Kubernetes limit (namespace.name = %d chars)", labelValue, maxLabelValueLen, len(labelValue))
-	}
+	labelValue := groundStationLabelValue(namespace, gsName)
 	var nodeList corev1.NodeList
 	if err := r.List(ctx, &nodeList, client.MatchingLabels{groundStationLabel: labelValue}); err != nil {
 		return nil, fmt.Errorf("listing nodes: %w", err)
@@ -238,7 +266,7 @@ func (r *GroundStationLifecycleReconciler) reconcileHealth(
 			Type:               ntnv1alpha1.ConditionK8sNodeReady,
 			Status:             metav1.ConditionFalse,
 			Reason:             "NodeNotFound",
-			Message:            fmt.Sprintf("No node with label %s=%s found", groundStationLabel, gs.Namespace+"."+gs.Name),
+			Message:            fmt.Sprintf("No node with label %s=%s found", groundStationLabel, groundStationLabelValue(gs.Namespace, gs.Name)),
 			ObservedGeneration: gs.Generation,
 		})
 		meta.SetStatusCondition(&gs.Status.Conditions, metav1.Condition{
