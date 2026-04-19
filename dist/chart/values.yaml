@@ -124,3 +124,10 @@ podDisruptionBudget:
 networkPolicy:
   enable: false
 
+## Validating admission webhooks.
+## Validates NTNSlice trigger syntax at admission time.
+## Requires cert-manager or manual TLS certificate provisioning.
+##
+webhooks:
+  enable: false
+

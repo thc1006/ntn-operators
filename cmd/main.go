@@ -31,6 +31,7 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
@@ -42,6 +43,8 @@ import (
 	"github.com/thc1006/ntn-operators/pkg/ephemeris"
 	"github.com/thc1006/ntn-operators/pkg/netutil"
 	"github.com/thc1006/ntn-operators/pkg/provider/ocudu"
+
+	ntnwebhook "github.com/thc1006/ntn-operators/internal/webhook/v1alpha1"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -226,6 +229,14 @@ func main() {
 		os.Exit(1)
 	}
 	// +kubebuilder:scaffold:builder
+
+	// Validating webhooks.
+	if err := builder.WebhookManagedBy(mgr, &ntnv1alpha1.NTNSlice{}).
+		WithValidator(&ntnwebhook.NTNSliceCustomValidator{}).
+		Complete(); err != nil {
+		setupLog.Error(err, "unable to create webhook", "webhook", "NTNSlice")
+		os.Exit(1)
+	}
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
 		setupLog.Error(err, "Failed to set up health check")
