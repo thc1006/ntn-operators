@@ -266,7 +266,7 @@ func (r *GroundStationLifecycleReconciler) reconcileHealth(
 			Type:               ntnv1alpha1.ConditionK8sNodeReady,
 			Status:             metav1.ConditionFalse,
 			Reason:             "NodeNotFound",
-			Message:            fmt.Sprintf("No node with label %s=%s found", groundStationLabel, gs.Namespace+"."+gs.Name),
+			Message:            fmt.Sprintf("No node with label %s=%s found", groundStationLabel, groundStationLabelValue(gs.Namespace, gs.Name)),
 			ObservedGeneration: gs.Generation,
 		})
 		meta.SetStatusCondition(&gs.Status.Conditions, metav1.Condition{
