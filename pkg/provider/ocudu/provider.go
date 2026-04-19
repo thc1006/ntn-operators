@@ -55,7 +55,7 @@ func ConfigMapNameFor(crName string) string {
 	return name
 }
 
-// Provider implements provider.NTNProvider for OCUDU/srsRAN gNB.
+// Provider implements provider.NTNProvider for OCUDU gNB.
 // It is stateless — status is derived from the ConfigMap.
 type Provider struct {
 	client client.Client

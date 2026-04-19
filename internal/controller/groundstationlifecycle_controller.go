@@ -18,6 +18,8 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -171,14 +173,24 @@ func (r *GroundStationLifecycleReconciler) healthCheckInterval(gs *ntnv1alpha1.G
 // maxLabelValueLen is the Kubernetes label value length limit.
 const maxLabelValueLen = 63
 
+// groundStationLabelValue returns the label value for a ground station.
+// If namespace.name exceeds the 63-char K8s label limit, it is truncated
+// with a 8-char hash suffix to prevent collisions.
+func groundStationLabelValue(namespace, gsName string) string {
+	labelValue := namespace + "." + gsName
+	if len(labelValue) <= maxLabelValueLen {
+		return labelValue
+	}
+	h := sha256.Sum256([]byte(labelValue))
+	suffix := hex.EncodeToString(h[:4]) // 8 hex chars
+	truncLen := maxLabelValueLen - 9    // 63 - 9 = 54
+	return strings.TrimRight(labelValue[:truncLen], "-.") + "-" + suffix
+}
+
 // findMatchingNode finds a Node labeled ntn.operators.dev/groundstation=<namespace>.<name>.
 func (r *GroundStationLifecycleReconciler) findMatchingNode(ctx context.Context, namespace, gsName string) (*corev1.Node, error) {
 	log := logf.FromContext(ctx)
-	labelValue := namespace + "." + gsName
-	if len(labelValue) > maxLabelValueLen {
-		log.V(1).Info("label value exceeds limit", "value", labelValue, "length", len(labelValue))
-		return nil, fmt.Errorf("label value %q exceeds %d-character Kubernetes limit (namespace.name = %d chars)", labelValue, maxLabelValueLen, len(labelValue))
-	}
+	labelValue := groundStationLabelValue(namespace, gsName)
 	var nodeList corev1.NodeList
 	if err := r.List(ctx, &nodeList, client.MatchingLabels{groundStationLabel: labelValue}); err != nil {
 		return nil, fmt.Errorf("listing nodes: %w", err)

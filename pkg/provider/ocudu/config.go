@@ -24,9 +24,9 @@ import (
 	ntnv1alpha1 "github.com/thc1006/ntn-operators/api/v1alpha1"
 )
 
-// configTemplate generates srsRAN/OCUDU-compatible NTN configuration YAML.
+// configTemplate generates OCUDU-compatible NTN configuration YAML.
 //
-// This format was validated against srsRAN gNB commit 4bf1543 (OCUDU v1.0).
+// This format was validated against OCUDU gNB (migrated from srsRAN_Project).
 // Key format differences from the old docs-era geo_ntn.yml:
 //   - ta_common is under ntn.ta_info (not ntn.ta_common)
 //   - ephemeris uses ephemeris_info_ecef or ephemeris_orbital (variant)
@@ -201,9 +201,9 @@ type configData struct {
 	RrcGuardTimeMs            int
 }
 
-// GenerateConfig produces srsRAN/OCUDU-compatible NTN configuration YAML
+// GenerateConfig produces OCUDU-compatible NTN configuration YAML
 // from an NTNCellConfigSpec. The output matches the CLI11 config format
-// accepted by srsRAN gNB (verified against commit 4bf1543).
+// accepted by OCUDU gNB (CLI11 config format).
 func GenerateConfig(spec *ntnv1alpha1.NTNCellConfigSpec) ([]byte, error) {
 	if spec == nil {
 		return nil, fmt.Errorf("spec must not be nil")

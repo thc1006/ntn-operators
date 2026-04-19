@@ -48,7 +48,7 @@ graph TB
     CL[CelesTrak API] -.-> SE
     ST[SpaceTrack API] -.-> SE
     ND[K8s Node] -.-> GS
-    CM -.-> GNB[srsRAN gNB]
+    CM -.-> GNB[OCUDU gNB]
 ```
 
 **Data sources**: SatelliteEphemeris supports CelesTrak (public, no auth) and SpaceTrack (requires credentials via K8s Secret). Both use the same OMM JSON format parsed by SGP4.
