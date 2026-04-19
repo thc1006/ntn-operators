@@ -205,7 +205,12 @@ var _ = Describe("NTNCellConfig Controller", func() {
 		AfterEach(func() { deleteCR() })
 
 		It("should set ConfigApplied=False with InternalError", func() {
-			reconciler := newReconciler(nil)
+			reconciler := &NTNCellConfigReconciler{
+				Client:    k8sClient,
+				Scheme:    k8sClient.Scheme(),
+				Recorder:  events.NewFakeRecorder(10),
+				Providers: nil, // nil registry
+			}
 
 			_, err := reconcileWithFinalizer(reconciler)
 			Expect(err).NotTo(HaveOccurred())

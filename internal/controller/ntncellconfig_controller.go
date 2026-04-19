@@ -133,8 +133,8 @@ func (r *NTNCellConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	}
 
 	// Step 2: Look up provider from registry.
-	prov, provOK := r.Providers[cc.Spec.Provider.Type]
-	if !provOK && r.Providers == nil {
+	prov := r.Providers[cc.Spec.Provider.Type]
+	if r.Providers == nil {
 		// Guard against nil registry (misconfigured controller).
 		cc.Status.AppliedKoffset = 0
 		cc.Status.ConfigMapRef = ""
@@ -155,7 +155,7 @@ func (r *NTNCellConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	if done, result, err := r.handleFinalizer(ctx, cc, prov); done {
 		return result, err
 	}
-	if !provOK {
+	if prov == nil {
 		cc.Status.AppliedKoffset = 0
 		cc.Status.ConfigMapRef = ""
 		meta.SetStatusCondition(&cc.Status.Conditions, metav1.Condition{
