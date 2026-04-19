@@ -29,7 +29,7 @@ This was reasonable when it was our only option. A 2026-04-19 upstream survey ha
 
 ## Decision Drivers
 
-- **D1. OTA correctness.** Our operator's selling point is "NTN config reaches the gNB correctly." ConfigMap static load misses `ncells` entirely today; regex-based ephemeris replacement requires process restart. Neither is OTA-correct.
+- **D1. OTA correctness.** Our operator's selling point is "NTN config reaches the gNB correctly." ConfigMap static load misses `ncells` entirely today; line-based `replaceEphemeris` string rewriting still requires process restart. Neither is OTA-correct.
 - **D2. Minimal disruption.** Production NTN deployments measure service continuity in UE session survival. ConfigMap writes that force a DU restart violate the operator's value proposition — we'd be an expensive alternative to a plain Helm chart.
 - **D3. Upstream alignment.** OCUDU upstream has already shipped the runtime update data model (MR !411). Building on top reduces impedance with upstream and positions us as reference implementation material for #310.
 - **D4. Migration cost.** We already have a working ConfigMap path, verified in this repo's test suite. Any new path must not regress existing functionality.
@@ -45,7 +45,7 @@ Accept the known gaps (`ncells` unreachable, ephemeris update requires restart) 
 - ➕ GitOps-friendly: every change is a versioned ConfigMap.
 - ➖ Fails D1 for neighbor / mobility fields — upstream may intentionally never add a YAML parser for fields that are supposed to change at runtime.
 - ➖ Fails D2 — ephemeris / PCI / TA updates require DU restart.
-- ➖ Maintains the `replaceEphemeris` regex code indefinitely.
+- ➖ Maintains the `replaceEphemeris` string-rewrite code indefinitely.
 
 ### Option B — Move entirely to WebSocket
 
@@ -63,7 +63,7 @@ Delete the ConfigMap path; every `NTNCellConfig` change opens a WS connection to
 - **WebSocket path** handles runtime updates for fields that OCUDU accepts dynamically: `ncells`, `ephemeris_info`, `epoch_time`, `ta_info`, `polarization`, `moving_ref_location`, `sat_switch_with_resync` (the set in MR !411's `ntn_cell_config_update_info`). `replaceEphemeris` retires.
 - A new `pkg/provider/ocudu/wsclient.go` talks to the gNB's remote-control endpoint.
 - The provider interface gains a `PushRuntimeUpdate` method (generalising the existing `PushEphemerisUpdate`); ConfigMap provider implements it as a **no-op** when WS is unavailable, degrading gracefully.
-- Provider configuration (existing `ProviderRef`) gains an optional `remoteControlEndpoint` + `remoteControlAuth` hint.
+- Provider configuration (existing `ProviderRef`) gains an optional `RemoteControl` block: `ProviderRef.RemoteControl { endpoint, authSecretRef }`.
 
 - ➕ D1 satisfied: runtime-only fields reach OTA.
 - ➕ D2 satisfied: no process restart for covered fields.
@@ -98,7 +98,7 @@ Delete the ConfigMap path; every `NTNCellConfig` change opens a WS connection to
 ### Positive
 
 - Runtime NTN updates no longer drop UE sessions in the fields covered by MR !411.
-- `replaceEphemeris` regex code deletable once `wsclient` covers ephemeris updates.
+- `replaceEphemeris` string-munging code deletable once `wsclient` covers ephemeris updates.
 - Operator becomes credible demonstrable evidence when engaging OCUDU Issue #310 or contributing to `remote_control` upstream.
 - Unlocks future integration with OCUDU's `ssb_set` / `rrm_policy_ratio_set` via the same WS channel.
 
