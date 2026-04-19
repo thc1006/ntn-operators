@@ -207,6 +207,8 @@ func (f *SpaceTrackFetcher) doFetchGPRaw(ctx context.Context, gpURL string) ([]b
 			return nil, fmt.Errorf("reading GP response: %w", err)
 		}
 		if len(body) > maxResponseBody {
+			// Drain remaining body for connection reuse.
+			_, _ = io.Copy(io.Discard, resp.Body)
 			return nil, fmt.Errorf("GP response exceeds %d bytes", maxResponseBody)
 		}
 		return body, nil
