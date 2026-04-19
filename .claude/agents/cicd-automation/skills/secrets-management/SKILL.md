@@ -331,7 +331,7 @@ spec:
 
 # Check for secrets with TruffleHog
 docker run --rm -v "$(pwd):/repo" \
-  trufflesecurity/trufflehog:latest \
+  trufflesecurity/trufflehog:3.90.5 \
   filesystem --directory=/repo
 
 if [ $? -ne 0 ]; then
@@ -345,7 +345,7 @@ fi
 ```yaml
 secret-scan:
   stage: security
-  image: trufflesecurity/trufflehog:latest
+  image: trufflesecurity/trufflehog:3.90.5
   script:
     - trufflehog filesystem .
   allow_failure: false

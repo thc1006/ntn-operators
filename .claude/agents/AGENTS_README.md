@@ -7,14 +7,23 @@ Sourced from [wshobson/agents](https://github.com/wshobson/agents).
 
 ```
 .claude/agents/
-├── agent-teams/          # Multi-agent team orchestration
-├── cicd-automation/      # CI/CD pipeline templates and patterns
-├── git-pr-workflows/     # PR review and Git workflow agents
-├── incident-response/    # Incident triage and response
-├── k8s-platform/         # Kubernetes platform engineering
-├── security-devsecops/   # Security scanning and DevSecOps
-├── tdd-quality/          # Test-driven development workflows
-└── AGENTS_README.md      # This file
+├── agent-teams/                 # Multi-agent team orchestration
+├── cicd-automation/             # CI/CD pipeline templates and patterns
+├── code-refactoring/            # Refactoring workflows
+├── comprehensive-review/        # Full code and architecture review
+├── dependency-management/       # Dependency and SBOM workflows
+├── deployment-validation/       # Deployment checks and validation
+├── documentation-generation/    # Documentation and runbook generation
+├── git-pr-workflows/            # PR review and Git workflow agents
+├── incident-response/           # Incident triage and response
+├── kubernetes-operations/       # Kubernetes platform operations
+├── observability-monitoring/    # Metrics, logs, and alerting workflows
+├── performance-testing-review/  # Load and performance analysis
+├── security-scanning/           # Security scanning and threat analysis
+├── systems-programming/         # Systems and Go engineering workflows
+├── tdd-workflows/               # TDD command workflows
+├── unit-testing/                # Unit test strategy and implementation
+└── AGENTS_README.md             # This file
 ```
 
 ## Plugin Authoring Conventions
