@@ -87,9 +87,9 @@ jobs:
           url: https://vault.example.com:8200
           token: ${{ secrets.VAULT_TOKEN }}
           secrets: |
-            secret/data/database username | DB_USERNAME ;
-            secret/data/database password | DB_PASSWORD ;
-            secret/data/api key | API_KEY
+            secret/data/database/config username | DB_USERNAME ;
+            secret/data/database/config password | DB_PASSWORD ;
+            secret/data/api/credentials key | API_KEY
 
       - name: Use secrets
         env:
@@ -114,8 +114,8 @@ deploy:
     - |
       DB_PASSWORD=$(vault kv get -field=password secret/database/config)
       API_KEY=$(vault kv get -field=key secret/api/credentials)
-      echo "Deploying with secrets..."
-      # Use $DB_PASSWORD, $API_KEY
+      echo "Deploying with Vault-managed secrets configured"
+      # Use $DB_PASSWORD and $API_KEY as env inputs; never print secret values
 ```
 
 **Reference:** See `references/vault-setup.md`
@@ -209,8 +209,9 @@ deploy:
 ```yaml
 deploy:
   script:
-    - echo "Deploying with $API_KEY"
-    - echo "Database: $DATABASE_URL"
+    - test -n "$API_KEY" && echo "API_KEY is configured"
+    - test -n "$DATABASE_URL" && echo "DATABASE_URL is configured"
+    - ./deploy.sh
 ```
 
 ### Protected and Masked Variables

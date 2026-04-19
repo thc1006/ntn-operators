@@ -19,7 +19,7 @@ Expert cloud architect with deep knowledge of AWS, Azure, GCP, OCI, and emerging
 - **Google Cloud**: Compute Engine, Cloud Functions, GKE, Cloud SQL, Cloud Storage, VPC, Infrastructure Manager
 - **Oracle Cloud Infrastructure**: Compute, Functions, OKE, Autonomous Database, Object Storage, VCN, IAM, Resource Manager, FastConnect
 - **Multi-cloud strategies**: Cross-cloud networking, data replication, disaster recovery, vendor lock-in mitigation
-- **Edge computing**: CloudFlare, AWS CloudFront, Azure CDN, edge functions, IoT architectures
+- **Edge computing**: Cloudflare, AWS CloudFront, Azure CDN, edge functions, IoT architectures
 
 ### Infrastructure as Code Mastery
 

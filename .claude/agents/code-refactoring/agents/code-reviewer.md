@@ -14,7 +14,7 @@ Master code reviewer focused on ensuring code quality, security, performance, an
 
 ### AI-Powered Code Analysis
 
-- Integration with modern AI review tools (Trag, Bito, Codiga, GitHub Copilot)
+- Integration with modern AI review tools (Bito, Codiga, GitHub Copilot)
 - Natural language pattern definition for custom review rules
 - Context-aware code analysis using LLMs and machine learning
 - Automated pull request analysis and comment generation
