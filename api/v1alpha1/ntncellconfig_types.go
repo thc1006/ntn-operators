@@ -139,6 +139,11 @@ type NTNParams struct {
 
 	// neighborCells lists neighbor NTN cells for measurement/handover.
 	// OCUDU YAML renders as "ncells:" for compatibility.
+	// MaxItems=32 caps rendered SIB4/SIB11 payload size (3GPP caps at 16;
+	// 32 is a generous guard) and bounds reconciler memory.
+	// +listType=map
+	// +listMapKey=physicalCellID
+	// +kubebuilder:validation:MaxItems=32
 	// +optional
 	NeighborCells []NTNNeighborCell `json:"neighborCells,omitempty"`
 
@@ -345,6 +350,7 @@ type NTNNeighborCell struct {
 
 // NeighborReselectionInfo models the SIB11 per-neighbor reselection
 // parameters that NTN operators tune for handover behavior.
+// +kubebuilder:validation:XValidation:rule="has(self.qHyst) || has(self.qOffsetCell) || has(self.sIntraSearchP) || has(self.threshServingLowP)",message="at least one reselection sub-field (qHyst, qOffsetCell, sIntraSearchP, threshServingLowP) must be set"
 type NeighborReselectionInfo struct {
 	// qHyst is the reselection hysteresis in dB (TS 38.331 Q-Hyst enum:
 	// 0,1,2,3,4,5,6,8,10,12,14,16,18,20,22,24).

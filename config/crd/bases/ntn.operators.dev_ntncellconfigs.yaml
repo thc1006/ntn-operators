@@ -306,6 +306,8 @@ spec:
                     description: |-
                       neighborCells lists neighbor NTN cells for measurement/handover.
                       OCUDU YAML renders as "ncells:" for compatibility.
+                      MaxItems=32 caps rendered SIB4/SIB11 payload size (3GPP caps at 16;
+                      32 is a generous guard) and bounds reconciler memory.
                     items:
                       description: NTNNeighborCell describes a neighbor NTN cell.
                       properties:
@@ -370,10 +372,19 @@ spec:
                               minimum: 0
                               type: integer
                           type: object
+                          x-kubernetes-validations:
+                          - message: at least one reselection sub-field (qHyst, qOffsetCell,
+                              sIntraSearchP, threshServingLowP) must be set
+                            rule: has(self.qHyst) || has(self.qOffsetCell) || has(self.sIntraSearchP)
+                              || has(self.threshServingLowP)
                       required:
                       - physicalCellID
                       type: object
+                    maxItems: 32
                     type: array
+                    x-kubernetes-list-map-keys:
+                    - physicalCellID
+                    x-kubernetes-list-type: map
                   ntnGatewayLocation:
                     description: ntnGatewayLocation specifies the NTN gateway (ground
                       station) coordinates.

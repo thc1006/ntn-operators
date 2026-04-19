@@ -198,6 +198,110 @@ var _ = Describe("NTNCellConfig Controller", func() {
 		})
 	})
 
+	Context("CRD validation: neighborCells list bounds and structure", func() {
+		It("should reject more than 32 neighbor cells (DoS guard)", func() {
+			neighbors := make([]ntnv1alpha1.NTNNeighborCell, 33)
+			for i := range neighbors {
+				neighbors[i] = ntnv1alpha1.NTNNeighborCell{PhysicalCellID: i}
+			}
+			cr := &ntnv1alpha1.NTNCellConfig{
+				ObjectMeta: metav1.ObjectMeta{Name: "too-many-neighbors", Namespace: namespace},
+				Spec: ntnv1alpha1.NTNCellConfigSpec{
+					Provider: ntnv1alpha1.ProviderRef{Type: "ocudu"},
+					NTN: ntnv1alpha1.NTNParams{
+						EphemerisECEF: &ntnv1alpha1.EphemerisECEF{PosX: 1, PosY: 2, PosZ: 3},
+						NeighborCells: neighbors,
+					},
+				},
+			}
+			err := k8sClient.Create(context.Background(), cr)
+			Expect(err).To(HaveOccurred())
+			Expect(apierrors.IsInvalid(err)).To(BeTrue(), "expected Invalid API error, got: %v", err)
+		})
+
+		It("should accept exactly 32 neighbor cells (upper bound)", func() {
+			neighbors := make([]ntnv1alpha1.NTNNeighborCell, 32)
+			for i := range neighbors {
+				neighbors[i] = ntnv1alpha1.NTNNeighborCell{PhysicalCellID: i}
+			}
+			cr := &ntnv1alpha1.NTNCellConfig{
+				ObjectMeta: metav1.ObjectMeta{Name: "max-neighbors", Namespace: namespace},
+				Spec: ntnv1alpha1.NTNCellConfigSpec{
+					Provider: ntnv1alpha1.ProviderRef{Type: "ocudu"},
+					NTN: ntnv1alpha1.NTNParams{
+						EphemerisECEF: &ntnv1alpha1.EphemerisECEF{PosX: 1, PosY: 2, PosZ: 3},
+						NeighborCells: neighbors,
+					},
+				},
+			}
+			Expect(k8sClient.Create(context.Background(), cr)).To(Succeed())
+			Expect(k8sClient.Delete(context.Background(), cr)).To(Succeed())
+		})
+
+		It("should reject duplicate physicalCellID in neighborCells (listMapKey)", func() {
+			cr := &ntnv1alpha1.NTNCellConfig{
+				ObjectMeta: metav1.ObjectMeta{Name: "dup-pci", Namespace: namespace},
+				Spec: ntnv1alpha1.NTNCellConfigSpec{
+					Provider: ntnv1alpha1.ProviderRef{Type: "ocudu"},
+					NTN: ntnv1alpha1.NTNParams{
+						EphemerisECEF: &ntnv1alpha1.EphemerisECEF{PosX: 1, PosY: 2, PosZ: 3},
+						NeighborCells: []ntnv1alpha1.NTNNeighborCell{
+							{PhysicalCellID: 7, Frequency: 100},
+							{PhysicalCellID: 7, Frequency: 200},
+						},
+					},
+				},
+			}
+			err := k8sClient.Create(context.Background(), cr)
+			Expect(err).To(HaveOccurred())
+			Expect(apierrors.IsInvalid(err)).To(BeTrue(), "expected Invalid API error, got: %v", err)
+		})
+	})
+
+	Context("CRD validation: NeighborReselectionInfo CEL rule", func() {
+		It("should reject empty reselectionInfo block", func() {
+			cr := &ntnv1alpha1.NTNCellConfig{
+				ObjectMeta: metav1.ObjectMeta{Name: "empty-resel", Namespace: namespace},
+				Spec: ntnv1alpha1.NTNCellConfigSpec{
+					Provider: ntnv1alpha1.ProviderRef{Type: "ocudu"},
+					NTN: ntnv1alpha1.NTNParams{
+						EphemerisECEF: &ntnv1alpha1.EphemerisECEF{PosX: 1, PosY: 2, PosZ: 3},
+						NeighborCells: []ntnv1alpha1.NTNNeighborCell{
+							{
+								PhysicalCellID:  7,
+								ReselectionInfo: &ntnv1alpha1.NeighborReselectionInfo{},
+							},
+						},
+					},
+				},
+			}
+			err := k8sClient.Create(context.Background(), cr)
+			Expect(err).To(HaveOccurred())
+			Expect(apierrors.IsInvalid(err)).To(BeTrue(), "expected Invalid API error, got: %v", err)
+		})
+
+		It("should accept reselectionInfo with qHyst=0 (zero is legal)", func() {
+			zero := 0
+			cr := &ntnv1alpha1.NTNCellConfig{
+				ObjectMeta: metav1.ObjectMeta{Name: "zero-qhyst", Namespace: namespace},
+				Spec: ntnv1alpha1.NTNCellConfigSpec{
+					Provider: ntnv1alpha1.ProviderRef{Type: "ocudu"},
+					NTN: ntnv1alpha1.NTNParams{
+						EphemerisECEF: &ntnv1alpha1.EphemerisECEF{PosX: 1, PosY: 2, PosZ: 3},
+						NeighborCells: []ntnv1alpha1.NTNNeighborCell{
+							{
+								PhysicalCellID:  7,
+								ReselectionInfo: &ntnv1alpha1.NeighborReselectionInfo{QHyst: &zero},
+							},
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(context.Background(), cr)).To(Succeed())
+			Expect(k8sClient.Delete(context.Background(), cr)).To(Succeed())
+		})
+	})
+
 	Context("When provider is nil", func() {
 		BeforeEach(func() { createCR() })
 		AfterEach(func() { deleteCR() })
