@@ -83,8 +83,17 @@ jobs:
           echo "DIGEST=${DIGEST}" >> "$GITHUB_OUTPUT"
           echo "Image digest: ${DIGEST}"
 
+      # --- Post-push per-platform scan (catches arm64-specific CVEs) ---
+      # The local scan above gates the push (amd64 only). This step scans
+      # both platforms after push but before signing/attestation. If it
+      # fails, the image is published but unsigned and unattested.
+
+      - name: Install Trivy CLI
+        run: |
+          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
+            | sh -s -- -b /usr/local/bin v0.35.0
+
       - name: Scan multi-arch image per platform (Trivy)
-        # Scan both platforms of the pushed image to catch arch-specific CVEs.
         run: |
           for platform in linux/amd64 linux/arm64; do
             echo "=== Scanning ${platform} ==="
