@@ -116,3 +116,11 @@ podDisruptionBudget:
   enable: false
   minAvailable: 1
 
+## NetworkPolicy for zero-trust pod networking.
+## Restricts ingress to metrics (8443) and health probes (8081),
+## egress to HTTPS (443) and DNS (53).
+## Requires a CNI plugin that implements NetworkPolicy (e.g., Calico, Cilium).
+##
+networkPolicy:
+  enable: false
+

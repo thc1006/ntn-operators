@@ -50,6 +50,7 @@ This chart installs four Custom Resource Definitions:
 | `prometheus.enable` | bool | `false` | Create ServiceMonitor for Prometheus |
 | `podDisruptionBudget.enable` | bool | `false` | Create PodDisruptionBudget |
 | `podDisruptionBudget.minAvailable` | int | `1` | Minimum available pods |
+| `networkPolicy.enable` | bool | `false` | Create NetworkPolicy (requires CNI support) |
 
 ## Production Configuration
 
@@ -76,6 +77,9 @@ prometheus:
 podDisruptionBudget:
   enable: true
   minAvailable: 1
+
+networkPolicy:
+  enable: true
 ```
 
 ## Upgrading
