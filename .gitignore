@@ -27,3 +27,6 @@ dist/install.yaml
 !.claude/agents/
 !.claude/commands/
 !.claude/skills/
+
+# Codex
+.codex
