@@ -22,12 +22,21 @@ import (
 	ntnv1alpha1 "github.com/thc1006/ntn-operators/api/v1alpha1"
 )
 
-// NTNProvider abstracts NTN backend interactions for cell configuration.
-// Ephemeris and ground station lifecycle are handled directly by their
-// respective controllers (not via Provider).
+// EphemerisUpdate carries fresh ephemeris data for a live update push.
+// The provider uses whichever representation is populated (ECEF or orbital).
+type EphemerisUpdate struct {
+	// ECEF state vector (mutually exclusive with Orbital).
+	ECEF *ntnv1alpha1.EphemerisECEF
+	// Keplerian orbital elements (mutually exclusive with ECEF).
+	Orbital *ntnv1alpha1.EphemerisOrbital
+}
+
+// NTNProvider abstracts NTN backend interactions for cell configuration
+// and ephemeris updates. Ground station lifecycle is handled directly
+// by its respective controller.
 //
 // Implementations:
-//   - OCUDU: generates geo_ntn.yml and writes to a ConfigMap (future: Helm values overlay / O1 NETCONF)
+//   - OCUDU: generates geo_ntn.yml and writes to a ConfigMap
 type NTNProvider interface {
 	// ApplyCellConfig applies NTN radio parameters to the backend.
 	// crName is the NTNCellConfig CR name (used to scope resources like ConfigMaps).
@@ -36,4 +45,9 @@ type NTNProvider interface {
 	// GetCellStatus returns the current applied configuration status
 	// for the given CR name and namespace.
 	GetCellStatus(ctx context.Context, crName, namespace string) (*ntnv1alpha1.NTNCellConfigStatus, error)
+
+	// PushEphemerisUpdate pushes fresh ephemeris data to the backend.
+	// Phase 1 (ConfigMap): regenerates the ephemeris section of the config.
+	// Phase 2 (future): pushes via OCUDU WebSocket handle_ntn_param_update.
+	PushEphemerisUpdate(ctx context.Context, crName, namespace string, update EphemerisUpdate) error
 }

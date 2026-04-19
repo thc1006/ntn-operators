@@ -31,6 +31,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	ntnv1alpha1 "github.com/thc1006/ntn-operators/api/v1alpha1"
+	"github.com/thc1006/ntn-operators/pkg/provider"
 )
 
 // ConfigMapPrefix is the prefix for ConfigMap names. Final name = prefix + CR name.
@@ -156,4 +157,116 @@ func (p *Provider) GetCellStatus(
 	}
 
 	return status, nil
+}
+
+// PushEphemerisUpdate updates the ephemeris section of the existing ConfigMap.
+// Phase 1 implementation: reads the current config, replaces the ephemeris
+// data, and writes it back. Future Phase 2 will use OCUDU's WebSocket API.
+func (p *Provider) PushEphemerisUpdate(
+	ctx context.Context, crName, namespace string, update provider.EphemerisUpdate,
+) error {
+	if namespace == "" {
+		return fmt.Errorf("namespace must not be empty")
+	}
+	if update.ECEF == nil && update.Orbital == nil {
+		return fmt.Errorf("either ECEF or Orbital must be set")
+	}
+	if update.ECEF != nil && update.Orbital != nil {
+		return fmt.Errorf("ECEF and Orbital are mutually exclusive")
+	}
+
+	cm := &corev1.ConfigMap{}
+	key := types.NamespacedName{
+		Name:      ConfigMapNameFor(crName),
+		Namespace: namespace,
+	}
+	if err := p.client.Get(ctx, key, cm); err != nil {
+		return fmt.Errorf("reading ConfigMap %s/%s: %w",
+			namespace, ConfigMapNameFor(crName), err)
+	}
+
+	yamlContent, ok := cm.Data["geo_ntn.yml"]
+	if !ok {
+		return fmt.Errorf(
+			"ConfigMap %s/%s missing geo_ntn.yml",
+			namespace, ConfigMapNameFor(crName))
+	}
+
+	// Replace the ephemeris section in the existing YAML.
+	updated, replaced := replaceEphemeris(yamlContent, update)
+	if !replaced {
+		return fmt.Errorf(
+			"ConfigMap %s/%s has no ephemeris block to replace",
+			namespace, ConfigMapNameFor(crName))
+	}
+	cm.Data["geo_ntn.yml"] = updated
+
+	if err := p.client.Update(ctx, cm); err != nil {
+		return fmt.Errorf("updating ConfigMap: %w", err)
+	}
+	return nil
+}
+
+// replaceEphemeris replaces the ephemeris block in OCUDU config YAML.
+// Returns the updated content and whether a replacement was made.
+func replaceEphemeris(
+	content string, update provider.EphemerisUpdate,
+) (string, bool) {
+	var newBlock string
+	if update.Orbital != nil {
+		newBlock = fmt.Sprintf(`  ephemeris_orbital:
+    semi_major_axis: %d
+    eccentricity: %d
+    inclination: %d
+    right_ascension: %d
+    arg_of_periapsis: %d
+    mean_anomaly: %d`,
+			update.Orbital.SemiMajorAxis,
+			update.Orbital.Eccentricity,
+			update.Orbital.Inclination,
+			update.Orbital.RightAscension,
+			update.Orbital.ArgOfPeriapsis,
+			update.Orbital.MeanAnomaly)
+	} else {
+		newBlock = fmt.Sprintf(`  ephemeris_info_ecef:
+    pos_x: %d
+    pos_y: %d
+    pos_z: %d
+    vel_x: %d
+    vel_y: %d
+    vel_z: %d`,
+			update.ECEF.PosX,
+			update.ECEF.PosY,
+			update.ECEF.PosZ,
+			update.ECEF.VelX,
+			update.ECEF.VelY,
+			update.ECEF.VelZ)
+	}
+
+	// Find and replace ephemeris_info_ecef or ephemeris_orbital block.
+	// Uses HasPrefix to tolerate inline comments on the key line.
+	lines := strings.Split(content, "\n")
+	var result []string
+	skip := false
+	found := false
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "ephemeris_info_ecef:") ||
+			strings.HasPrefix(trimmed, "ephemeris_orbital:") {
+			skip = true
+			found = true
+			result = append(result, strings.Split(newBlock, "\n")...)
+			continue
+		}
+		if skip {
+			// Skip all lines more indented than the key (4+ spaces),
+			// including comments and blank lines within the block.
+			if strings.HasPrefix(line, "    ") || trimmed == "" {
+				continue
+			}
+			skip = false
+		}
+		result = append(result, line)
+	}
+	return strings.Join(result, "\n"), found
 }
