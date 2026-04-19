@@ -101,6 +101,38 @@ func ParseTrigger(s string) (Trigger, error) {
 	return Trigger{}, fmt.Errorf("invalid trigger format %q: expected 'metric operator value'", s)
 }
 
+// EvaluateRecovery checks if the trigger has recovered with hysteresis margin.
+// For "<"/"<=" triggers, recovery requires actual >= threshold + margin.
+// For ">"/">=" triggers, recovery requires actual <= threshold - margin.
+func (t Trigger) EvaluateRecovery(m Metrics, margin float64) bool {
+	var actual float64
+	switch t.Metric {
+	case "rsrp", "terrestrialRSRP":
+		actual = m.RSRP
+	case "latency", "terrestrialLatency":
+		actual = m.LatencyMs
+	case "packetLoss", "terrestrialPacketLoss":
+		actual = m.PacketLossPercent
+	default:
+		return false // unknown metric — fail-safe, assume NOT recovered
+	}
+
+	switch t.Operator {
+	case "<", "<=":
+		return actual >= t.Value+margin
+	case ">", ">=":
+		// Clamp recovery threshold to 0 for non-negative metrics
+		// (e.g., packetLoss > 5 with margin 10 → threshold 0, not -5).
+		recoveryThreshold := t.Value - margin
+		if recoveryThreshold < 0 {
+			recoveryThreshold = 0
+		}
+		return actual <= recoveryThreshold
+	default:
+		return false // unknown operator — fail-safe
+	}
+}
+
 // Evaluate checks if a trigger condition is met given the current metrics.
 func (t Trigger) Evaluate(m Metrics) bool {
 	var actual float64
@@ -160,6 +192,47 @@ func EvaluateFailover(
 	)
 }
 
+// triggerSetResult holds the result of parsing and evaluating a set of triggers.
+type triggerSetResult struct {
+	parsed       []Trigger
+	anyTriggered bool
+	parseSuffix  string
+	allInvalid   bool
+}
+
+// parseTriggerSet parses all triggers, evaluates them (OR logic), and returns
+// structured results including parse error accounting.
+func parseTriggerSet(log logr.Logger, triggers []string, metrics Metrics) triggerSetResult {
+	var result triggerSetResult
+	parseErrors := 0
+	for _, triggerStr := range triggers {
+		trigger, err := ParseTrigger(triggerStr)
+		if err != nil {
+			// Only count/log parse errors before first match,
+			// matching legacy short-circuit semantics.
+			if !result.anyTriggered {
+				parseErrors++
+				log.V(1).Info("invalid trigger expression",
+					"trigger", triggerStr, "error", err.Error())
+			}
+			continue
+		}
+		result.parsed = append(result.parsed, trigger)
+		if !result.anyTriggered && trigger.Evaluate(metrics) {
+			result.anyTriggered = true
+			log.V(2).Info("trigger matched", "trigger", triggerStr)
+		}
+	}
+	if len(result.parsed) == 0 && parseErrors > 0 {
+		result.allInvalid = true
+	} else if parseErrors > 0 {
+		result.parseSuffix = fmt.Sprintf(
+			" (%d of %d triggers had parse errors)",
+			parseErrors, len(triggers))
+	}
+	return result
+}
+
 // EvaluateFailoverWithContext is the context-aware variant of EvaluateFailover.
 // It emits structured package-level logs for trigger parsing and decision outcomes.
 func EvaluateFailoverWithContext(
@@ -188,84 +261,64 @@ func EvaluateFailoverWithContext(
 		return res
 	}
 
-	// Parse and evaluate all triggers (OR logic).
-	anyTriggered := false
-	parseErrors := 0
-	for _, triggerStr := range triggers {
-		trigger, err := ParseTrigger(triggerStr)
-		if err != nil {
-			parseErrors++
-			log.V(1).Info("invalid trigger expression", "trigger", triggerStr, "error", err.Error())
-			continue
-		}
-		if trigger.Evaluate(metrics) {
-			anyTriggered = true
-			log.V(2).Info("trigger matched", "trigger", triggerStr)
-			break
-		}
-	}
+	ts := parseTriggerSet(log, triggers, metrics)
 
 	// Normalize unknown currentPath to terrestrial.
 	if currentPath != PathTerrestrial && currentPath != PathSatellite && currentPath != PathUnavailable {
 		currentPath = PathTerrestrial
 	}
 
-	// Surface trigger parse errors.
-	parseSuffix := ""
-	if parseErrors > 0 {
-		if parseErrors == len(triggers) {
-			return finish(FailoverResult{
-				Decision:   DecisionStay,
-				Reason:     fmt.Sprintf("All %d trigger expressions are invalid", parseErrors),
-				TargetPath: currentPath,
-			})
-		}
-		parseSuffix = fmt.Sprintf(" (%d of %d triggers had parse errors)", parseErrors, len(triggers))
+	if ts.allInvalid {
+		return finish(FailoverResult{
+			Decision:   DecisionStay,
+			Reason:     fmt.Sprintf("All %d trigger expressions are invalid", len(triggers)),
+			TargetPath: currentPath,
+		})
 	}
 
 	switch currentPath {
 	case PathTerrestrial:
-		if !anyTriggered {
+		if !ts.anyTriggered {
 			return finish(FailoverResult{
 				Decision:   DecisionStay,
-				Reason:     "Terrestrial path healthy" + parseSuffix,
+				Reason:     "Terrestrial path healthy" + ts.parseSuffix,
 				TargetPath: PathTerrestrial,
 			})
 		}
 		if !satelliteAvailable {
 			return finish(FailoverResult{
 				Decision:   DecisionStay,
-				Reason:     "Terrestrial degraded but no satellite pass available" + parseSuffix,
+				Reason:     "Terrestrial degraded but no satellite pass available" + ts.parseSuffix,
 				TargetPath: PathTerrestrial,
 			})
 		}
 		return finish(FailoverResult{
 			Decision:   DecisionFailover,
-			Reason:     "Terrestrial path degraded, satellite pass available" + parseSuffix,
+			Reason:     "Terrestrial path degraded, satellite pass available" + ts.parseSuffix,
 			TargetPath: PathSatellite,
 		})
 
 	case PathSatellite:
 		// If satellite pass ended, must switch back regardless.
 		if !satelliteAvailable {
-			if anyTriggered {
+			if ts.anyTriggered {
 				return finish(FailoverResult{
 					Decision:   DecisionSwitchback,
-					Reason:     "Satellite pass ended, falling back to degraded terrestrial" + parseSuffix,
+					Reason:     "Satellite pass ended, falling back to degraded terrestrial" + ts.parseSuffix,
 					TargetPath: PathTerrestrial,
 				})
 			}
 			return finish(FailoverResult{
 				Decision:   DecisionSwitchback,
-				Reason:     "Satellite pass ended, terrestrial recovered" + parseSuffix,
+				Reason:     "Satellite pass ended, terrestrial recovered" + ts.parseSuffix,
 				TargetPath: PathTerrestrial,
 			})
 		}
-		if anyTriggered {
+		if ts.anyTriggered {
 			// Terrestrial still degraded, stay on satellite.
 			return finish(FailoverResult{
 				Decision:   DecisionStay,
-				Reason:     "Terrestrial still degraded, staying on satellite" + parseSuffix,
+				Reason:     "Terrestrial still degraded, staying on satellite" + ts.parseSuffix,
 				TargetPath: PathSatellite,
 			})
 		}
@@ -274,36 +327,149 @@ func EvaluateFailoverWithContext(
 			return finish(FailoverResult{
 				Decision: DecisionStay,
 				Reason: fmt.Sprintf("Terrestrial recovered but switchback delay not elapsed (%s remaining)%s",
-					switchbackDelay-now.Sub(lastFailover), parseSuffix),
+					switchbackDelay-now.Sub(lastFailover), ts.parseSuffix),
 				TargetPath: PathSatellite,
 			})
 		}
 		return finish(FailoverResult{
 			Decision:   DecisionSwitchback,
-			Reason:     "Terrestrial recovered, switchback delay elapsed" + parseSuffix,
+			Reason:     "Terrestrial recovered, switchback delay elapsed" + ts.parseSuffix,
 			TargetPath: PathTerrestrial,
 		})
 
 	default:
 		// Unknown or unavailable path — try terrestrial first.
-		if !anyTriggered {
+		if !ts.anyTriggered {
 			return finish(FailoverResult{
 				Decision:   DecisionSwitchback,
-				Reason:     "Initializing on terrestrial path" + parseSuffix,
+				Reason:     "Initializing on terrestrial path" + ts.parseSuffix,
 				TargetPath: PathTerrestrial,
 			})
 		}
 		if satelliteAvailable {
 			return finish(FailoverResult{
 				Decision:   DecisionFailover,
-				Reason:     "Terrestrial unavailable, using satellite" + parseSuffix,
+				Reason:     "Terrestrial unavailable, using satellite" + ts.parseSuffix,
 				TargetPath: PathSatellite,
 			})
 		}
 		return finish(FailoverResult{
 			Decision:   DecisionStay,
-			Reason:     "Both paths degraded" + parseSuffix,
+			Reason:     "Both paths degraded" + ts.parseSuffix,
 			TargetPath: PathUnavailable,
 		})
 	}
+}
+
+// EvaluateFailoverWithHysteresis is like EvaluateFailoverWithContext but applies
+// a dead-band margin to trigger thresholds during switchback evaluation.
+//
+// During failover (terrestrial → satellite), triggers use their original thresholds.
+// During switchback (satellite → terrestrial), triggers require the metric to clear
+// the threshold by the hysteresis margin before considering recovery.
+//
+// Example: trigger "rsrp < -120" with hysteresisMargin=10 means failover fires at
+// RSRP < -120 dBm, but switchback requires RSRP >= -110 dBm (10 dB dead-band).
+func EvaluateFailoverWithHysteresis(
+	ctx context.Context,
+	currentPath PathType,
+	triggers []string,
+	metrics Metrics,
+	satelliteAvailable bool,
+	switchbackDelay time.Duration,
+	lastFailover time.Time,
+	now time.Time,
+	hysteresisMargin float64,
+) FailoverResult {
+	// If not on satellite or no hysteresis, delegate to the standard evaluator.
+	if currentPath != PathSatellite || hysteresisMargin <= 0 {
+		return EvaluateFailoverWithContext(
+			ctx, currentPath, triggers, metrics,
+			satelliteAvailable, switchbackDelay, lastFailover, now,
+		)
+	}
+
+	log := logr.FromContextOrDiscard(ctx)
+	log.V(2).Info("evaluate failover with hysteresis",
+		"hysteresisMargin", hysteresisMargin,
+		"currentPath", currentPath,
+	)
+	finish := func(res FailoverResult) FailoverResult {
+		log.V(1).Info("failover decision (hysteresis)",
+			"decision", res.Decision,
+			"targetPath", res.TargetPath,
+			"reason", res.Reason,
+		)
+		return res
+	}
+
+	ts := parseTriggerSet(log, triggers, metrics)
+
+	if ts.allInvalid {
+		return finish(FailoverResult{
+			Decision:   DecisionStay,
+			Reason:     fmt.Sprintf("All %d trigger expressions are invalid", len(triggers)),
+			TargetPath: currentPath,
+		})
+	}
+
+	// Satellite pass ended — force switchback regardless of hysteresis.
+	if !satelliteAvailable {
+		if ts.anyTriggered {
+			return finish(FailoverResult{
+				Decision:   DecisionSwitchback,
+				Reason:     "Satellite pass ended, falling back to degraded terrestrial" + ts.parseSuffix,
+				TargetPath: PathTerrestrial,
+			})
+		}
+		return finish(FailoverResult{
+			Decision:   DecisionSwitchback,
+			Reason:     "Satellite pass ended, terrestrial recovered" + ts.parseSuffix,
+			TargetPath: PathTerrestrial,
+		})
+	}
+
+	if ts.anyTriggered {
+		return finish(FailoverResult{
+			Decision:   DecisionStay,
+			Reason:     "Terrestrial still degraded, staying on satellite" + ts.parseSuffix,
+			TargetPath: PathSatellite,
+		})
+	}
+
+	// Triggers no longer firing at original thresholds.
+	// Check hysteresis: have ALL valid triggers recovered past the dead-band?
+	allRecovered := true
+	for _, t := range ts.parsed {
+		if !t.EvaluateRecovery(metrics, hysteresisMargin) {
+			allRecovered = false
+			break
+		}
+	}
+
+	if !allRecovered {
+		return finish(FailoverResult{
+			Decision: DecisionStay,
+			Reason: fmt.Sprintf(
+				"Terrestrial in hysteresis dead-band (margin=%g), staying on satellite%s",
+				hysteresisMargin, ts.parseSuffix),
+			TargetPath: PathSatellite,
+		})
+	}
+
+	// Recovered past dead-band — check switchback delay.
+	if !lastFailover.IsZero() && now.Sub(lastFailover) < switchbackDelay {
+		return finish(FailoverResult{
+			Decision: DecisionStay,
+			Reason: fmt.Sprintf("Terrestrial recovered past dead-band but switchback delay not elapsed (%s remaining)%s",
+				switchbackDelay-now.Sub(lastFailover), ts.parseSuffix),
+			TargetPath: PathSatellite,
+		})
+	}
+
+	return finish(FailoverResult{
+		Decision:   DecisionSwitchback,
+		Reason:     "Terrestrial recovered past hysteresis dead-band, switchback delay elapsed" + ts.parseSuffix,
+		TargetPath: PathTerrestrial,
+	})
 }

@@ -321,3 +321,179 @@ func TestEvaluateFailoverWithContext_MatchesLegacyBehavior(t *testing.T) {
 		t.Fatalf("EvaluateFailoverWithContext mismatch: got %+v want %+v", got, want)
 	}
 }
+
+// --- Hysteresis (dead-band) tests ---
+
+func TestEvaluateWithHysteresis_Failover_UsesOriginalThreshold(t *testing.T) {
+	// Trigger: rsrp < -120. RSRP = -125 → should failover (hysteresis doesn't affect failover direction).
+	result := EvaluateFailoverWithHysteresis(
+		context.Background(),
+		PathTerrestrial, triggers,
+		Metrics{RSRP: -125, LatencyMs: 20, PacketLossPercent: 0.1},
+		true, 60*time.Second, time.Time{}, now, 10,
+	)
+	if result.Decision != DecisionFailover {
+		t.Errorf("expected Failover, got %s: %s", result.Decision, result.Reason)
+	}
+}
+
+func TestEvaluateWithHysteresis_Switchback_InDeadBand_Stay(t *testing.T) {
+	// Single trigger: rsrp < -120, hysteresis = 10 dB.
+	// RSRP = -115 → above trigger (-120) but below recovery threshold (-110).
+	// Should STAY on satellite (in dead-band).
+	result := EvaluateFailoverWithHysteresis(
+		context.Background(),
+		PathSatellite, []string{"rsrp < -120"},
+		Metrics{RSRP: -115, LatencyMs: 20, PacketLossPercent: 0.1},
+		true, 60*time.Second, now.Add(-90*time.Second), now, 10,
+	)
+	if result.Decision != DecisionStay {
+		t.Errorf("expected Stay (in hysteresis dead-band), got %s: %s", result.Decision, result.Reason)
+	}
+}
+
+func TestEvaluateWithHysteresis_Switchback_AboveDeadBand_Switchback(t *testing.T) {
+	// Single trigger: rsrp < -120, hysteresis = 10 dB.
+	// RSRP = -105 → above recovery threshold (-110).
+	// Should SWITCHBACK.
+	result := EvaluateFailoverWithHysteresis(
+		context.Background(),
+		PathSatellite, []string{"rsrp < -120"},
+		Metrics{RSRP: -105, LatencyMs: 20, PacketLossPercent: 0.1},
+		true, 60*time.Second, now.Add(-90*time.Second), now, 10,
+	)
+	if result.Decision != DecisionSwitchback {
+		t.Errorf("expected Switchback (above dead-band), got %s: %s", result.Decision, result.Reason)
+	}
+}
+
+func TestEvaluateWithHysteresis_ZeroMargin_SameAsOriginal(t *testing.T) {
+	// With hysteresis=0, behavior should match non-hysteresis version.
+	metrics := Metrics{RSRP: -90, LatencyMs: 20, PacketLossPercent: 0.1}
+	want := EvaluateFailoverWithContext(
+		context.Background(),
+		PathSatellite, triggers, metrics,
+		true, 60*time.Second, now.Add(-90*time.Second), now,
+	)
+	got := EvaluateFailoverWithHysteresis(
+		context.Background(),
+		PathSatellite, triggers, metrics,
+		true, 60*time.Second, now.Add(-90*time.Second), now, 0,
+	)
+	if got.Decision != want.Decision || got.TargetPath != want.TargetPath {
+		t.Errorf("zero hysteresis should match original: got %+v want %+v", got, want)
+	}
+}
+
+func TestEvaluateWithHysteresis_LatencyTrigger_DeadBand(t *testing.T) {
+	// Trigger: latency > 200, hysteresis = 30.
+	// On satellite, latency = 185 → below trigger (200) but above recovery (170).
+	// Should STAY (in dead-band).
+	result := EvaluateFailoverWithHysteresis(
+		context.Background(),
+		PathSatellite,
+		[]string{"latency > 200"},
+		Metrics{RSRP: -90, LatencyMs: 185, PacketLossPercent: 0.1},
+		true, 60*time.Second, now.Add(-90*time.Second), now, 30,
+	)
+	if result.Decision != DecisionStay {
+		t.Errorf("expected Stay (latency in dead-band), got %s: %s", result.Decision, result.Reason)
+	}
+}
+
+func TestEvaluateWithHysteresis_AllInvalidTriggers(t *testing.T) {
+	invalidTriggers := []string{"invalid", "also bad"}
+	got := EvaluateFailoverWithHysteresis(
+		context.Background(),
+		PathSatellite, invalidTriggers,
+		Metrics{RSRP: -90, LatencyMs: 20, PacketLossPercent: 0.1},
+		true, 60*time.Second, now.Add(-90*time.Second), now, 10,
+	)
+	if got.Decision != DecisionStay {
+		t.Errorf("expected Stay for all invalid triggers, got %s", got.Decision)
+	}
+	if !strings.Contains(got.Reason, "invalid") {
+		t.Errorf("expected reason to mention invalid, got %q", got.Reason)
+	}
+}
+
+func TestEvaluateWithHysteresis_MixedValidInvalidTriggers(t *testing.T) {
+	// Invalid trigger appears BEFORE the valid one → parse error counted.
+	mixed := []string{"rsrp << -120", "latency > 200"} // first is invalid
+	got := EvaluateFailoverWithHysteresis(
+		context.Background(),
+		PathSatellite, mixed,
+		Metrics{RSRP: -90, LatencyMs: 250, PacketLossPercent: 0.1}, // latency still bad
+		true, 60*time.Second, now.Add(-90*time.Second), now, 10,
+	)
+	if got.Decision != DecisionStay {
+		t.Errorf("expected Stay (latency still degraded), got %s: %s", got.Decision, got.Reason)
+	}
+	if !strings.Contains(got.Reason, "parse error") {
+		t.Errorf("expected reason to mention parse errors, got %q", got.Reason)
+	}
+}
+
+func TestEvaluateWithHysteresis_PassEnds_ForceSwitchback(t *testing.T) {
+	// Even in dead-band, satellite pass ending forces switchback.
+	result := EvaluateFailoverWithHysteresis(
+		context.Background(),
+		PathSatellite, []string{"rsrp < -120"},
+		Metrics{RSRP: -115, LatencyMs: 20, PacketLossPercent: 0.1},
+		false, // satellite pass ended
+		60*time.Second, now.Add(-90*time.Second), now, 10,
+	)
+	if result.Decision != DecisionSwitchback {
+		t.Errorf("expected Switchback (pass ended), got %s: %s", result.Decision, result.Reason)
+	}
+}
+
+func TestEvaluateWithHysteresis_MultipleTriggers_RequiresAllRecovered(t *testing.T) {
+	// rsrp recovered past dead-band (-109 >= -110), but latency still in dead-band:
+	// "latency > 200" with margin 10 → recovery at <= 190. Latency 195 > 190 → NOT recovered.
+	result := EvaluateFailoverWithHysteresis(
+		context.Background(),
+		PathSatellite,
+		[]string{"rsrp < -120", "latency > 200"},
+		Metrics{RSRP: -109, LatencyMs: 195, PacketLossPercent: 0.1},
+		true, 60*time.Second, now.Add(-90*time.Second), now, 10,
+	)
+	if result.Decision != DecisionStay {
+		t.Errorf("expected Stay (not all triggers recovered), got %s: %s",
+			result.Decision, result.Reason)
+	}
+}
+
+func TestEvaluateWithHysteresis_RecoveryBoundarySemantics(t *testing.T) {
+	tests := []struct {
+		name    string
+		trigger string
+		metrics Metrics
+		margin  float64
+		wantDec Decision
+	}{
+		// rsrp < -120, margin 10 → recovery at >= -110, so exactly -110 triggers switchback
+		{"rsrp at inclusive recovery boundary", "rsrp < -120",
+			Metrics{RSRP: -110, LatencyMs: 20, PacketLossPercent: 0.1}, 10, DecisionSwitchback},
+		{"rsrp beyond recovery boundary", "rsrp < -120",
+			Metrics{RSRP: -109, LatencyMs: 20, PacketLossPercent: 0.1}, 10, DecisionSwitchback},
+		// latency > 200, margin 30 → recovery at <= 170
+		{"latency at boundary", "latency > 200",
+			Metrics{RSRP: -90, LatencyMs: 170, PacketLossPercent: 0.1}, 30, DecisionSwitchback},
+		{"latency past boundary", "latency > 200",
+			Metrics{RSRP: -90, LatencyMs: 169, PacketLossPercent: 0.1}, 30, DecisionSwitchback},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := EvaluateFailoverWithHysteresis(
+				context.Background(),
+				PathSatellite, []string{tt.trigger}, tt.metrics,
+				true, 60*time.Second, now.Add(-90*time.Second), now, tt.margin,
+			)
+			if result.Decision != tt.wantDec {
+				t.Errorf("expected %s, got %s: %s",
+					tt.wantDec, result.Decision, result.Reason)
+			}
+		})
+	}
+}

@@ -99,6 +99,16 @@ type FailoverPolicy struct {
 	// sessionContinuity preserves active sessions during failover.
 	// +kubebuilder:default=true
 	SessionContinuity bool `json:"sessionContinuity,omitempty"`
+
+	// hysteresisMargin is a dead-band applied to trigger thresholds
+	// during switchback evaluation, preventing flapping when metrics
+	// oscillate near the threshold. The value uses the same unit as
+	// the trigger (dB for RSRP, ms for latency, percent for packetLoss).
+	// Example: with trigger "rsrp < -120" and hysteresisMargin "10",
+	// failover fires at RSRP < -120, but switchback requires RSRP >= -110.
+	// +kubebuilder:validation:Pattern=`^[0-9]+\.?[0-9]*$`
+	// +optional
+	HysteresisMargin string `json:"hysteresisMargin,omitempty"`
 }
 
 // QoSMapping defines QoS parameter mapping between terrestrial and satellite paths.
