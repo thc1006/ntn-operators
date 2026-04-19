@@ -449,6 +449,27 @@ func TestGenerateConfig_PayloadTypeStringInjectionResistant(t *testing.T) {
 	assertNotContains(t, yaml, "\ninjected_key: pwned")
 }
 
+func TestGenerateConfig_PayloadTypeUnicodeLineSeparatorInjectionResistant(t *testing.T) {
+	// YAML accepts multiple line-break runes (NEL/LS/PS). Ensure sanitizeComment
+	// neutralizes these as well so payloadType cannot escape the comment line.
+	separators := []string{"\u0085", "\u2028", "\u2029"}
+	for _, sep := range separators {
+		spec := &ntnv1alpha1.NTNCellConfigSpec{
+			NTN: ntnv1alpha1.NTNParams{
+				EphemerisECEF: &ntnv1alpha1.EphemerisECEF{PosX: 1, PosY: 2, PosZ: 3},
+				PayloadType:   "transparent" + sep + "injected_key: pwned",
+			},
+		}
+		data, err := GenerateConfig(spec)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		yaml := string(data)
+		assertNotContains(t, yaml, "\ninjected_key: pwned")
+		assertNotContains(t, yaml, sep)
+	}
+}
+
 func TestGenerateConfig_TAReport(t *testing.T) {
 	enabled := true
 	spec := &ntnv1alpha1.NTNCellConfigSpec{

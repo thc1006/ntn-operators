@@ -38,11 +38,18 @@ func yamlQuote(s string) string {
 }
 
 // sanitizeComment strips characters that would terminate a YAML comment line
-// (newlines, carriage returns, NULs) so a user-supplied value cannot inject
-// real YAML keys via the `# Payload type: ...` header line. Comments are
+// (LF, CR, NEL, LS, PS, and NUL) so a user-supplied value cannot inject real
+// YAML keys via the `# Payload type: ...` header line. Comments are
 // line-terminated so quoting does not protect them.
 func sanitizeComment(s string) string {
-	r := strings.NewReplacer("\n", " ", "\r", " ", "\x00", "")
+	r := strings.NewReplacer(
+		"\n", " ",
+		"\r", " ",
+		"\u0085", " ",
+		"\u2028", " ",
+		"\u2029", " ",
+		"\x00", "",
+	)
 	return r.Replace(s)
 }
 

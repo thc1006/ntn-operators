@@ -42,17 +42,17 @@ spec:
 | `circular` | `rhcp` | `rhcp` | Right-hand assumed; override if your payload uses LHCP |
 | (unset) | — | — | Omit the field entirely; OCUDU falls back to its default |
 
-## Migration script (jq)
+## Migration scripts (sed + jq)
 
 If you have existing `NTNCellConfig` manifests in git or on disk:
 
 ```bash
 # Bulk-convert all YAML files in a directory.
-for f in $(grep -rl '^\s*polarization:\s*\(linear\|circular\)\s*$' config/); do
+for f in $(grep -E -rl '^[[:space:]]*polarization:[[:space:]]*(linear|circular)[[:space:]]*$' config/); do
   # linear → {dl: linear, ul: linear}
-  sed -i 's/^\(\s*\)polarization:\s*linear\s*$/\1polarization:\n\1  dl: linear\n\1  ul: linear/' "$f"
+  sed -i 's/^\([[:space:]]*\)polarization:[[:space:]]*linear[[:space:]]*$/\1polarization:\n\1  dl: linear\n\1  ul: linear/' "$f"
   # circular → {dl: rhcp, ul: rhcp} (assume RHCP; review before committing)
-  sed -i 's/^\(\s*\)polarization:\s*circular\s*$/\1polarization:\n\1  dl: rhcp\n\1  ul: rhcp/' "$f"
+  sed -i 's/^\([[:space:]]*\)polarization:[[:space:]]*circular[[:space:]]*$/\1polarization:\n\1  dl: rhcp\n\1  ul: rhcp/' "$f"
 done
 ```
 
