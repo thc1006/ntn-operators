@@ -28,8 +28,9 @@ spec:
 - 3GPP TS 38.331 defines `ntn-PolarizationDL-r17` and `ntn-PolarizationUL-r17`
   as two independent IEs in SIB19 — a single scalar cannot express the
   downlink / uplink asymmetry real LEO payloads exhibit.
-- OCUDU's CLI11 parser (`du_high_ntn_config_yaml_writer.cpp`) emits the
-  nested form and rejects a scalar, so the old schema produced configs that
+- OCUDU's YAML writer (`du_high_ntn_config_yaml_writer.cpp`) emits the
+  nested form (and the CLI11 schema aligns with that shape), so the old
+  scalar schema produced configs that
   the gNB silently ignored or failed to load.
 - The v0.2 enum value `"circular"` was not in OCUDU's accepted set
   (`rhcp | lhcp | linear`) and would have failed at runtime anyway.

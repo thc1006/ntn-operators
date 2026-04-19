@@ -24,7 +24,7 @@ DEST_DIR="dist/chart/templates/crd"
 
 for src in "$SRC_DIR"/*.yaml; do
 	# config/crd/bases/ntn.operators.dev_<kind>s.yaml -> <kind>s.ntn.operators.dev.yaml
-	base=$(basename "$src" | sed -E 's/^ntn.operators.dev_(.+)\.yaml$/\1.ntn.operators.dev.yaml/')
+	base=$(basename "$src" | sed -E 's/^ntn\.operators\.dev_(.+)\.yaml$/\1.ntn.operators.dev.yaml/')
 	dest="$DEST_DIR/$base"
 
 	# Only touch CRDs already present in the chart (don't introduce new ones here).
