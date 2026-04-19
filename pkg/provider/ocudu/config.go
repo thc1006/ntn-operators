@@ -201,7 +201,7 @@ func GenerateConfig(spec *ntnv1alpha1.NTNCellConfigSpec) ([]byte, error) {
 		}
 	}
 
-	// Populate Stage 2 optional fields.
+	// Populate optional NTN fields (Rel-17 + Rel-18).
 	if spec.NTN.EpochTime != nil {
 		data.EpochTime = true
 		data.EpochSFN = spec.NTN.EpochTime.SFN
