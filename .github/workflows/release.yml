@@ -80,23 +80,23 @@ jobs:
         env:
           KO_DOCKER_REPO: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
         run: |
-          DIGEST=$(ko build ./cmd/ \
+          IMAGE_REF=$(ko build ./cmd/ \
             --platform=linux/amd64,linux/arm64 \
             --tags=${{ github.ref_name }},latest \
             --bare)
-          echo "DIGEST=${DIGEST}" >> "$GITHUB_OUTPUT"
-          echo "Image digest: ${DIGEST}"
+          echo "IMAGE_REF=${IMAGE_REF}" >> "$GITHUB_OUTPUT"
+          echo "Image ref: ${IMAGE_REF}"
 
       # --- Supply chain attestation: sign + SBOM ---
 
       - name: Sign image with cosign (keyless OIDC)
-        run: cosign sign --yes --recursive ${{ steps.ko-push.outputs.DIGEST }}
+        run: cosign sign --yes --recursive ${{ steps.ko-push.outputs.IMAGE_REF }}
 
       - name: Generate SBOM (SPDX)
         # Syft resolves multi-arch ref to the runner's platform (amd64).
         # The SBOM is attached to the index digest only (not per-platform).
         run: |
-          syft ${{ steps.ko-push.outputs.DIGEST }} \
+          syft ${{ steps.ko-push.outputs.IMAGE_REF }} \
             -o spdx-json=sbom.spdx.json
 
       - name: Attest SBOM to image index
@@ -104,7 +104,7 @@ jobs:
           cosign attest --yes \
             --type spdxjson \
             --predicate sbom.spdx.json \
-            ${{ steps.ko-push.outputs.DIGEST }}
+            ${{ steps.ko-push.outputs.IMAGE_REF }}
 
       # --- Helm chart packaging ---
 
