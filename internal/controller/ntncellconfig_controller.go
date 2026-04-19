@@ -46,10 +46,9 @@ import (
 // NTNCellConfigReconciler reconciles a NTNCellConfig object
 type NTNCellConfigReconciler struct {
 	client.Client
-	Scheme                  *runtime.Scheme
-	Recorder                events.EventRecorder
-	Providers               map[string]provider.NTNProvider
-	MaxConcurrentReconciles int
+	Scheme    *runtime.Scheme
+	Recorder  events.EventRecorder
+	Providers map[string]provider.NTNProvider
 }
 
 const (
@@ -132,10 +131,18 @@ func (r *NTNCellConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	// Step 2: Look up provider from registry.
+	// Step 2: Look up provider from registry (may be nil).
 	prov := r.Providers[cc.Spec.Provider.Type]
+
+	// Step 3: Handle finalizer for ConfigMap cleanup on deletion.
+	// Runs before provider validation so deletions succeed even when
+	// the provider registry is nil or the type is unregistered.
+	if done, result, err := r.handleFinalizer(ctx, cc, prov); done {
+		return result, err
+	}
+
+	// Step 4: Validate provider.
 	if r.Providers == nil {
-		// Guard against nil registry (misconfigured controller).
 		cc.Status.AppliedKoffset = 0
 		cc.Status.ConfigMapRef = ""
 		meta.SetStatusCondition(&cc.Status.Conditions, metav1.Condition{
@@ -149,11 +156,6 @@ func (r *NTNCellConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			return ctrl.Result{}, err
 		}
 		return ctrl.Result{RequeueAfter: time.Minute}, nil
-	}
-
-	// Step 3: Handle finalizer for ConfigMap cleanup on deletion.
-	if done, result, err := r.handleFinalizer(ctx, cc, prov); done {
-		return result, err
 	}
 	if prov == nil {
 		cc.Status.AppliedKoffset = 0
