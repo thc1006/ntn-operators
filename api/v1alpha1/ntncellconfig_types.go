@@ -364,6 +364,37 @@ type CellOverrides struct {
 	// rrcGuardTimeMs sets the RRC procedure guard time in ms.
 	// +kubebuilder:default=12800
 	RrcGuardTimeMs int `json:"rrcGuardTimeMs,omitempty"`
+
+	// sibSchedule tunes SIB19 broadcast scheduling. Any unset sub-field
+	// falls back to the defaults (siWindowLength=5, siPeriod=16,
+	// siWindowPosition=1). Tune when PDCCH capacity is tight or when
+	// SIB19 broadcast cadence needs to track short ntn-UlSyncValidityDur.
+	// +optional
+	SIBSchedule *SIBSchedule `json:"sibSchedule,omitempty"`
+}
+
+// SIBSchedule tunes SIB19 scheduling parameters per 3GPP TS 38.331
+// SI-SchedulingInfo. Enums follow OCUDU's CLI11 accepted values.
+type SIBSchedule struct {
+	// siWindowLength is the SI window length in slots. OCUDU accepts
+	// the standard set; picking a larger value increases PDCCH pressure.
+	// +kubebuilder:validation:Enum=5;10;20;40;80;160;320;640;1280
+	// +optional
+	SIWindowLength int `json:"siWindowLength,omitempty"`
+
+	// siPeriod is the SIB19 broadcast period in radio frames.
+	// Shorter periods keep UEs' NTN assistance fresh but cost air time.
+	// +kubebuilder:validation:Enum=8;16;32;64;128;256;512
+	// +optional
+	SIPeriod int `json:"siPeriod,omitempty"`
+
+	// siWindowPosition is the slot offset within the SI period. Adjust
+	// to avoid collision with SIB1/SIB2 scheduling windows. Pointer so 0
+	// (the first slot) can be distinguished from unset.
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=79
+	// +optional
+	SIWindowPosition *int `json:"siWindowPosition,omitempty"`
 }
 
 // NTNCellConfigStatus defines the observed state of NTNCellConfig.

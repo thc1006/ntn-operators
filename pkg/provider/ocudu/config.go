@@ -127,11 +127,11 @@ ntn:
 
 cell_cfg:
   sib:
-    si_window_length: 5
+    si_window_length: {{ .SIWindowLength }}
     si_sched_info:
-      - si_period: 16
+      - si_period: {{ .SIPeriod }}
         sib_mapping: 19
-        si_window_position: 1
+        si_window_position: {{ .SIWindowPosition }}
   pdsch:
     max_nof_harq_retxs: {{ .PdschMaxHarqRetxs }}
   prach:
@@ -207,7 +207,17 @@ type configData struct {
 	PdschMaxHarqRetxs         int
 	PrachMaxMsg3HarqRetx      int
 	RrcGuardTimeMs            int
+	SIWindowLength            int
+	SIPeriod                  int
+	SIWindowPosition          int
 }
+
+// SI scheduling defaults mirror the live-gNB-verified geo_ntn.yml values.
+const (
+	defaultSIWindowLength   = 5
+	defaultSIPeriod         = 16
+	defaultSIWindowPosition = 1
+)
 
 // GenerateConfig produces OCUDU-compatible NTN configuration YAML
 // from an NTNCellConfigSpec. The output matches the CLI11 config format
@@ -229,6 +239,9 @@ func GenerateConfig(spec *ntnv1alpha1.NTNCellConfigSpec) ([]byte, error) {
 		PdschMaxHarqRetxs:    0,
 		PrachMaxMsg3HarqRetx: 0,
 		RrcGuardTimeMs:       12800,
+		SIWindowLength:       defaultSIWindowLength,
+		SIPeriod:             defaultSIPeriod,
+		SIWindowPosition:     defaultSIWindowPosition,
 	}
 
 	// Populate extended TA info fields.
@@ -347,6 +360,17 @@ func GenerateConfig(spec *ntnv1alpha1.NTNCellConfigSpec) ([]byte, error) {
 		}
 		if spec.CellOverrides.RrcGuardTimeMs > 0 {
 			data.RrcGuardTimeMs = spec.CellOverrides.RrcGuardTimeMs
+		}
+		if sched := spec.CellOverrides.SIBSchedule; sched != nil {
+			if sched.SIWindowLength > 0 {
+				data.SIWindowLength = sched.SIWindowLength
+			}
+			if sched.SIPeriod > 0 {
+				data.SIPeriod = sched.SIPeriod
+			}
+			if sched.SIWindowPosition != nil {
+				data.SIWindowPosition = *sched.SIWindowPosition
+			}
 		}
 	}
 

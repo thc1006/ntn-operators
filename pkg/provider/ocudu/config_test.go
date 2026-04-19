@@ -640,6 +640,90 @@ func TestGenerateConfig_DistanceThresholdAndTServiceOmitted(t *testing.T) {
 	assertNotContains(t, yaml, "t_service:")
 }
 
+func TestGenerateConfig_SIBScheduleDefaults(t *testing.T) {
+	spec := &ntnv1alpha1.NTNCellConfigSpec{
+		NTN: ntnv1alpha1.NTNParams{
+			CellSpecificKoffset: 150,
+			EphemerisECEF:       &ntnv1alpha1.EphemerisECEF{PosX: 1, PosY: 2, PosZ: 3},
+		},
+	}
+	data, err := GenerateConfig(spec)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	yaml := string(data)
+	assertContains(t, yaml, "si_window_length: 5")
+	assertContains(t, yaml, "si_period: 16")
+	assertContains(t, yaml, "si_window_position: 1")
+}
+
+func TestGenerateConfig_SIBScheduleFullOverride(t *testing.T) {
+	pos := 4
+	spec := &ntnv1alpha1.NTNCellConfigSpec{
+		NTN: ntnv1alpha1.NTNParams{
+			CellSpecificKoffset: 150,
+			EphemerisECEF:       &ntnv1alpha1.EphemerisECEF{PosX: 1, PosY: 2, PosZ: 3},
+		},
+		CellOverrides: &ntnv1alpha1.CellOverrides{
+			SIBSchedule: &ntnv1alpha1.SIBSchedule{
+				SIWindowLength:   20,
+				SIPeriod:         32,
+				SIWindowPosition: &pos,
+			},
+		},
+	}
+	data, err := GenerateConfig(spec)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	yaml := string(data)
+	assertContains(t, yaml, "si_window_length: 20")
+	assertContains(t, yaml, "si_period: 32")
+	assertContains(t, yaml, "si_window_position: 4")
+}
+
+func TestGenerateConfig_SIBSchedulePartialOverride(t *testing.T) {
+	spec := &ntnv1alpha1.NTNCellConfigSpec{
+		NTN: ntnv1alpha1.NTNParams{
+			CellSpecificKoffset: 150,
+			EphemerisECEF:       &ntnv1alpha1.EphemerisECEF{PosX: 1, PosY: 2, PosZ: 3},
+		},
+		CellOverrides: &ntnv1alpha1.CellOverrides{
+			SIBSchedule: &ntnv1alpha1.SIBSchedule{SIPeriod: 8},
+		},
+	}
+	data, err := GenerateConfig(spec)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	yaml := string(data)
+	// Only siPeriod overridden; others keep defaults.
+	assertContains(t, yaml, "si_window_length: 5")
+	assertContains(t, yaml, "si_period: 8")
+	assertContains(t, yaml, "si_window_position: 1")
+}
+
+func TestGenerateConfig_SIBScheduleZeroPositionRespected(t *testing.T) {
+	// Regression: position=0 is valid ("first slot") and must NOT fall
+	// back to the default 1. Pointer semantics in SIBSchedule guarantee
+	// this distinction.
+	zero := 0
+	spec := &ntnv1alpha1.NTNCellConfigSpec{
+		NTN: ntnv1alpha1.NTNParams{
+			CellSpecificKoffset: 150,
+			EphemerisECEF:       &ntnv1alpha1.EphemerisECEF{PosX: 1, PosY: 2, PosZ: 3},
+		},
+		CellOverrides: &ntnv1alpha1.CellOverrides{
+			SIBSchedule: &ntnv1alpha1.SIBSchedule{SIWindowPosition: &zero},
+		},
+	}
+	data, err := GenerateConfig(spec)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	assertContains(t, string(data), "si_window_position: 0")
+}
+
 func assertContains(t *testing.T, haystack, needle string) {
 	t.Helper()
 	if !strings.Contains(haystack, needle) {
