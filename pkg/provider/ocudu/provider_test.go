@@ -389,6 +389,80 @@ func TestPushEphemerisUpdate_NeitherSet(t *testing.T) {
 	}
 }
 
+func TestPushEphemerisUpdate_YAMLWithComments(t *testing.T) {
+	// YAML with inline comment on key + indented comment in block.
+	scheme := runtime.NewScheme()
+	_ = corev1.AddToScheme(scheme)
+	_ = ntnv1alpha1.AddToScheme(scheme)
+	yamlWithComments := `ntn:
+  cell_specific_koffset: 150
+  ta_info:
+    ta_common: 0
+  ephemeris_info_ecef: # GEO satellite
+    # position in ECEF
+    pos_x: 20922195
+    pos_y: 1967783
+    pos_z: 19770302
+    vel_x: 0
+    vel_y: 0
+    vel_z: 0
+cell_cfg:
+  sib:
+    si_window_length: 5`
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      ConfigMapNameFor("test"),
+			Namespace: "ntn-system",
+		},
+		Data: map[string]string{"geo_ntn.yml": yamlWithComments},
+	}
+	ns := &corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{Name: "ntn-system"},
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(cm, ns).Build()
+	p := &Provider{client: c}
+
+	update := provider.EphemerisUpdate{
+		ECEF: &ntnv1alpha1.EphemerisECEF{
+			PosX: 111, PosY: 222, PosZ: 333,
+			VelX: 1, VelY: 2, VelZ: 3,
+		},
+	}
+	err := p.PushEphemerisUpdate(
+		context.Background(), "test", "ntn-system", update,
+	)
+	if err != nil {
+		t.Fatalf("PushEphemerisUpdate: %v", err)
+	}
+
+	var updated corev1.ConfigMap
+	key := types.NamespacedName{
+		Name: ConfigMapNameFor("test"), Namespace: "ntn-system",
+	}
+	if err := p.client.Get(context.Background(), key, &updated); err != nil {
+		t.Fatal(err)
+	}
+	yaml := updated.Data["geo_ntn.yml"]
+	if !contains(yaml, "pos_x: 111") {
+		t.Errorf("expected new pos_x:\n%s", yaml)
+	}
+	// Old values + comments should be gone.
+	if contains(yaml, "pos_x: 20922195") {
+		t.Error("old pos_x still present")
+	}
+	if contains(yaml, "# GEO satellite") {
+		t.Error("inline comment on key line still present")
+	}
+	if contains(yaml, "# position in ECEF") {
+		t.Error("indented comment still present")
+	}
+	// cell_cfg should still be there.
+	if !contains(yaml, "cell_cfg:") {
+		t.Errorf("cell_cfg section missing:\n%s", yaml)
+	}
+}
+
 func TestPushEphemerisUpdate_MissingGeoNtn(t *testing.T) {
 	// ConfigMap exists but without geo_ntn.yml key.
 	scheme := runtime.NewScheme()

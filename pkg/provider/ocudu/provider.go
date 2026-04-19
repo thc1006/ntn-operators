@@ -243,22 +243,24 @@ func replaceEphemeris(
 	}
 
 	// Find and replace ephemeris_info_ecef or ephemeris_orbital block.
+	// Uses HasPrefix to tolerate inline comments on the key line.
 	lines := strings.Split(content, "\n")
 	var result []string
 	skip := false
 	found := false
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
-		if trimmed == "ephemeris_info_ecef:" ||
-			trimmed == "ephemeris_orbital:" {
+		if strings.HasPrefix(trimmed, "ephemeris_info_ecef:") ||
+			strings.HasPrefix(trimmed, "ephemeris_orbital:") {
 			skip = true
 			found = true
 			result = append(result, strings.Split(newBlock, "\n")...)
 			continue
 		}
 		if skip {
-			// Skip indented sub-fields of the old block.
-			if strings.HasPrefix(line, "    ") && !strings.HasPrefix(trimmed, "#") {
+			// Skip all lines more indented than the key (4+ spaces),
+			// including comments and blank lines within the block.
+			if strings.HasPrefix(line, "    ") {
 				continue
 			}
 			skip = false
