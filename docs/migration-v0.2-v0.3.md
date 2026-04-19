@@ -51,9 +51,10 @@ If you have existing `NTNCellConfig` manifests in git or on disk:
 # Bulk-convert all YAML files in a directory.
 for f in $(grep -E -rl '^[[:space:]]*polarization:[[:space:]]*(linear|circular)[[:space:]]*$' config/); do
   # linear → {dl: linear, ul: linear}
-  sed -i 's/^\([[:space:]]*\)polarization:[[:space:]]*linear[[:space:]]*$/\1polarization:\n\1  dl: linear\n\1  ul: linear/' "$f"
+  sed -i.bak 's/^\([[:space:]]*\)polarization:[[:space:]]*linear[[:space:]]*$/\1polarization:\n\1  dl: linear\n\1  ul: linear/' "$f"
   # circular → {dl: rhcp, ul: rhcp} (assume RHCP; review before committing)
-  sed -i 's/^\([[:space:]]*\)polarization:[[:space:]]*circular[[:space:]]*$/\1polarization:\n\1  dl: rhcp\n\1  ul: rhcp/' "$f"
+  sed -i.bak 's/^\([[:space:]]*\)polarization:[[:space:]]*circular[[:space:]]*$/\1polarization:\n\1  dl: rhcp\n\1  ul: rhcp/' "$f"
+  rm -f "$f.bak"
 done
 ```
 
