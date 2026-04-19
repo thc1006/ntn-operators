@@ -465,11 +465,11 @@ func TestEvaluateWithHysteresis_MultipleTriggers_RequiresAllRecovered(t *testing
 
 func TestEvaluateWithHysteresis_RecoveryBoundarySemantics(t *testing.T) {
 	tests := []struct {
-		name     string
-		trigger  string
-		metrics  Metrics
-		margin   float64
-		wantDec  Decision
+		name    string
+		trigger string
+		metrics Metrics
+		margin  float64
+		wantDec Decision
 	}{
 		// rsrp < -120, margin 10 → recovery at >= -110
 		{"rsrp at boundary", "rsrp < -120",
