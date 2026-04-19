@@ -183,8 +183,10 @@ spec:
                     - rightAscension
                     - semiMajorAxis
                     type: object
-                  ncells:
-                    description: ncells lists neighbor NTN cells for measurement/handover.
+                  neighborCells:
+                    description: |-
+                      neighborCells lists neighbor NTN cells for measurement/handover.
+                      OCUDU YAML renders as "ncells:" for compatibility.
                     items:
                       description: NTNNeighborCell describes a neighbor NTN cell.
                       properties:

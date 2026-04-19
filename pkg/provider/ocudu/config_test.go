@@ -265,7 +265,7 @@ func TestGenerateConfig_NCells(t *testing.T) {
 			EphemerisECEF: &ntnv1alpha1.EphemerisECEF{
 				PosX: 1, PosY: 2, PosZ: 3,
 			},
-			NCells: []ntnv1alpha1.NTNNeighborCell{
+			NeighborCells: []ntnv1alpha1.NTNNeighborCell{
 				{PhysicalCellID: 100, Frequency: 632628},
 				{PhysicalCellID: 200},
 			},

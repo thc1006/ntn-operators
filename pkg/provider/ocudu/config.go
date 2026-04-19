@@ -181,9 +181,9 @@ func GenerateConfig(spec *ntnv1alpha1.NTNCellConfigSpec) ([]byte, error) {
 	}
 
 	// Map Stage 3 multi-cell NTN fields.
-	if len(spec.NTN.NCells) > 0 {
+	if len(spec.NTN.NeighborCells) > 0 {
 		data.HasNCells = true
-		for _, nc := range spec.NTN.NCells {
+		for _, nc := range spec.NTN.NeighborCells {
 			data.NCells = append(data.NCells, ntnNeighborCellData{
 				PhysicalCellID: nc.PhysicalCellID,
 				Frequency:      nc.Frequency,

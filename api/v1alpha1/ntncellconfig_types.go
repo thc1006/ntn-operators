@@ -84,9 +84,10 @@ type NTNParams struct {
 	// +kubebuilder:default="transparent"
 	PayloadType string `json:"payloadType,omitempty"`
 
-	// ncells lists neighbor NTN cells for measurement/handover.
+	// neighborCells lists neighbor NTN cells for measurement/handover.
+	// OCUDU YAML renders as "ncells:" for compatibility.
 	// +optional
-	NCells []NTNNeighborCell `json:"ncells,omitempty"`
+	NeighborCells []NTNNeighborCell `json:"neighborCells,omitempty"`
 
 	// referenceLocation defines the NTN cell reference location.
 	// +optional

@@ -456,8 +456,8 @@ func (in *NTNParams) DeepCopyInto(out *NTNParams) {
 		*out = new(EphemerisOrbital)
 		**out = **in
 	}
-	if in.NCells != nil {
-		in, out := &in.NCells, &out.NCells
+	if in.NeighborCells != nil {
+		in, out := &in.NeighborCells, &out.NeighborCells
 		*out = make([]NTNNeighborCell, len(*in))
 		copy(*out, *in)
 	}
