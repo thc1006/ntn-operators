@@ -7,11 +7,13 @@ ERRORS=0
 
 echo "=== Verifying .claude/ flat structure ==="
 
-# 1. No nested directories under .claude/agents/
-while IFS= read -r d; do
-  echo "ERROR: nested directory in .claude/agents/: $d"
-  ERRORS=$((ERRORS + 1))
-done < <(find .claude/agents -mindepth 1 -type d 2>/dev/null)
+# 1. No nested directories under .claude/agents/ or .claude/commands/
+for dir in .claude/agents .claude/commands; do
+  while IFS= read -r d; do
+    echo "ERROR: nested directory in ${dir}/: $d"
+    ERRORS=$((ERRORS + 1))
+  done < <(find "$dir" -mindepth 1 -type d 2>/dev/null)
+done
 
 # 2. All agent files have valid frontmatter with matching name
 for f in .claude/agents/*.md; do
