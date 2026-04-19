@@ -19,10 +19,39 @@ package ocudu
 import (
 	"bytes"
 	"fmt"
+	"strconv"
+	"strings"
 	"text/template"
 
 	ntnv1alpha1 "github.com/thc1006/ntn-operators/api/v1alpha1"
 )
+
+// yamlQuote emits a YAML 1.2 double-quoted string using Go's strconv.Quote.
+// strconv.Quote produces a Go-escaped double-quoted string; YAML 1.2
+// double-quoted scalars accept these escapes, so newlines, colons, and other
+// YAML-significant chars are escaped, preventing string injection from
+// bleeding into the surrounding YAML structure even if apiserver enum
+// validation is somehow bypassed (webhook misconfig, direct etcd write during
+// migration, apiserver with --feature-gates=CRDValidation=false).
+func yamlQuote(s string) string {
+	return strconv.Quote(s)
+}
+
+// sanitizeComment strips characters that would terminate a YAML comment line
+// (LF, CR, NEL, LS, PS, and NUL) so a user-supplied value cannot inject real
+// YAML keys via the `# Payload type: ...` header line. Comments are
+// line-terminated so quoting does not protect them.
+func sanitizeComment(s string) string {
+	r := strings.NewReplacer(
+		"\n", " ",
+		"\r", " ",
+		"\u0085", " ",
+		"\u2028", " ",
+		"\u2029", " ",
+		"\x00", "",
+	)
+	return r.Replace(s)
+}
 
 // configTemplate generates OCUDU-compatible NTN configuration YAML.
 //
@@ -112,10 +141,10 @@ ntn:
 {{- if .HasPolarization }}
   polarization:
 {{- if .PolarizationDL }}
-    dl: {{ .PolarizationDL }}
+    dl: {{ yamlQuote .PolarizationDL }}
 {{- end }}
 {{- if .PolarizationUL }}
-    ul: {{ .PolarizationUL }}
+    ul: {{ yamlQuote .PolarizationUL }}
 {{- end }}
 {{- end }}
 {{- if .TAReportSet }}
@@ -142,7 +171,11 @@ cu_cp:
     rrc_procedure_guard_time_ms: {{ .RrcGuardTimeMs }}
 `
 
-var parsedTemplate = template.Must(template.New("ocudu-ntn").Parse(configTemplate))
+var parsedTemplate = template.Must(
+	template.New("ocudu-ntn").
+		Funcs(template.FuncMap{"yamlQuote": yamlQuote}).
+		Parse(configTemplate),
+)
 
 // ntnNeighborCellData holds per-neighbor data for template rendering.
 type ntnNeighborCellData struct {
@@ -249,6 +282,10 @@ func baseConfigData(spec *ntnv1alpha1.NTNCellConfigSpec) configData {
 	if payloadType == "" {
 		payloadType = "transparent"
 	}
+	// Sanitize the comment-bound string so a malicious payload cannot break
+	// out of the `# Payload type: ...` header into real YAML keys even if
+	// apiserver enum validation were bypassed.
+	payloadType = sanitizeComment(payloadType)
 
 	return configData{
 		PayloadType:          payloadType,
