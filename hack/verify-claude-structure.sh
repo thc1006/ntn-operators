@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Verify .claude/ follows the flat Claude Code directory structure.
 # Usage: hack/verify-claude-structure.sh
 
@@ -38,14 +38,14 @@ for d in .claude/skills/*/; do
   fi
 done
 
-# 4. Count verification
+# 4. Count summary (informational, not enforced)
 agents=$(find .claude/agents -maxdepth 1 -name '*.md' -type f 2>/dev/null | wc -l)
 commands=$(find .claude/commands -maxdepth 1 -name '*.md' -type f 2>/dev/null | wc -l)
 skills=$(find .claude/skills -maxdepth 1 -mindepth 1 -type d 2>/dev/null | wc -l)
 echo ""
-echo "Agents:   $agents (expected: 45)"
-echo "Commands: $commands (expected: 33)"
-echo "Skills:   $skills (expected: 32)"
+echo "Agents:   $agents"
+echo "Commands: $commands"
+echo "Skills:   $skills"
 
 if [ "$ERRORS" -eq 0 ]; then
   echo ""
