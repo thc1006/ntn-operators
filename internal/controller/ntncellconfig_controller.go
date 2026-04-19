@@ -147,6 +147,26 @@ func (r *NTNCellConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{RequeueAfter: time.Minute}, nil
 	}
 
+	// Step 5a: Push ephemeris update when this config references SatelliteEphemeris.
+	// This ensures ephemeris-triggered requeues invoke the runtime update path.
+	if err := r.pushEphemerisUpdateIfNeeded(ctx, cc, spec); err != nil {
+		log.Error(err, "failed to push ephemeris update")
+		meta.SetStatusCondition(&cc.Status.Conditions, metav1.Condition{
+			Type:               ntnv1alpha1.ConditionConfigApplied,
+			Status:             metav1.ConditionUnknown,
+			Reason:             "EphemerisPushFailed",
+			Message:            fmt.Sprintf("config applied but ephemeris push failed: %v", err),
+			ObservedGeneration: cc.Generation,
+		})
+		if err := r.Status().Update(ctx, cc); err != nil {
+			return ctrl.Result{}, err
+		}
+		if r.Recorder != nil {
+			r.Recorder.Eventf(cc, nil, "Warning", "EphemerisPushFailed", "EphemerisPushFailed", "%s", err.Error())
+		}
+		return ctrl.Result{RequeueAfter: time.Minute}, nil
+	}
+
 	// Step 5b: Ensure OwnerReference on ConfigMap for garbage collection.
 	cm := &corev1.ConfigMap{}
 	cmKey := client.ObjectKey{
@@ -249,6 +269,38 @@ func (r *NTNCellConfigReconciler) handleFinalizer(
 	}
 
 	return false, ctrl.Result{}, nil
+}
+
+func (r *NTNCellConfigReconciler) pushEphemerisUpdateIfNeeded(
+	ctx context.Context,
+	cc *ntnv1alpha1.NTNCellConfig,
+	spec *ntnv1alpha1.NTNCellConfigSpec,
+) error {
+	if cc.Spec.EphemerisRef == "" {
+		return nil
+	}
+
+	eph := &ntnv1alpha1.SatelliteEphemeris{}
+	ephKey := client.ObjectKey{Namespace: cc.Namespace, Name: cc.Spec.EphemerisRef}
+	if err := r.Get(ctx, ephKey, eph); err != nil {
+		return fmt.Errorf("getting referenced SatelliteEphemeris %q: %w", cc.Spec.EphemerisRef, err)
+	}
+
+	update := provider.EphemerisUpdate{}
+	switch {
+	case spec.NTN.EphemerisOrbital != nil:
+		update.Orbital = spec.NTN.EphemerisOrbital.DeepCopy()
+	case spec.NTN.EphemerisECEF != nil:
+		update.ECEF = spec.NTN.EphemerisECEF.DeepCopy()
+	default:
+		return fmt.Errorf("ephemeris payload missing in NTNCellConfig spec")
+	}
+
+	if err := r.Provider.PushEphemerisUpdate(ctx, cc.Name, spec.Provider.Namespace, update); err != nil {
+		return fmt.Errorf("provider PushEphemerisUpdate: %w", err)
+	}
+
+	return nil
 }
 
 // SetupWithManager sets up the controller with the Manager.

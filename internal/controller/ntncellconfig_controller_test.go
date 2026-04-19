@@ -434,6 +434,72 @@ var _ = Describe("NTNCellConfig Controller", func() {
 		})
 	})
 
+	Context("When reconciling with ephemerisRef configured", func() {
+		const (
+			cellName = "test-eph-push-cell"
+			ephName  = "test-eph-push-source"
+		)
+		cellNN := types.NamespacedName{Name: cellName, Namespace: namespace}
+		ephNN := types.NamespacedName{Name: ephName, Namespace: namespace}
+
+		AfterEach(func() {
+			deleteCellConfig(cellNN)
+			eph := &ntnv1alpha1.SatelliteEphemeris{}
+			err := k8sClient.Get(context.Background(), ephNN, eph)
+			if err == nil {
+				_ = k8sClient.Delete(context.Background(), eph)
+			}
+		})
+
+		It("should invoke PushEphemerisUpdate on provider", func() {
+			// Referenced SatelliteEphemeris exists in the same namespace.
+			eph := &ntnv1alpha1.SatelliteEphemeris{
+				ObjectMeta: metav1.ObjectMeta{Name: ephName, Namespace: namespace},
+				Spec: ntnv1alpha1.SatelliteEphemerisSpec{
+					Source: ntnv1alpha1.EphemerisSource{
+						Type:            "CelesTrak",
+						URL:             "https://celestrak.org/NORAD/elements/gp.php?GROUP=oneweb&FORMAT=JSON",
+						RefreshInterval: metav1.Duration{Duration: 4 * time.Hour},
+					},
+				},
+			}
+			Expect(k8sClient.Create(context.Background(), eph)).To(Succeed())
+
+			cr := &ntnv1alpha1.NTNCellConfig{
+				ObjectMeta: metav1.ObjectMeta{Name: cellName, Namespace: namespace},
+				Spec: ntnv1alpha1.NTNCellConfigSpec{
+					Provider: ntnv1alpha1.ProviderRef{Type: "ocudu", Namespace: namespace},
+					NTN: ntnv1alpha1.NTNParams{
+						CellSpecificKoffset: 150,
+						EphemerisECEF: &ntnv1alpha1.EphemerisECEF{
+							PosX: 20922195, PosY: 1967783, PosZ: 19770302,
+						},
+						PayloadType: "transparent",
+					},
+					EphemerisRef: ephName,
+				},
+			}
+			Expect(k8sClient.Create(context.Background(), cr)).To(Succeed())
+
+			mock := &provider.MockProvider{}
+			reconciler := newReconciler(mock)
+
+			result, err := reconciler.Reconcile(context.Background(), reconcile.Request{NamespacedName: cellNN})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(Equal(time.Second))
+
+			result, err = reconciler.Reconcile(context.Background(), reconcile.Request{NamespacedName: cellNN})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(Equal(5 * time.Minute))
+
+			Expect(mock.ApplyCalls).To(Equal(1))
+			Expect(mock.EphemerisCalls).To(Equal(1))
+			Expect(mock.LastEphemeris).NotTo(BeNil())
+			Expect(mock.LastEphemeris.ECEF).NotTo(BeNil())
+			Expect(mock.LastEphemeris.ECEF.PosX).To(Equal(20922195))
+		})
+	})
+
 	Context("ephemerisToNTNCellConfig mapper", func() {
 		const (
 			ccWithRef    = "cc-with-ref"
