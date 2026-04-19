@@ -57,6 +57,26 @@ ntn:
     vel_y: {{ .EphVelY }}
     vel_z: {{ .EphVelZ }}
 {{- end }}
+{{- if .HasNCells }}
+  ncells:
+{{- range .NCells }}
+    - phys_cell_id: {{ .PhysicalCellID }}
+{{- if .Frequency }}
+      frequency: {{ .Frequency }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- if .HasReferenceLocation }}
+  reference_location:
+    latitude: {{ .RefLatitude }}
+    longitude: {{ .RefLongitude }}
+{{- end }}
+{{- if .HasDistanceThreshold }}
+  distance_threshold: {{ .DistanceThreshold }}
+{{- end }}
+{{- if .HasTService }}
+  t_service: {{ .TService }}
+{{- end }}
 
 cell_cfg:
   sib:
@@ -76,6 +96,12 @@ cu_cp:
 `
 
 var parsedTemplate = template.Must(template.New("ocudu-ntn").Parse(configTemplate))
+
+// ntnNeighborCellData holds per-neighbor data for template rendering.
+type ntnNeighborCellData struct {
+	PhysicalCellID int
+	Frequency      int
+}
 
 type configData struct {
 	PayloadType          string
@@ -97,6 +123,15 @@ type configData struct {
 	PdschMaxHarqRetxs    int
 	PrachMaxMsg3HarqRetx int
 	RrcGuardTimeMs       int
+	HasNCells            bool
+	NCells               []ntnNeighborCellData
+	HasReferenceLocation bool
+	RefLatitude          int
+	RefLongitude         int
+	HasDistanceThreshold bool
+	DistanceThreshold    int
+	HasTService          bool
+	TService             int
 }
 
 // GenerateConfig produces srsRAN/OCUDU-compatible NTN configuration YAML
@@ -143,6 +178,30 @@ func GenerateConfig(spec *ntnv1alpha1.NTNCellConfigSpec) ([]byte, error) {
 		data.EphVelZ = spec.NTN.EphemerisECEF.VelZ
 	default:
 		return nil, fmt.Errorf("either ephemerisECEF or ephemerisOrbital must be set")
+	}
+
+	// Map Stage 3 multi-cell NTN fields.
+	if len(spec.NTN.NeighborCells) > 0 {
+		data.HasNCells = true
+		for _, nc := range spec.NTN.NeighborCells {
+			data.NCells = append(data.NCells, ntnNeighborCellData{
+				PhysicalCellID: nc.PhysicalCellID,
+				Frequency:      nc.Frequency,
+			})
+		}
+	}
+	if spec.NTN.ReferenceLocation != nil {
+		data.HasReferenceLocation = true
+		data.RefLatitude = spec.NTN.ReferenceLocation.Latitude
+		data.RefLongitude = spec.NTN.ReferenceLocation.Longitude
+	}
+	if spec.NTN.DistanceThreshold != nil {
+		data.HasDistanceThreshold = true
+		data.DistanceThreshold = *spec.NTN.DistanceThreshold
+	}
+	if spec.NTN.TService != nil {
+		data.HasTService = true
+		data.TService = *spec.NTN.TService
 	}
 
 	// Apply custom overrides if provided.

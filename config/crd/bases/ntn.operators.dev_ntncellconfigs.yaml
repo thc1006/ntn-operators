@@ -96,6 +96,12 @@ spec:
                     maximum: 1023
                     minimum: 0
                     type: integer
+                  distanceThreshold:
+                    description: |-
+                      distanceThreshold sets the distance threshold for cell
+                      selection in metres.
+                    minimum: 0
+                    type: integer
                   ephemerisECEF:
                     description: |-
                       ephemerisECEF defines the satellite position and velocity in ECEF coordinates.
@@ -187,6 +193,27 @@ spec:
                     - rightAscension
                     - semiMajorAxis
                     type: object
+                  neighborCells:
+                    description: |-
+                      neighborCells lists neighbor NTN cells for measurement/handover.
+                      OCUDU YAML renders as "ncells:" for compatibility.
+                    items:
+                      description: NTNNeighborCell describes a neighbor NTN cell.
+                      properties:
+                        frequency:
+                          description: frequency is the neighbor cell's ARFCN (NR-ARFCN,
+                            always >= 1).
+                          minimum: 1
+                          type: integer
+                        physicalCellID:
+                          description: physicalCellID of the neighbor (0-1007).
+                          maximum: 1007
+                          minimum: 0
+                          type: integer
+                      required:
+                      - physicalCellID
+                      type: object
+                    type: array
                   payloadType:
                     default: transparent
                     description: payloadType specifies the satellite payload architecture.
@@ -194,6 +221,29 @@ spec:
                     - transparent
                     - regenerative
                     type: string
+                  referenceLocation:
+                    description: referenceLocation defines the NTN cell reference
+                      location.
+                    properties:
+                      latitude:
+                        description: latitude in 1e-4 degrees (-900000 to 900000).
+                        maximum: 900000
+                        minimum: -900000
+                        type: integer
+                      longitude:
+                        description: longitude in 1e-4 degrees (-1800000 to 1800000).
+                        maximum: 1800000
+                        minimum: -1800000
+                        type: integer
+                    required:
+                    - latitude
+                    - longitude
+                    type: object
+                  tService:
+                    description: tService sets the expected NTN service duration in
+                      seconds.
+                    minimum: 1
+                    type: integer
                   taCommon:
                     default: 0
                     description: taCommon sets the common Timing Advance value (0-66485757).
