@@ -368,7 +368,7 @@ func EvaluateFailoverWithHysteresis(
 
 	log := logr.FromContextOrDiscard(ctx)
 	log.V(2).Info("evaluate failover with hysteresis",
-		"hysteresisDB", hysteresisDB,
+		"hysteresisMargin", hysteresisDB,
 		"currentPath", currentPath,
 	)
 	finish := func(res FailoverResult) FailoverResult {
@@ -380,52 +380,63 @@ func EvaluateFailoverWithHysteresis(
 		return res
 	}
 
+	// Parse all triggers with error accounting (same as EvaluateFailoverWithContext).
+	anyTriggered := false
+	parseErrors := 0
+	var parsed []Trigger
+	for _, triggerStr := range triggers {
+		trigger, err := ParseTrigger(triggerStr)
+		if err != nil {
+			parseErrors++
+			log.V(1).Info("invalid trigger expression", "trigger", triggerStr, "error", err.Error())
+			continue
+		}
+		parsed = append(parsed, trigger)
+		if trigger.Evaluate(metrics) {
+			anyTriggered = true
+		}
+	}
+
+	parseSuffix := ""
+	if parseErrors > 0 {
+		if parseErrors == len(triggers) {
+			return finish(FailoverResult{
+				Decision:   DecisionStay,
+				Reason:     fmt.Sprintf("All %d trigger expressions are invalid", parseErrors),
+				TargetPath: currentPath,
+			})
+		}
+		parseSuffix = fmt.Sprintf(" (%d of %d triggers had parse errors)", parseErrors, len(triggers))
+	}
+
 	// Satellite pass ended — force switchback regardless of hysteresis.
 	if !satelliteAvailable {
-		anyTriggered := false
-		for _, ts := range triggers {
-			if t, err := ParseTrigger(ts); err == nil && t.Evaluate(metrics) {
-				anyTriggered = true
-				break
-			}
-		}
 		if anyTriggered {
 			return finish(FailoverResult{
 				Decision:   DecisionSwitchback,
-				Reason:     "Satellite pass ended, falling back to degraded terrestrial",
+				Reason:     "Satellite pass ended, falling back to degraded terrestrial" + parseSuffix,
 				TargetPath: PathTerrestrial,
 			})
 		}
 		return finish(FailoverResult{
 			Decision:   DecisionSwitchback,
-			Reason:     "Satellite pass ended, terrestrial recovered",
+			Reason:     "Satellite pass ended, terrestrial recovered" + parseSuffix,
 			TargetPath: PathTerrestrial,
 		})
 	}
 
-	// Check if ANY trigger is still firing (original thresholds).
-	for _, ts := range triggers {
-		t, err := ParseTrigger(ts)
-		if err != nil {
-			continue
-		}
-		if t.Evaluate(metrics) {
-			return finish(FailoverResult{
-				Decision:   DecisionStay,
-				Reason:     "Terrestrial still degraded, staying on satellite",
-				TargetPath: PathSatellite,
-			})
-		}
+	if anyTriggered {
+		return finish(FailoverResult{
+			Decision:   DecisionStay,
+			Reason:     "Terrestrial still degraded, staying on satellite" + parseSuffix,
+			TargetPath: PathSatellite,
+		})
 	}
 
 	// Triggers no longer firing at original thresholds.
-	// Check hysteresis: have ALL triggers recovered past the dead-band?
+	// Check hysteresis: have ALL valid triggers recovered past the dead-band?
 	allRecovered := true
-	for _, ts := range triggers {
-		t, err := ParseTrigger(ts)
-		if err != nil {
-			continue
-		}
+	for _, t := range parsed {
 		if !t.EvaluateRecovery(metrics, hysteresisDB) {
 			allRecovered = false
 			break
@@ -435,7 +446,7 @@ func EvaluateFailoverWithHysteresis(
 	if !allRecovered {
 		return finish(FailoverResult{
 			Decision:   DecisionStay,
-			Reason:     fmt.Sprintf("Terrestrial in hysteresis dead-band (margin=%.1f), staying on satellite", hysteresisDB),
+			Reason:     fmt.Sprintf("Terrestrial in hysteresis dead-band (margin=%g), staying on satellite%s", hysteresisDB, parseSuffix),
 			TargetPath: PathSatellite,
 		})
 	}
@@ -444,15 +455,15 @@ func EvaluateFailoverWithHysteresis(
 	if !lastFailover.IsZero() && now.Sub(lastFailover) < switchbackDelay {
 		return finish(FailoverResult{
 			Decision: DecisionStay,
-			Reason: fmt.Sprintf("Terrestrial recovered past dead-band but switchback delay not elapsed (%s remaining)",
-				switchbackDelay-now.Sub(lastFailover)),
+			Reason: fmt.Sprintf("Terrestrial recovered past dead-band but switchback delay not elapsed (%s remaining)%s",
+				switchbackDelay-now.Sub(lastFailover), parseSuffix),
 			TargetPath: PathSatellite,
 		})
 	}
 
 	return finish(FailoverResult{
 		Decision:   DecisionSwitchback,
-		Reason:     "Terrestrial recovered past hysteresis dead-band, switchback delay elapsed",
+		Reason:     "Terrestrial recovered past hysteresis dead-band, switchback delay elapsed" + parseSuffix,
 		TargetPath: PathTerrestrial,
 	})
 }

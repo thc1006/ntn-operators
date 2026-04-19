@@ -401,6 +401,38 @@ func TestEvaluateWithHysteresis_LatencyTrigger_DeadBand(t *testing.T) {
 	}
 }
 
+func TestEvaluateWithHysteresis_AllInvalidTriggers(t *testing.T) {
+	invalidTriggers := []string{"invalid", "also bad"}
+	got := EvaluateFailoverWithHysteresis(
+		context.Background(),
+		PathSatellite, invalidTriggers,
+		Metrics{RSRP: -90, LatencyMs: 20, PacketLossPercent: 0.1},
+		true, 60*time.Second, now.Add(-90*time.Second), now, 10,
+	)
+	if got.Decision != DecisionStay {
+		t.Errorf("expected Stay for all invalid triggers, got %s", got.Decision)
+	}
+	if !strings.Contains(got.Reason, "invalid") {
+		t.Errorf("expected reason to mention invalid, got %q", got.Reason)
+	}
+}
+
+func TestEvaluateWithHysteresis_MixedValidInvalidTriggers(t *testing.T) {
+	mixed := []string{"latency > 200", "rsrp << -120"} // second is invalid
+	got := EvaluateFailoverWithHysteresis(
+		context.Background(),
+		PathSatellite, mixed,
+		Metrics{RSRP: -90, LatencyMs: 250, PacketLossPercent: 0.1}, // latency still bad
+		true, 60*time.Second, now.Add(-90*time.Second), now, 10,
+	)
+	if got.Decision != DecisionStay {
+		t.Errorf("expected Stay (latency still degraded), got %s: %s", got.Decision, got.Reason)
+	}
+	if !strings.Contains(got.Reason, "parse error") {
+		t.Errorf("expected reason to mention parse errors, got %q", got.Reason)
+	}
+}
+
 func TestEvaluateWithHysteresis_PassEnds_ForceSwitchback(t *testing.T) {
 	// Even in dead-band, satellite pass ending forces switchback.
 	result := EvaluateFailoverWithHysteresis(
