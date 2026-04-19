@@ -89,6 +89,47 @@ type NTNParams struct {
 	// +optional
 	EphemerisOrbital *EphemerisOrbital `json:"ephemerisOrbital,omitempty"`
 
+	// taInfo provides extended Timing Advance parameters per 3GPP TS 38.213.
+	// When set, taInfo.taCommon takes precedence over the top-level taCommon field.
+	// +optional
+	TAInfo *TAInfo `json:"taInfo,omitempty"`
+
+	// epochTime defines the SFN/subframe reference for NTN timing alignment.
+	// +optional
+	EpochTime *EpochTime `json:"epochTime,omitempty"`
+
+	// feederLinkInfo provides feeder link parameters for Doppler compensation.
+	// +optional
+	FeederLinkInfo *FeederLinkInfo `json:"feederLinkInfo,omitempty"`
+
+	// ntnGatewayLocation specifies the NTN gateway (ground station) coordinates.
+	// +optional
+	NTNGatewayLocation *NTNGatewayLocation `json:"ntnGatewayLocation,omitempty"`
+
+	// movingRefLocation defines the Earth-moving reference location for LEO NTN cells.
+	// 3GPP Release 18 SIB19 field. Used by UEs for timing/Doppler estimation.
+	// +optional
+	MovingRefLocation *MovingRefLocation `json:"movingRefLocation,omitempty"`
+
+	// satSwitchWithResync provides satellite switch handover hints to UEs during
+	// satellite-to-satellite transitions. 3GPP Release 18 SIB19 field.
+	// +optional
+	SatSwitchWithResync *SatSwitchWithResync `json:"satSwitchWithResync,omitempty"`
+
+	// polarization specifies the antenna polarization.
+	// +kubebuilder:validation:Enum=linear;circular
+	// +optional
+	Polarization string `json:"polarization,omitempty"`
+
+	// taReport enables UE TA reporting.
+	// +optional
+	TAReport *bool `json:"taReport,omitempty"`
+
+	// ntnUlSyncValidityDur sets the UL synchronization validity duration in seconds.
+	// +kubebuilder:validation:Enum=5;10;15;20;25;30;35;40;45;50;55;60;120;180;240;900
+	// +optional
+	NTNUlSyncValidityDur *int `json:"ntnUlSyncValidityDur,omitempty"`
+
 	// payloadType specifies the satellite payload architecture.
 	// +kubebuilder:validation:Enum=transparent;regenerative
 	// +kubebuilder:default="transparent"
@@ -113,6 +154,99 @@ type NTNParams struct {
 	// +kubebuilder:validation:Minimum=1
 	// +optional
 	TService *int `json:"tService,omitempty"`
+}
+
+// TAInfo provides extended Timing Advance parameters per 3GPP TS 38.213.
+type TAInfo struct {
+	// taCommon is the common Timing Advance value (0-66485757). Required when
+	// taInfo is set — explicitly provide 0 for GEO satellites.
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=66485757
+	TACommon int `json:"taCommon"`
+
+	// taCommonDrift is the TA drift rate.
+	// +optional
+	TACommonDrift int `json:"taCommonDrift,omitempty"`
+
+	// taCommonDriftVariant is the TA drift rate variant.
+	// +optional
+	TACommonDriftVariant int `json:"taCommonDriftVariant,omitempty"`
+
+	// taCommonOffset is an additional TA offset.
+	// +optional
+	TACommonOffset int `json:"taCommonOffset,omitempty"`
+}
+
+// EpochTime defines the SFN/subframe reference for NTN timing.
+type EpochTime struct {
+	// sfn is the System Frame Number (0-1023).
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=1023
+	SFN int `json:"sfn"`
+
+	// subframeNumber is the subframe within the SFN (0-9).
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=9
+	SubframeNumber int `json:"subframeNumber"`
+}
+
+// FeederLinkInfo provides feeder link parameters for Doppler compensation.
+type FeederLinkInfo struct {
+	// enableDopplerCompensation enables feeder link Doppler compensation.
+	EnableDopplerCompensation bool `json:"enableDopplerCompensation"`
+
+	// dlFreqHz is the downlink frequency in Hz. Required when feederLinkInfo is set.
+	// +kubebuilder:validation:Minimum=1
+	DLFreqHz int64 `json:"dlFreqHz"`
+
+	// ulFreqHz is the uplink frequency in Hz. Required when feederLinkInfo is set.
+	// +kubebuilder:validation:Minimum=1
+	ULFreqHz int64 `json:"ulFreqHz"`
+}
+
+// NTNGatewayLocation specifies the NTN gateway coordinates.
+// Values in 1e-4 degrees for latitude/longitude, metres for altitude.
+type NTNGatewayLocation struct {
+	// latitude in 1e-4 degrees (-900000 to 900000).
+	// +kubebuilder:validation:Minimum=-900000
+	// +kubebuilder:validation:Maximum=900000
+	Latitude int `json:"latitude"`
+
+	// longitude in 1e-4 degrees (-1800000 to 1800000).
+	// +kubebuilder:validation:Minimum=-1800000
+	// +kubebuilder:validation:Maximum=1800000
+	Longitude int `json:"longitude"`
+
+	// altitude in metres above sea level. Required when ntnGatewayLocation is set.
+	Altitude int `json:"altitude"`
+}
+
+// MovingRefLocation defines the Earth-moving reference location for LEO NTN cells.
+// 3GPP Release 18 SIB19. Values in 1e-4 degrees per 3GPP TS 38.331.
+type MovingRefLocation struct {
+	// latitude in 1e-4 degrees (-900000 to 900000 = -90° to 90°).
+	// +kubebuilder:validation:Minimum=-900000
+	// +kubebuilder:validation:Maximum=900000
+	Latitude int `json:"latitude"`
+
+	// longitude in 1e-4 degrees (-1800000 to 1800000 = -180° to 180°).
+	// +kubebuilder:validation:Minimum=-1800000
+	// +kubebuilder:validation:Maximum=1800000
+	Longitude int `json:"longitude"`
+}
+
+// SatSwitchWithResync provides handover hints for satellite-to-satellite transitions.
+// 3GPP Release 18 SIB19. Allows UEs to prepare for serving cell change when
+// the current satellite leaves coverage.
+type SatSwitchWithResync struct {
+	// targetPCI is the Physical Cell Identity of the target cell after switch (0-1007).
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=1007
+	TargetPCI int `json:"targetPCI"`
+
+	// t304 is the handover timer value in milliseconds per 3GPP TS 38.331.
+	// +kubebuilder:validation:Enum=50;100;150;200;500;1000;2000;10000
+	T304 int `json:"t304"`
 }
 
 // EphemerisOrbital defines the satellite orbit using Keplerian elements,

@@ -193,6 +193,71 @@ spec:
                     - rightAscension
                     - semiMajorAxis
                     type: object
+                  epochTime:
+                    description: epochTime defines the SFN/subframe reference for
+                      NTN timing alignment.
+                    properties:
+                      sfn:
+                        description: sfn is the System Frame Number (0-1023).
+                        maximum: 1023
+                        minimum: 0
+                        type: integer
+                      subframeNumber:
+                        description: subframeNumber is the subframe within the SFN
+                          (0-9).
+                        maximum: 9
+                        minimum: 0
+                        type: integer
+                    required:
+                    - sfn
+                    - subframeNumber
+                    type: object
+                  feederLinkInfo:
+                    description: feederLinkInfo provides feeder link parameters for
+                      Doppler compensation.
+                    properties:
+                      dlFreqHz:
+                        description: dlFreqHz is the downlink frequency in Hz. Required
+                          when feederLinkInfo is set.
+                        format: int64
+                        minimum: 1
+                        type: integer
+                      enableDopplerCompensation:
+                        description: enableDopplerCompensation enables feeder link
+                          Doppler compensation.
+                        type: boolean
+                      ulFreqHz:
+                        description: ulFreqHz is the uplink frequency in Hz. Required
+                          when feederLinkInfo is set.
+                        format: int64
+                        minimum: 1
+                        type: integer
+                    required:
+                    - dlFreqHz
+                    - enableDopplerCompensation
+                    - ulFreqHz
+                    type: object
+                  movingRefLocation:
+                    description: |-
+                      movingRefLocation defines the Earth-moving reference location for LEO NTN cells.
+                      3GPP Release 18 SIB19 field. Used by UEs for timing/Doppler estimation.
+                    properties:
+                      latitude:
+                        description: latitude in 1e-4 degrees (-900000 to 900000 =
+                          -90° to 90°).
+                        maximum: 900000
+                        minimum: -900000
+                        type: integer
+                      longitude:
+                        description: longitude in 1e-4 degrees (-1800000 to 1800000
+                          = -180° to 180°).
+                        maximum: 1800000
+                        minimum: -1800000
+                        type: integer
+                    required:
+                    - latitude
+                    - longitude
+                    type: object
                   neighborCells:
                     description: |-
                       neighborCells lists neighbor NTN cells for measurement/handover.
@@ -214,12 +279,62 @@ spec:
                       - physicalCellID
                       type: object
                     type: array
+                  ntnGatewayLocation:
+                    description: ntnGatewayLocation specifies the NTN gateway (ground
+                      station) coordinates.
+                    properties:
+                      altitude:
+                        description: altitude in metres above sea level. Required
+                          when ntnGatewayLocation is set.
+                        type: integer
+                      latitude:
+                        description: latitude in 1e-4 degrees (-900000 to 900000).
+                        maximum: 900000
+                        minimum: -900000
+                        type: integer
+                      longitude:
+                        description: longitude in 1e-4 degrees (-1800000 to 1800000).
+                        maximum: 1800000
+                        minimum: -1800000
+                        type: integer
+                    required:
+                    - altitude
+                    - latitude
+                    - longitude
+                    type: object
+                  ntnUlSyncValidityDur:
+                    description: ntnUlSyncValidityDur sets the UL synchronization
+                      validity duration in seconds.
+                    enum:
+                    - 5
+                    - 10
+                    - 15
+                    - 20
+                    - 25
+                    - 30
+                    - 35
+                    - 40
+                    - 45
+                    - 50
+                    - 55
+                    - 60
+                    - 120
+                    - 180
+                    - 240
+                    - 900
+                    type: integer
                   payloadType:
                     default: transparent
                     description: payloadType specifies the satellite payload architecture.
                     enum:
                     - transparent
                     - regenerative
+                    type: string
+                  polarization:
+                    description: polarization specifies the antenna polarization.
+                    enum:
+                    - linear
+                    - circular
                     type: string
                   referenceLocation:
                     description: referenceLocation defines the NTN cell reference
@@ -239,6 +354,34 @@ spec:
                     - latitude
                     - longitude
                     type: object
+                  satSwitchWithResync:
+                    description: |-
+                      satSwitchWithResync provides satellite switch handover hints to UEs during
+                      satellite-to-satellite transitions. 3GPP Release 18 SIB19 field.
+                    properties:
+                      t304:
+                        description: t304 is the handover timer value in milliseconds
+                          per 3GPP TS 38.331.
+                        enum:
+                        - 50
+                        - 100
+                        - 150
+                        - 200
+                        - 500
+                        - 1000
+                        - 2000
+                        - 10000
+                        type: integer
+                      targetPCI:
+                        description: targetPCI is the Physical Cell Identity of the
+                          target cell after switch (0-1007).
+                        maximum: 1007
+                        minimum: 0
+                        type: integer
+                    required:
+                    - t304
+                    - targetPCI
+                    type: object
                   tService:
                     description: tService sets the expected NTN service duration in
                       seconds.
@@ -250,6 +393,33 @@ spec:
                     maximum: 66485757
                     minimum: 0
                     type: integer
+                  taInfo:
+                    description: |-
+                      taInfo provides extended Timing Advance parameters per 3GPP TS 38.213.
+                      When set, taInfo.taCommon takes precedence over the top-level taCommon field.
+                    properties:
+                      taCommon:
+                        description: |-
+                          taCommon is the common Timing Advance value (0-66485757). Required when
+                          taInfo is set — explicitly provide 0 for GEO satellites.
+                        maximum: 66485757
+                        minimum: 0
+                        type: integer
+                      taCommonDrift:
+                        description: taCommonDrift is the TA drift rate.
+                        type: integer
+                      taCommonDriftVariant:
+                        description: taCommonDriftVariant is the TA drift rate variant.
+                        type: integer
+                      taCommonOffset:
+                        description: taCommonOffset is an additional TA offset.
+                        type: integer
+                    required:
+                    - taCommon
+                    type: object
+                  taReport:
+                    description: taReport enables UE TA reporting.
+                    type: boolean
                 type: object
                 x-kubernetes-validations:
                 - message: exactly one of ephemerisECEF or ephemerisOrbital must be

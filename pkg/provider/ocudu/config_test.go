@@ -201,6 +201,179 @@ func TestGenerateConfig_NeitherEphemerisSet(t *testing.T) {
 	}
 }
 
+func TestGenerateConfig_TAInfoExtended(t *testing.T) {
+	spec := &ntnv1alpha1.NTNCellConfigSpec{
+		NTN: ntnv1alpha1.NTNParams{
+			CellSpecificKoffset: 150,
+			TAInfo: &ntnv1alpha1.TAInfo{
+				TACommon:             1000,
+				TACommonDrift:        50,
+				TACommonDriftVariant: 10,
+				TACommonOffset:       200,
+			},
+			EphemerisECEF: &ntnv1alpha1.EphemerisECEF{PosX: 1, PosY: 2, PosZ: 3},
+		},
+	}
+	data, err := GenerateConfig(spec)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	yaml := string(data)
+	assertContains(t, yaml, "ta_info:")
+	assertContains(t, yaml, "ta_common: 1000")
+	assertContains(t, yaml, "ta_common_drift: 50")
+	assertContains(t, yaml, "ta_common_drift_variant: 10")
+	assertContains(t, yaml, "ta_common_offset: 200")
+}
+
+func TestGenerateConfig_EpochTime(t *testing.T) {
+	spec := &ntnv1alpha1.NTNCellConfigSpec{
+		NTN: ntnv1alpha1.NTNParams{
+			EphemerisECEF: &ntnv1alpha1.EphemerisECEF{PosX: 1, PosY: 2, PosZ: 3},
+			EpochTime: &ntnv1alpha1.EpochTime{
+				SFN:            512,
+				SubframeNumber: 5,
+			},
+		},
+	}
+	data, err := GenerateConfig(spec)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	yaml := string(data)
+	assertContains(t, yaml, "epoch_time:")
+	assertContains(t, yaml, "sfn: 512")
+	assertContains(t, yaml, "subframe_number: 5")
+}
+
+func TestGenerateConfig_FeederLinkInfo(t *testing.T) {
+	spec := &ntnv1alpha1.NTNCellConfigSpec{
+		NTN: ntnv1alpha1.NTNParams{
+			EphemerisECEF: &ntnv1alpha1.EphemerisECEF{PosX: 1, PosY: 2, PosZ: 3},
+			FeederLinkInfo: &ntnv1alpha1.FeederLinkInfo{
+				EnableDopplerCompensation: true,
+				DLFreqHz:                  2680000000,
+				ULFreqHz:                  2560000000,
+			},
+		},
+	}
+	data, err := GenerateConfig(spec)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	yaml := string(data)
+	assertContains(t, yaml, "feeder_link_info:")
+	assertContains(t, yaml, "enable_doppler_compensation: true")
+	assertContains(t, yaml, "dl_freq: 2680000000")
+	assertContains(t, yaml, "ul_freq: 2560000000")
+}
+
+func TestGenerateConfig_GatewayLocation(t *testing.T) {
+	spec := &ntnv1alpha1.NTNCellConfigSpec{
+		NTN: ntnv1alpha1.NTNParams{
+			EphemerisECEF: &ntnv1alpha1.EphemerisECEF{PosX: 1, PosY: 2, PosZ: 3},
+			NTNGatewayLocation: &ntnv1alpha1.NTNGatewayLocation{
+				Latitude:  248500,
+				Longitude: 1210000,
+				Altitude:  100,
+			},
+		},
+	}
+	data, err := GenerateConfig(spec)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	yaml := string(data)
+	assertContains(t, yaml, "ntn_gateway_location:")
+	assertContains(t, yaml, "latitude: 248500")
+	assertContains(t, yaml, "longitude: 1210000")
+	assertContains(t, yaml, "altitude: 100")
+}
+
+func TestGenerateConfig_Polarization(t *testing.T) {
+	spec := &ntnv1alpha1.NTNCellConfigSpec{
+		NTN: ntnv1alpha1.NTNParams{
+			EphemerisECEF: &ntnv1alpha1.EphemerisECEF{PosX: 1, PosY: 2, PosZ: 3},
+			Polarization:  "circular",
+		},
+	}
+	data, err := GenerateConfig(spec)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	assertContains(t, string(data), "polarization: circular")
+}
+
+func TestGenerateConfig_TAReport(t *testing.T) {
+	enabled := true
+	spec := &ntnv1alpha1.NTNCellConfigSpec{
+		NTN: ntnv1alpha1.NTNParams{
+			EphemerisECEF: &ntnv1alpha1.EphemerisECEF{PosX: 1, PosY: 2, PosZ: 3},
+			TAReport:      &enabled,
+		},
+	}
+	data, err := GenerateConfig(spec)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	assertContains(t, string(data), "ta_report: true")
+}
+
+func TestGenerateConfig_NTNUlSyncValidityDur(t *testing.T) {
+	dur := 60
+	spec := &ntnv1alpha1.NTNCellConfigSpec{
+		NTN: ntnv1alpha1.NTNParams{
+			EphemerisECEF:        &ntnv1alpha1.EphemerisECEF{PosX: 1, PosY: 2, PosZ: 3},
+			NTNUlSyncValidityDur: &dur,
+		},
+	}
+	data, err := GenerateConfig(spec)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	assertContains(t, string(data), "ntn_ul_sync_validity_dur: 60")
+}
+
+func TestGenerateConfig_MovingRefLocation(t *testing.T) {
+	spec := &ntnv1alpha1.NTNCellConfigSpec{
+		NTN: ntnv1alpha1.NTNParams{
+			EphemerisECEF: &ntnv1alpha1.EphemerisECEF{PosX: 1, PosY: 2, PosZ: 3},
+			MovingRefLocation: &ntnv1alpha1.MovingRefLocation{
+				Latitude:  248500,  // 24.85° in 1e-4 degrees
+				Longitude: 1210000, // 121.0° in 1e-4 degrees
+			},
+		},
+	}
+	data, err := GenerateConfig(spec)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	yaml := string(data)
+	assertContains(t, yaml, "moving_ref_location:")
+	assertContains(t, yaml, "latitude: 248500")
+	assertContains(t, yaml, "longitude: 1210000")
+}
+
+func TestGenerateConfig_SatSwitchWithResync(t *testing.T) {
+	spec := &ntnv1alpha1.NTNCellConfigSpec{
+		NTN: ntnv1alpha1.NTNParams{
+			EphemerisECEF: &ntnv1alpha1.EphemerisECEF{PosX: 1, PosY: 2, PosZ: 3},
+			SatSwitchWithResync: &ntnv1alpha1.SatSwitchWithResync{
+				TargetPCI: 100,
+				T304:      150,
+			},
+		},
+	}
+	data, err := GenerateConfig(spec)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	yaml := string(data)
+	assertContains(t, yaml, "sat_switch_with_resync:")
+	assertContains(t, yaml, "target_pci: 100")
+	assertContains(t, yaml, "t304: 150")
+}
+
 func TestGenerateConfig_NilSpec(t *testing.T) {
 	_, err := GenerateConfig(nil)
 	if err == nil {
