@@ -74,52 +74,80 @@ func (f *SpaceTrackFetcher) SetCredentials(username, password string) {
 	f.loggedIn = false // force re-login on next fetch
 }
 
-// Fetch retrieves GP data from SpaceTrack. It handles authentication
-// automatically using cookie-based session management.
-// On HTTP 401, it automatically retries login once before failing.
+// Fetch retrieves GP data using previously set credentials (via SetCredentials).
+// Deprecated: Use FetchWithCredentials for request-scoped credential isolation.
 func (f *SpaceTrackFetcher) Fetch(ctx context.Context, gpURL string) (GPFetchResult, error) {
-	now := time.Now()
-
 	f.mu.Lock()
 	username := f.activeUsername
 	password := f.activePassword
-	loggedIn := f.loggedIn
 	f.mu.Unlock()
+	// FetchWithCredentials re-acquires the lock internally.
+	return f.FetchWithCredentials(ctx, gpURL, username, password)
+}
 
+// FetchWithCredentials retrieves GP data with request-scoped credentials.
+// It re-authenticates the shared session when the requested credentials
+// differ from the current active session and auto-retries on 401.
+//
+// The entire login+fetch sequence is serialized under a mutex to prevent
+// cookie/session interleaving when concurrent callers use different
+// credentials. This preserves correctness for the shared authenticated
+// session at the cost of reduced throughput while a fetch is in progress.
+func (f *SpaceTrackFetcher) FetchWithCredentials(
+	ctx context.Context, gpURL, username, password string,
+) (GPFetchResult, error) {
 	if username == "" || password == "" {
-		return GPFetchResult{}, fmt.Errorf("SpaceTrack credentials not configured; set credentials via Secret reference")
+		return GPFetchResult{}, fmt.Errorf(
+			"SpaceTrack username and password must be non-empty")
 	}
 
 	log := logr.FromContextOrDiscard(ctx)
 
-	// Login if we don't have a session.
-	if !loggedIn {
+	// Serialize login + HTTP request to keep session/cookie state consistent
+	// across the login+fetch sequence when sharing a single authenticated
+	// session. JSON parsing is done outside the lock to reduce contention.
+	f.mu.Lock()
+	now := time.Now()
+
+	needLogin := !f.loggedIn || f.activeUsername != username || f.activePassword != password
+	if needLogin {
 		log.V(1).Info("authenticating with SpaceTrack")
-		if err := f.login(ctx, username, password); err != nil {
+		if err := f.doLogin(ctx, username, password); err != nil {
+			f.mu.Unlock()
 			return GPFetchResult{}, fmt.Errorf("SpaceTrack login failed: %w", err)
 		}
+		f.activeUsername = username
+		f.activePassword = password
+		f.loggedIn = true
 	}
 
-	// Fetch GP data.
-	result, err := f.fetchGP(ctx, gpURL, now)
-	if err == nil {
-		return result, nil
-	}
-
-	// On 401, retry login once and re-fetch.
-	if isSessionExpired(err) {
+	body, err := f.doFetchGPRaw(ctx, gpURL)
+	if err != nil && isSessionExpired(err) {
+		// On 401, retry login once and re-fetch.
 		log.V(1).Info("session expired, re-authenticating")
-		if loginErr := f.login(ctx, username, password); loginErr != nil {
+		if loginErr := f.doLogin(ctx, username, password); loginErr != nil {
+			f.mu.Unlock()
 			return GPFetchResult{}, fmt.Errorf("SpaceTrack re-login failed: %w", loginErr)
 		}
-		return f.fetchGP(ctx, gpURL, now)
+		f.activeUsername = username
+		f.activePassword = password
+		f.loggedIn = true
+		body, err = f.doFetchGPRaw(ctx, gpURL)
 	}
 
-	return GPFetchResult{}, err
+	f.mu.Unlock()
+
+	if err != nil {
+		return GPFetchResult{}, err
+	}
+
+	// Parse OMM JSON outside the lock — no shared state needed.
+	return parseGPResult(body, now)
 }
 
-// login authenticates with SpaceTrack via POST to /ajaxauth/login.
-func (f *SpaceTrackFetcher) login(ctx context.Context, username, password string) error {
+// doLogin authenticates with SpaceTrack via POST to /ajaxauth/login.
+// Caller must hold f.mu.
+func (f *SpaceTrackFetcher) doLogin(ctx context.Context, username, password string) error {
 	loginURL := f.baseURL + "/ajaxauth/login"
 
 	form := url.Values{
@@ -145,9 +173,6 @@ func (f *SpaceTrackFetcher) login(ctx context.Context, username, password string
 		return fmt.Errorf("login returned HTTP %d", resp.StatusCode)
 	}
 
-	f.mu.Lock()
-	f.loggedIn = true
-	f.mu.Unlock()
 	return nil
 }
 
@@ -159,17 +184,19 @@ func isSessionExpired(err error) bool {
 	return errors.Is(err, errSessionExpired)
 }
 
-// fetchGP performs the authenticated GP data request.
-func (f *SpaceTrackFetcher) fetchGP(ctx context.Context, gpURL string, now time.Time) (GPFetchResult, error) {
+// doFetchGPRaw performs the authenticated HTTP request and returns the raw
+// response body. Caller must hold f.mu to keep session state consistent.
+// On non-OK status, returns an appropriate error (draining the body first).
+func (f *SpaceTrackFetcher) doFetchGPRaw(ctx context.Context, gpURL string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, gpURL, nil)
 	if err != nil {
-		return GPFetchResult{}, fmt.Errorf("creating GP request: %w", err)
+		return nil, fmt.Errorf("creating GP request: %w", err)
 	}
 	req.Header.Set("User-Agent", "ntn-operators/0.1")
 
 	resp, err := f.httpClient.Do(req)
 	if err != nil {
-		return GPFetchResult{}, fmt.Errorf("GP request failed: %w", err)
+		return nil, fmt.Errorf("GP request failed: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -177,34 +204,39 @@ func (f *SpaceTrackFetcher) fetchGP(ctx context.Context, gpURL string, now time.
 	case http.StatusOK:
 		body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody+1))
 		if err != nil {
-			return GPFetchResult{}, fmt.Errorf("reading GP response: %w", err)
+			return nil, fmt.Errorf("reading GP response: %w", err)
 		}
 		if len(body) > maxResponseBody {
-			return GPFetchResult{}, fmt.Errorf("GP response exceeds %d bytes", maxResponseBody)
+			// Drain remaining body for connection reuse.
+			_, _ = io.Copy(io.Discard, resp.Body)
+			return nil, fmt.Errorf("GP response exceeds %d bytes", maxResponseBody)
 		}
-
-		omms, err := sgp4.ParseOMMs(body)
-		if err != nil {
-			return GPFetchResult{}, fmt.Errorf("parsing OMM JSON: %w", err)
-		}
-
-		return GPFetchResult{
-			OMMs:           omms,
-			SatelliteCount: len(omms),
-			FetchedAt:      now,
-		}, nil
+		return body, nil
 
 	case http.StatusForbidden, http.StatusTooManyRequests:
-		return GPFetchResult{}, ErrRateLimited
+		_, _ = io.Copy(io.Discard, resp.Body)
+		return nil, ErrRateLimited
 
 	case http.StatusUnauthorized:
-		// Session expired — mark as not logged in.
-		f.mu.Lock()
+		_, _ = io.Copy(io.Discard, resp.Body)
 		f.loggedIn = false
-		f.mu.Unlock()
-		return GPFetchResult{}, fmt.Errorf("%w (HTTP 401)", errSessionExpired)
+		return nil, fmt.Errorf("%w (HTTP 401)", errSessionExpired)
 
 	default:
-		return GPFetchResult{}, fmt.Errorf("%w: HTTP %d from %s", ErrBadResponse, resp.StatusCode, gpURL)
+		_, _ = io.Copy(io.Discard, resp.Body)
+		return nil, fmt.Errorf("%w: HTTP %d from %s", ErrBadResponse, resp.StatusCode, gpURL)
 	}
+}
+
+// parseGPResult parses raw OMM JSON into a GPFetchResult. Does not require the mutex.
+func parseGPResult(body []byte, now time.Time) (GPFetchResult, error) {
+	omms, err := sgp4.ParseOMMs(body)
+	if err != nil {
+		return GPFetchResult{}, fmt.Errorf("parsing OMM JSON: %w", err)
+	}
+	return GPFetchResult{
+		OMMs:           omms,
+		SatelliteCount: len(omms),
+		FetchedAt:      now,
+	}, nil
 }
