@@ -20,6 +20,8 @@ import (
 	"strings"
 	"testing"
 
+	"sigs.k8s.io/yaml"
+
 	ntnv1alpha1 "github.com/thc1006/ntn-operators/api/v1alpha1"
 )
 
@@ -304,8 +306,8 @@ func TestGenerateConfig_PolarizationBoth(t *testing.T) {
 	yaml := string(data)
 	// Nested OCUDU layout: polarization: { dl:, ul: }
 	assertContains(t, yaml, "polarization:")
-	assertContains(t, yaml, "    dl: rhcp")
-	assertContains(t, yaml, "    ul: lhcp")
+	assertContains(t, yaml, `    dl: "rhcp"`)
+	assertContains(t, yaml, `    ul: "lhcp"`)
 	// MUST NOT emit the old flat scalar form.
 	assertNotContains(t, yaml, "polarization: rhcp")
 	assertNotContains(t, yaml, "polarization: lhcp")
@@ -325,7 +327,7 @@ func TestGenerateConfig_PolarizationDLOnly(t *testing.T) {
 	}
 	yaml := string(data)
 	assertContains(t, yaml, "polarization:")
-	assertContains(t, yaml, "    dl: linear")
+	assertContains(t, yaml, `    dl: "linear"`)
 	assertNotContains(t, yaml, "ul:")
 }
 
@@ -342,7 +344,7 @@ func TestGenerateConfig_PolarizationULOnly(t *testing.T) {
 	}
 	yaml := string(data)
 	assertContains(t, yaml, "polarization:")
-	assertContains(t, yaml, "    ul: rhcp")
+	assertContains(t, yaml, `    ul: "rhcp"`)
 	assertNotContains(t, yaml, "dl:")
 }
 
@@ -864,6 +866,130 @@ func TestGenerateConfig_TS38331Conformance(t *testing.T) {
 					tc.ieRef, tc.name, tc.present, yaml)
 			}
 		})
+	}
+}
+
+// TestGenerateConfig_YAMLRoundTrip asserts the renderer emits structurally
+// valid YAML for a maximal spec combining all new fields from PRs #45-#47.
+// Catches indentation drift from future template edits.
+func TestGenerateConfig_YAMLRoundTrip(t *testing.T) {
+	dur := 900
+	qhyst := 2
+	qoff := -3
+	sintra := 12
+	threshLow := 8
+	spec := &ntnv1alpha1.NTNCellConfigSpec{
+		NTN: ntnv1alpha1.NTNParams{
+			CellSpecificKoffset:  150,
+			TACommon:             0,
+			NTNUlSyncValidityDur: &dur,
+			PayloadType:          "regenerative",
+			Polarization:         &ntnv1alpha1.NTNPolarization{DL: "rhcp", UL: "lhcp"},
+			TAInfo: &ntnv1alpha1.TAInfo{
+				TACommon:             1000,
+				TACommonDrift:        50,
+				TACommonDriftVariant: 10,
+				TACommonOffset:       200,
+			},
+			EpochTime:           &ntnv1alpha1.EpochTime{SFN: 512, SubframeNumber: 5},
+			EphemerisECEF:       &ntnv1alpha1.EphemerisECEF{PosX: 1, PosY: 2, PosZ: 3, VelX: 10, VelY: 20, VelZ: 30},
+			MovingRefLocation:   &ntnv1alpha1.MovingRefLocation{Latitude: 248500, Longitude: 1210000},
+			SatSwitchWithResync: &ntnv1alpha1.SatSwitchWithResync{TargetPCI: 1, T304: 100},
+			NeighborCells: []ntnv1alpha1.NTNNeighborCell{
+				{
+					PhysicalCellID: 7,
+					Frequency:      632628,
+					ReselectionInfo: &ntnv1alpha1.NeighborReselectionInfo{
+						QHyst:             &qhyst,
+						QOffsetCell:       &qoff,
+						SIntraSearchP:     &sintra,
+						ThreshServingLowP: &threshLow,
+					},
+				},
+				{PhysicalCellID: 42},
+			},
+		},
+		CellOverrides: &ntnv1alpha1.CellOverrides{
+			PdschMaxHarqRetxs:    2,
+			PrachMaxMsg3HarqRetx: 1,
+			RrcGuardTimeMs:       25600,
+			SIBSchedule: &ntnv1alpha1.SIBSchedule{
+				SIWindowLength: 20,
+				SIPeriod:       32,
+			},
+		},
+	}
+	data, err := GenerateConfig(spec)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var parsed map[string]any
+	if err := yaml.Unmarshal(data, &parsed); err != nil {
+		t.Fatalf("rendered output is not valid YAML: %v\n\n%s", err, data)
+	}
+	if _, ok := parsed["ntn"]; !ok {
+		t.Errorf("round-trip parse missing ntn key: %s", data)
+	}
+	if _, ok := parsed["cell_cfg"]; !ok {
+		t.Errorf("round-trip parse missing cell_cfg key: %s", data)
+	}
+}
+
+// TestGenerateConfig_PolarizationStringInjectionResistant verifies the
+// renderer does not allow a crafted polarization.dl/ul string to inject
+// sibling YAML keys even if apiserver enum validation were bypassed. This
+// is defense-in-depth — the normal path is the CRD Enum marker.
+func TestGenerateConfig_PolarizationStringInjectionResistant(t *testing.T) {
+	spec := &ntnv1alpha1.NTNCellConfigSpec{
+		NTN: ntnv1alpha1.NTNParams{
+			EphemerisECEF: &ntnv1alpha1.EphemerisECEF{PosX: 1, PosY: 2, PosZ: 3},
+			Polarization: &ntnv1alpha1.NTNPolarization{
+				DL: "rhcp\n    forbidden_key: attacker_value",
+			},
+		},
+	}
+	data, err := GenerateConfig(spec)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var parsed map[string]any
+	if err := yaml.Unmarshal(data, &parsed); err != nil {
+		t.Fatalf("injection corrupted YAML structure: %v\n\n%s", err, data)
+	}
+	ntn, _ := parsed["ntn"].(map[string]any)
+	if _, leaked := ntn["forbidden_key"]; leaked {
+		t.Errorf("string injection leaked 'forbidden_key' into ntn map:\n%s", data)
+	}
+	if pol, ok := ntn["polarization"].(map[string]any); ok {
+		if _, leaked := pol["forbidden_key"]; leaked {
+			t.Errorf("string injection leaked 'forbidden_key' into polarization map:\n%s", data)
+		}
+		if dlStr, _ := pol["dl"].(string); !strings.Contains(dlStr, "forbidden_key") {
+			t.Errorf("expected dl to round-trip the literal payload, got %q", dlStr)
+		}
+	}
+}
+
+// TestGenerateConfig_PayloadTypeStringInjectionResistant applies the same
+// defense-in-depth check to PayloadType, which also interpolates a
+// user-controlled string into the template.
+func TestGenerateConfig_PayloadTypeStringInjectionResistant(t *testing.T) {
+	spec := &ntnv1alpha1.NTNCellConfigSpec{
+		NTN: ntnv1alpha1.NTNParams{
+			EphemerisECEF: &ntnv1alpha1.EphemerisECEF{PosX: 1, PosY: 2, PosZ: 3},
+			PayloadType:   "transparent\nforbidden_top_level: attacker",
+		},
+	}
+	data, err := GenerateConfig(spec)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var parsed map[string]any
+	if err := yaml.Unmarshal(data, &parsed); err != nil {
+		t.Fatalf("injection corrupted YAML structure: %v\n\n%s", err, data)
+	}
+	if _, leaked := parsed["forbidden_top_level"]; leaked {
+		t.Errorf("payloadType string injection leaked top-level key:\n%s", data)
 	}
 }
 
