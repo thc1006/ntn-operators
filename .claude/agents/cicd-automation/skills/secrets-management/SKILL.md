@@ -64,7 +64,7 @@ export VAULT_TOKEN='root'
 # Enable secrets engine
 vault secrets enable -path=secret kv-v2
 
-# Store secret
+# Store secret (vault kv CLI uses logical path without /data/)
 vault kv put secret/database/config username=admin password=secret
 ```
 
@@ -86,6 +86,7 @@ jobs:
         with:
           url: https://vault.example.com:8200
           token: ${{ secrets.VAULT_TOKEN }}
+          # Vault Action selectors use KV v2 API paths (/data/...).
           secrets: |
             secret/data/database/config username | DB_USERNAME ;
             secret/data/database/config password | DB_PASSWORD ;
