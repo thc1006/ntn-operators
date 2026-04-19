@@ -29,6 +29,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -182,18 +183,19 @@ func groundStationLabelValue(namespace, gsName string) string {
 	if len(labelValue) <= maxLabelValueLen {
 		return labelValue
 	}
-	// Preserve namespace + "." prefix, truncate+hash only the name part.
+	// Always preserve a dot separator so nodeToGroundStation can parse
+	// the namespace. If namespace is too long, truncate it too.
+	h := sha256.Sum256([]byte(labelValue))
+	suffix := hex.EncodeToString(h[:4]) // 8 hex chars
+
 	prefix := namespace + "."
 	remaining := maxLabelValueLen - len(prefix) - 9 // room for "-" + 8-char hash
 	if remaining < 1 {
-		// Namespace alone is too long (≥54 chars) — hash the whole thing.
-		// Note: this loses the "." separator so nodeToGroundStation won't
-		// parse it. The GS controller still works via periodic reconcile.
-		h := sha256.Sum256([]byte(labelValue))
-		return hex.EncodeToString(h[:4]) + hex.EncodeToString(h[4:8])
+		// Namespace too long — truncate namespace to fit while keeping ".".
+		nsMax := min(maxLabelValueLen-1-8, len(namespace)) // 63 - "." - suffix = 54, clamped
+		truncNs := strings.TrimRight(namespace[:nsMax], "-.")
+		return truncNs + "." + suffix
 	}
-	h := sha256.Sum256([]byte(labelValue))
-	suffix := hex.EncodeToString(h[:4])
 	truncName := strings.TrimRight(gsName[:remaining], "-.")
 	if truncName == "" {
 		// gsName was entirely "-." chars — use hash only.
@@ -487,7 +489,7 @@ func (r *GroundStationLifecycleReconciler) reconcileFirmware(
 	if !upToDate && gs.Spec.Firmware.AutoUpdate &&
 		(gs.Status.Phase == ntnv1alpha1.PhaseRunning || gs.Status.Phase == ntnv1alpha1.PhaseDegraded) {
 		if gs.Spec.Firmware.MaintenanceWindow != "" {
-			inWindow, err := lifecycle.IsWithinMaintenanceWindow(gs.Spec.Firmware.MaintenanceWindow, r.now())
+			inWindow, err := lifecycle.IsWithinMaintenanceWindowWithContext(ctx, gs.Spec.Firmware.MaintenanceWindow, r.now())
 			if err != nil {
 				meta.SetStatusCondition(&gs.Status.Conditions, metav1.Condition{
 					Type:               ntnv1alpha1.ConditionFirmwareUpToDate,
@@ -582,6 +584,9 @@ func (r *GroundStationLifecycleReconciler) SetupWithManager(mgr ctrl.Manager) er
 }
 
 // nodeToGroundStation maps a Node change to the GroundStationLifecycle it belongs to.
+// For short names, the label is "<namespace>.<name>" and can be parsed directly.
+// For long names (hashed labels), the mapper lists GS CRs in the parsed namespace
+// and matches by recomputing groundStationLabelValue.
 func (r *GroundStationLifecycleReconciler) nodeToGroundStation(
 	ctx context.Context, obj client.Object,
 ) []ctrl.Request {
@@ -593,14 +598,66 @@ func (r *GroundStationLifecycleReconciler) nodeToGroundStation(
 	if !found {
 		return nil
 	}
-	// Label format: "<namespace>.<name>". Parse directly.
 	parts := strings.SplitN(labelValue, ".", 2)
 	if len(parts) != 2 {
-		return nil // invalid label format
+		return nil // invalid label format (or hash-only fallback)
 	}
 	gsNamespace, gsName := parts[0], parts[1]
 
-	return []ctrl.Request{{
-		NamespacedName: client.ObjectKey{Namespace: gsNamespace, Name: gsName},
-	}}
+	// Fast path: try direct Get with the parsed name.
+	key := client.ObjectKey{Namespace: gsNamespace, Name: gsName}
+	var gs ntnv1alpha1.GroundStationLifecycle
+	if err := r.Get(ctx, key, &gs); err == nil {
+		// Verify the label matches to avoid false hits (e.g., a real GS
+		// name that coincides with a truncated+hashed value).
+		if groundStationLabelValue(gs.Namespace, gs.Name) == labelValue {
+			return []ctrl.Request{{NamespacedName: key}}
+		}
+	} else if !apierrors.IsNotFound(err) {
+		// Transient error — still enqueue parsed key so the event isn't
+		// lost (mapper funcs aren't retried; reconcile will handle it).
+		log := logf.FromContext(ctx)
+		log.Error(err, "transient error in node mapper Get, enqueuing best-guess", "key", key)
+		return []ctrl.Request{{NamespacedName: key}}
+	}
+
+	// Slow path: NotFound — label is likely hashed.
+	// List GS CRs in parsed namespace and match by recomputing label value.
+	log := logf.FromContext(ctx)
+	var gsList ntnv1alpha1.GroundStationLifecycleList
+	if err := r.List(ctx, &gsList, client.InNamespace(gsNamespace)); err != nil {
+		log.Error(err, "failed to list GroundStations for node mapper, enqueuing best-guess")
+		return []ctrl.Request{{NamespacedName: key}}
+	}
+	var requests []ctrl.Request
+	for _, gs := range gsList.Items {
+		if groundStationLabelValue(gs.Namespace, gs.Name) == labelValue {
+			requests = append(requests, ctrl.Request{
+				NamespacedName: client.ObjectKey{
+					Namespace: gs.Namespace, Name: gs.Name,
+				},
+			})
+		}
+	}
+	// If namespace was truncated (label near max length with hash suffix),
+	// the parsed namespace won't match any real namespace.
+	// Only do expensive cluster-wide search for labels that look truncated.
+	looksLikeTruncatedNs := len(requests) == 0 && len(labelValue) >= maxLabelValueLen-2
+	if looksLikeTruncatedNs {
+		var allGS ntnv1alpha1.GroundStationLifecycleList
+		if err := r.List(ctx, &allGS); err != nil {
+			log.Error(err, "cluster-wide GS list failed, enqueuing best-guess")
+			return []ctrl.Request{{NamespacedName: key}}
+		}
+		for _, gs := range allGS.Items {
+			if groundStationLabelValue(gs.Namespace, gs.Name) == labelValue {
+				requests = append(requests, ctrl.Request{
+					NamespacedName: client.ObjectKey{
+						Namespace: gs.Namespace, Name: gs.Name,
+					},
+				})
+			}
+		}
+	}
+	return requests
 }

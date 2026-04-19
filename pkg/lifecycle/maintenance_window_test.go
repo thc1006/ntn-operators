@@ -17,6 +17,7 @@ limitations under the License.
 package lifecycle
 
 import (
+	"context"
 	"testing"
 	"time"
 )
@@ -118,5 +119,20 @@ func TestIsWithinMaintenanceWindow(t *testing.T) {
 					tc.window, tc.now, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestIsWithinMaintenanceWindowWithContext_MatchesLegacyBehavior(t *testing.T) {
+	now := utc(3, 0)
+	want, err := IsWithinMaintenanceWindow("02:00-04:00 UTC", now)
+	if err != nil {
+		t.Fatalf("legacy function returned error: %v", err)
+	}
+	got, err := IsWithinMaintenanceWindowWithContext(context.Background(), "02:00-04:00 UTC", now)
+	if err != nil {
+		t.Fatalf("context function returned error: %v", err)
+	}
+	if got != want {
+		t.Fatalf("mismatch: got %v want %v", got, want)
 	}
 }

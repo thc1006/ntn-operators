@@ -17,9 +17,12 @@ limitations under the License.
 package lifecycle
 
 import (
+	"context"
 	"fmt"
 	"regexp"
 	"time"
+
+	"github.com/go-logr/logr"
 )
 
 var maintenanceWindowRE = regexp.MustCompile(`^(\d{2}:\d{2})-(\d{2}:\d{2})\s+UTC$`)
@@ -31,7 +34,21 @@ var maintenanceWindowRE = regexp.MustCompile(`^(\d{2}:\d{2})-(\d{2}:\d{2})\s+UTC
 // returns (false, nil) so callers can decide to proceed unconditionally.
 // A window where start == end (e.g., "00:00-00:00 UTC") is treated as invalid.
 func IsWithinMaintenanceWindow(window string, now time.Time) (bool, error) {
+	return IsWithinMaintenanceWindowWithContext(context.Background(), window, now)
+}
+
+// IsWithinMaintenanceWindowWithContext is the context-aware variant of
+// IsWithinMaintenanceWindow. It emits structured package-level logs.
+func IsWithinMaintenanceWindowWithContext(
+	ctx context.Context,
+	window string,
+	now time.Time,
+) (bool, error) {
+	log := logr.FromContextOrDiscard(ctx)
+	log.V(2).Info("evaluate maintenance window", "window", window, "nowUTC", now.UTC().Format(time.RFC3339))
+
 	if window == "" {
+		log.V(1).Info("maintenance window not configured")
 		return false, nil
 	}
 
@@ -58,10 +75,24 @@ func IsWithinMaintenanceWindow(window string, now time.Time) (bool, error) {
 
 	if startHM < endHM {
 		// Normal window: e.g., "02:00-04:00 UTC"
-		return nowMinutes >= startHM && nowMinutes < endHM, nil
+		inWindow := nowMinutes >= startHM && nowMinutes < endHM
+		log.V(1).Info("maintenance window evaluated",
+			"inWindow", inWindow,
+			"startMinutes", startHM,
+			"endMinutes", endHM,
+			"nowMinutes", nowMinutes,
+		)
+		return inWindow, nil
 	}
 	// Midnight wraparound: e.g., "23:00-02:00 UTC"
-	return nowMinutes >= startHM || nowMinutes < endHM, nil
+	inWindow := nowMinutes >= startHM || nowMinutes < endHM
+	log.V(1).Info("maintenance window evaluated (wraparound)",
+		"inWindow", inWindow,
+		"startMinutes", startHM,
+		"endMinutes", endHM,
+		"nowMinutes", nowMinutes,
+	)
+	return inWindow, nil
 }
 
 // parseHHMM parses "HH:MM" into minutes since midnight.

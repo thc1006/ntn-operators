@@ -585,18 +585,37 @@ var _ = Describe("GroundStationLifecycle Controller", func() {
 	// --- nodeToGroundStation mapper tests ---
 
 	Context("nodeToGroundStation mapper", func() {
-		It("should map labeled node to ground station request", func() {
+		It("should map labeled node to existing ground station", func() {
+			// Create a real GS so Get succeeds.
+			gs := &ntnv1alpha1.GroundStationLifecycle{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "gs-mapper-test", Namespace: namespace,
+				},
+				Spec: ntnv1alpha1.GroundStationLifecycleSpec{
+					Deployment: ntnv1alpha1.DeploymentSpec{
+						Location: ntnv1alpha1.GeoLocation{Lat: "0", Lon: "0"},
+					},
+					Hardware: ntnv1alpha1.HardwareSpec{
+						Vendor: "test", Model: "test",
+					},
+				},
+			}
+			Expect(k8sClient.Create(context.Background(), gs)).To(Succeed())
+			DeferCleanup(func() {
+				Expect(k8sClient.Delete(context.Background(), gs)).To(Succeed())
+			})
+
 			reconciler := &GroundStationLifecycleReconciler{Client: k8sClient}
 			node := &corev1.Node{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:   "edge-node-1",
-					Labels: map[string]string{groundStationLabel: "default.gs-test"},
+					Labels: map[string]string{groundStationLabel: namespace + ".gs-mapper-test"},
 				},
 			}
 			requests := reconciler.nodeToGroundStation(context.Background(), node)
 			Expect(requests).To(HaveLen(1))
-			Expect(requests[0].Name).To(Equal("gs-test"))
-			Expect(requests[0].Namespace).To(Equal("default"))
+			Expect(requests[0].Name).To(Equal("gs-mapper-test"))
+			Expect(requests[0].Namespace).To(Equal(namespace))
 		})
 
 		It("should return nil for node without label", func() {
@@ -618,6 +637,40 @@ var _ = Describe("GroundStationLifecycle Controller", func() {
 			}
 			requests := reconciler.nodeToGroundStation(context.Background(), node)
 			Expect(requests).To(BeEmpty())
+		})
+
+		It("should resolve hashed label by listing GS CRs in namespace", func() {
+			// Create a GS with a long name that triggers label hashing.
+			longName := "gs-" + strings.Repeat("x", 55)
+			gs := &ntnv1alpha1.GroundStationLifecycle{
+				ObjectMeta: metav1.ObjectMeta{Name: longName, Namespace: namespace},
+				Spec: ntnv1alpha1.GroundStationLifecycleSpec{
+					Deployment: ntnv1alpha1.DeploymentSpec{
+						Location: ntnv1alpha1.GeoLocation{Lat: "0", Lon: "0"},
+					},
+					Hardware: ntnv1alpha1.HardwareSpec{
+						Vendor: "test", Model: "test",
+					},
+				},
+			}
+			Expect(k8sClient.Create(context.Background(), gs)).To(Succeed())
+			DeferCleanup(func() {
+				Expect(k8sClient.Delete(context.Background(), gs)).To(Succeed())
+			})
+
+			// Simulate a Node with the hashed label.
+			hashedLabel := groundStationLabelValue(namespace, longName)
+			reconciler := &GroundStationLifecycleReconciler{Client: k8sClient}
+			node := &corev1.Node{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:   "edge-node-hashed",
+					Labels: map[string]string{groundStationLabel: hashedLabel},
+				},
+			}
+			requests := reconciler.nodeToGroundStation(context.Background(), node)
+			Expect(requests).To(HaveLen(1))
+			Expect(requests[0].Name).To(Equal(longName))
+			Expect(requests[0].Namespace).To(Equal(namespace))
 		})
 	})
 
@@ -655,14 +708,16 @@ var _ = Describe("GroundStationLifecycle Controller", func() {
 			Expect(hexSuffix).To(MatchRegexp("^[0-9a-f]{8}$"))
 		})
 
-		It("should fall back to pure hash for extremely long namespace", func() {
+		It("should truncate namespace for extremely long namespace but keep dot", func() {
 			// Namespace so long that prefix (ns + ".") >= 55 chars → remaining < 1
 			ns := strings.Repeat("n", 58)
 			name := strings.Repeat("g", 10) // total = 58 + 1 + 10 = 69 > 63
 			val := groundStationLabelValue(ns, name)
 			Expect(len(val)).To(BeNumerically("<=", 63))
-			// Pure hash — 16 hex chars, no dot separator.
-			Expect(val).To(HaveLen(16))
+			// Must always contain a dot for nodeToGroundStation parsing.
+			Expect(strings.Contains(val, ".")).To(BeTrue())
+			// Namespace is truncated but present.
+			Expect(strings.HasPrefix(val, "nnn")).To(BeTrue())
 		})
 	})
 })

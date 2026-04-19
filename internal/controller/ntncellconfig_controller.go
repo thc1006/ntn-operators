@@ -73,45 +73,8 @@ func (r *NTNCellConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	}
 
 	// Step 2: Handle finalizer for ConfigMap cleanup on deletion.
-	finalizerName := "ntn.operators.dev/configmap-cleanup"
-	if cc.DeletionTimestamp != nil {
-		if controllerutil.ContainsFinalizer(cc, finalizerName) {
-			// Delete the ConfigMap.
-			cm := &corev1.ConfigMap{}
-			cmKey := client.ObjectKey{
-				Namespace: cc.Namespace,
-				Name:      ocudu.ConfigMapNameFor(cc.Name),
-			}
-			if err := r.Get(ctx, cmKey, cm); err != nil {
-				if client.IgnoreNotFound(err) != nil {
-					// Transient error (not NotFound) — requeue to retry.
-					log.Error(err, "Failed to get ConfigMap during finalization")
-					return ctrl.Result{}, err
-				}
-				// NotFound — ConfigMap already gone, proceed to remove finalizer.
-			} else {
-				if err := r.Delete(ctx, cm); client.IgnoreNotFound(err) != nil {
-					log.Error(err, "Failed to delete ConfigMap during finalization")
-					return ctrl.Result{}, err
-				}
-				log.Info("Deleted ConfigMap during finalization", "configmap", cmKey)
-			}
-			controllerutil.RemoveFinalizer(cc, finalizerName)
-			if err := r.Update(ctx, cc); err != nil {
-				return ctrl.Result{}, err
-			}
-		}
-		return ctrl.Result{}, nil
-	}
-
-	// Add finalizer if not present, then requeue to reconcile with latest resourceVersion.
-	if !controllerutil.ContainsFinalizer(cc, finalizerName) {
-		controllerutil.AddFinalizer(cc, finalizerName)
-		if err := r.Update(ctx, cc); err != nil {
-			return ctrl.Result{}, err
-		}
-		log.V(1).Info("finalizer added, requeueing")
-		return ctrl.Result{RequeueAfter: time.Second}, nil
+	if done, result, err := r.handleFinalizer(ctx, cc); done {
+		return result, err
 	}
 
 	// Step 3: Guard against nil provider.
@@ -239,6 +202,53 @@ func (r *NTNCellConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 
 	log.Info("NTN cell configuration applied successfully")
 	return ctrl.Result{RequeueAfter: 5 * time.Minute}, nil
+}
+
+// handleFinalizer manages ConfigMap cleanup on NTNCellConfig deletion.
+// Returns (done, result, error). If done is true, the caller should return.
+func (r *NTNCellConfigReconciler) handleFinalizer(
+	ctx context.Context, cc *ntnv1alpha1.NTNCellConfig,
+) (bool, ctrl.Result, error) {
+	log := logf.FromContext(ctx)
+	finalizerName := "ntn.operators.dev/configmap-cleanup"
+
+	if cc.DeletionTimestamp != nil {
+		if controllerutil.ContainsFinalizer(cc, finalizerName) {
+			cm := &corev1.ConfigMap{}
+			cmKey := client.ObjectKey{
+				Namespace: cc.Namespace,
+				Name:      ocudu.ConfigMapNameFor(cc.Name),
+			}
+			if err := r.Get(ctx, cmKey, cm); err != nil {
+				if client.IgnoreNotFound(err) != nil {
+					log.Error(err, "Failed to get ConfigMap during finalization")
+					return true, ctrl.Result{}, err
+				}
+			} else {
+				if err := r.Delete(ctx, cm); client.IgnoreNotFound(err) != nil {
+					log.Error(err, "Failed to delete ConfigMap during finalization")
+					return true, ctrl.Result{}, err
+				}
+				log.Info("Deleted ConfigMap during finalization", "configmap", cmKey)
+			}
+			controllerutil.RemoveFinalizer(cc, finalizerName)
+			if err := r.Update(ctx, cc); err != nil {
+				return true, ctrl.Result{}, err
+			}
+		}
+		return true, ctrl.Result{}, nil
+	}
+
+	if !controllerutil.ContainsFinalizer(cc, finalizerName) {
+		controllerutil.AddFinalizer(cc, finalizerName)
+		if err := r.Update(ctx, cc); err != nil {
+			return true, ctrl.Result{}, err
+		}
+		log.V(1).Info("finalizer added, requeueing")
+		return true, ctrl.Result{RequeueAfter: time.Second}, nil
+	}
+
+	return false, ctrl.Result{}, nil
 }
 
 // SetupWithManager sets up the controller with the Manager.
