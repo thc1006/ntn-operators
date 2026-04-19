@@ -434,6 +434,169 @@ var _ = Describe("NTNCellConfig Controller", func() {
 		})
 	})
 
+	Context("When reconciling with ephemerisRef configured", func() {
+		const (
+			cellName = "test-eph-push-cell"
+			ephName  = "test-eph-push-source"
+		)
+		cellNN := types.NamespacedName{Name: cellName, Namespace: namespace}
+		ephNN := types.NamespacedName{Name: ephName, Namespace: namespace}
+
+		createReferencedEphemeris := func() {
+			eph := &ntnv1alpha1.SatelliteEphemeris{
+				ObjectMeta: metav1.ObjectMeta{Name: ephName, Namespace: namespace},
+				Spec: ntnv1alpha1.SatelliteEphemerisSpec{
+					Source: ntnv1alpha1.EphemerisSource{
+						Type:            "CelesTrak",
+						URL:             "https://celestrak.org/NORAD/elements/gp.php?GROUP=oneweb&FORMAT=JSON",
+						RefreshInterval: metav1.Duration{Duration: 4 * time.Hour},
+					},
+				},
+			}
+			Expect(k8sClient.Create(context.Background(), eph)).To(Succeed())
+		}
+
+		createCellConfig := func() {
+			cr := &ntnv1alpha1.NTNCellConfig{
+				ObjectMeta: metav1.ObjectMeta{Name: cellName, Namespace: namespace},
+				Spec: ntnv1alpha1.NTNCellConfigSpec{
+					Provider: ntnv1alpha1.ProviderRef{Type: "ocudu", Namespace: namespace},
+					NTN: ntnv1alpha1.NTNParams{
+						CellSpecificKoffset: 150,
+						EphemerisECEF: &ntnv1alpha1.EphemerisECEF{
+							PosX: 20922195, PosY: 1967783, PosZ: 19770302,
+						},
+						PayloadType: "transparent",
+					},
+					EphemerisRef: ephName,
+				},
+			}
+			Expect(k8sClient.Create(context.Background(), cr)).To(Succeed())
+		}
+
+		AfterEach(func() {
+			deleteCellConfig(cellNN)
+			eph := &ntnv1alpha1.SatelliteEphemeris{}
+			err := k8sClient.Get(context.Background(), ephNN, eph)
+			if apierrors.IsNotFound(err) {
+				return
+			}
+			Expect(err).NotTo(HaveOccurred())
+
+			err = k8sClient.Delete(context.Background(), eph)
+			if apierrors.IsNotFound(err) {
+				return
+			}
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		It("should invoke PushEphemerisUpdate on provider", func() {
+			createReferencedEphemeris()
+			createCellConfig()
+
+			mock := &provider.MockProvider{}
+			reconciler := newReconciler(mock)
+
+			result, err := reconciler.Reconcile(context.Background(), reconcile.Request{NamespacedName: cellNN})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(Equal(time.Second))
+
+			result, err = reconciler.Reconcile(context.Background(), reconcile.Request{NamespacedName: cellNN})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(Equal(5 * time.Minute))
+
+			Expect(mock.ApplyCalls).To(Equal(1))
+			Expect(mock.EphemerisCalls).To(Equal(1))
+			Expect(mock.LastEphemeris).NotTo(BeNil())
+			Expect(mock.LastEphemeris.ECEF).NotTo(BeNil())
+			Expect(mock.LastEphemeris.ECEF.PosX).To(Equal(20922195))
+
+			updated := &ntnv1alpha1.NTNCellConfig{}
+			Expect(k8sClient.Get(context.Background(), cellNN, updated)).To(Succeed())
+			ephCond := meta.FindStatusCondition(updated.Status.Conditions, ntnv1alpha1.ConditionEphemerisPushed)
+			Expect(ephCond).NotTo(BeNil())
+			Expect(ephCond.Status).To(Equal(metav1.ConditionTrue))
+			Expect(ephCond.Reason).To(Equal("Pushed"))
+
+			// Metadata-only updates can bump resourceVersion without changing ephemeris data.
+			// Ensure dedupe does not treat this as a new ephemeris revision.
+			eph := &ntnv1alpha1.SatelliteEphemeris{}
+			Expect(k8sClient.Get(context.Background(), ephNN, eph)).To(Succeed())
+			if eph.Annotations == nil {
+				eph.Annotations = map[string]string{}
+			}
+			eph.Annotations["review/test-rv-bump"] = "true"
+			Expect(k8sClient.Update(context.Background(), eph)).To(Succeed())
+
+			// Third reconcile should not re-push when generation + lastUpdated marker is unchanged.
+			result, err = reconciler.Reconcile(context.Background(), reconcile.Request{NamespacedName: cellNN})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(Equal(5 * time.Minute))
+			Expect(mock.EphemerisCalls).To(Equal(1))
+		})
+
+		It("should keep ConfigApplied true and set EphemerisPushed=false when push fails", func() {
+			createReferencedEphemeris()
+			createCellConfig()
+
+			mock := &provider.MockProvider{EphemerisErr: errors.New("runtime push failed")}
+			reconciler := newReconciler(mock)
+
+			result, err := reconciler.Reconcile(context.Background(), reconcile.Request{NamespacedName: cellNN})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(Equal(time.Second))
+
+			result, err = reconciler.Reconcile(context.Background(), reconcile.Request{NamespacedName: cellNN})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(Equal(time.Minute))
+
+			Expect(mock.ApplyCalls).To(Equal(1))
+			Expect(mock.StatusCalls).To(Equal(1))
+			Expect(mock.EphemerisCalls).To(Equal(1))
+
+			updated := &ntnv1alpha1.NTNCellConfig{}
+			Expect(k8sClient.Get(context.Background(), cellNN, updated)).To(Succeed())
+
+			appliedCond := meta.FindStatusCondition(updated.Status.Conditions, ntnv1alpha1.ConditionConfigApplied)
+			Expect(appliedCond).NotTo(BeNil())
+			Expect(appliedCond.Status).To(Equal(metav1.ConditionTrue))
+			Expect(appliedCond.Reason).To(Equal("Applied"))
+
+			ephCond := meta.FindStatusCondition(updated.Status.Conditions, ntnv1alpha1.ConditionEphemerisPushed)
+			Expect(ephCond).NotTo(BeNil())
+			Expect(ephCond.Status).To(Equal(metav1.ConditionFalse))
+			Expect(ephCond.Reason).To(Equal("ProviderPushFailed"))
+			Expect(ephCond.Message).To(ContainSubstring("runtime push failed"))
+		})
+
+		It("should avoid tight requeue when ephemerisRef does not exist", func() {
+			createCellConfig()
+
+			mock := &provider.MockProvider{}
+			reconciler := newReconciler(mock)
+
+			result, err := reconciler.Reconcile(context.Background(), reconcile.Request{NamespacedName: cellNN})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(Equal(time.Second))
+
+			result, err = reconciler.Reconcile(context.Background(), reconcile.Request{NamespacedName: cellNN})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(BeZero())
+
+			Expect(mock.ApplyCalls).To(Equal(1))
+			Expect(mock.StatusCalls).To(Equal(1))
+			Expect(mock.EphemerisCalls).To(Equal(0))
+
+			updated := &ntnv1alpha1.NTNCellConfig{}
+			Expect(k8sClient.Get(context.Background(), cellNN, updated)).To(Succeed())
+			ephCond := meta.FindStatusCondition(updated.Status.Conditions, ntnv1alpha1.ConditionEphemerisPushed)
+			Expect(ephCond).NotTo(BeNil())
+			Expect(ephCond.Status).To(Equal(metav1.ConditionFalse))
+			Expect(ephCond.Reason).To(Equal("EphemerisRefNotFound"))
+			Expect(ephCond.Message).To(ContainSubstring(`referenced SatelliteEphemeris "test-eph-push-source"`))
+		})
+	})
+
 	Context("ephemerisToNTNCellConfig mapper", func() {
 		const (
 			ccWithRef    = "cc-with-ref"

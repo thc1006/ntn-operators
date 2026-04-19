@@ -18,9 +18,11 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -48,6 +50,64 @@ type NTNCellConfigReconciler struct {
 	Scheme   *runtime.Scheme
 	Recorder events.EventRecorder
 	Provider provider.NTNProvider
+}
+
+const (
+	ephemerisReasonPushFailed         = "PushFailed"
+	ephemerisReasonRefNotFound        = "EphemerisRefNotFound"
+	ephemerisReasonGetFailed          = "EphemerisGetFailed"
+	ephemerisReasonPayloadMissing     = "EphemerisPayloadMissing"
+	ephemerisReasonProviderPushFailed = "ProviderPushFailed"
+)
+
+type ephemerisPushError struct {
+	reason string
+	err    error
+}
+
+func (e *ephemerisPushError) Error() string {
+	if e == nil || e.err == nil {
+		return ""
+	}
+	return e.err.Error()
+}
+
+func (e *ephemerisPushError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.err
+}
+
+func newEphemerisPushError(reason string, err error) error {
+	if err == nil {
+		return nil
+	}
+	return &ephemerisPushError{reason: reason, err: err}
+}
+
+func ephemerisPushConditionReason(err error) string {
+	var pushErr *ephemerisPushError
+	if errors.As(err, &pushErr) && pushErr.reason != "" {
+		return pushErr.reason
+	}
+	return ephemerisReasonPushFailed
+}
+
+func ephemerisPushConditionChanged(
+	prev *metav1.Condition,
+	reason, message string,
+	generation int64,
+) bool {
+	return prev == nil ||
+		prev.Status != metav1.ConditionFalse ||
+		prev.Reason != reason ||
+		prev.Message != message ||
+		prev.ObservedGeneration != generation
+}
+
+func ephemerisPushShouldRequeue(reason string) bool {
+	return reason != ephemerisReasonRefNotFound
 }
 
 // +kubebuilder:rbac:groups=ntn.operators.dev,resources=ntncellconfigs,verbs=get;list;watch;create;update;patch;delete
@@ -191,6 +251,49 @@ func (r *NTNCellConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		ObservedGeneration: cc.Generation,
 	})
 
+	// Step 8: Push runtime ephemeris update if ephemerisRef is configured.
+	// Keep ConfigApplied semantics independent from ephemeris push status.
+	if cc.Spec.EphemerisRef == "" {
+		meta.RemoveStatusCondition(&cc.Status.Conditions, ntnv1alpha1.ConditionEphemerisPushed)
+	} else {
+		pushed, marker, err := r.pushEphemerisUpdateIfNeeded(ctx, cc, spec)
+		if err != nil {
+			pushErr := err
+			log.Error(pushErr, "failed to push ephemeris update")
+			reason := ephemerisPushConditionReason(pushErr)
+			message := pushErr.Error()
+			prevEphemerisCondition := meta.FindStatusCondition(cc.Status.Conditions, ntnv1alpha1.ConditionEphemerisPushed)
+			conditionChanged := ephemerisPushConditionChanged(prevEphemerisCondition, reason, message, cc.Generation)
+
+			meta.SetStatusCondition(&cc.Status.Conditions, metav1.Condition{
+				Type:               ntnv1alpha1.ConditionEphemerisPushed,
+				Status:             metav1.ConditionFalse,
+				Reason:             reason,
+				Message:            message,
+				ObservedGeneration: cc.Generation,
+			})
+			if err := r.Status().Update(ctx, cc); err != nil {
+				return ctrl.Result{}, err
+			}
+			if conditionChanged && r.Recorder != nil {
+				r.Recorder.Eventf(cc, nil, "Warning", "EphemerisPushFailed", "EphemerisPushFailed", "%s", message)
+			}
+			if !ephemerisPushShouldRequeue(reason) {
+				return ctrl.Result{}, nil
+			}
+			return ctrl.Result{RequeueAfter: time.Minute}, nil
+		}
+		if pushed {
+			meta.SetStatusCondition(&cc.Status.Conditions, metav1.Condition{
+				Type:               ntnv1alpha1.ConditionEphemerisPushed,
+				Status:             metav1.ConditionTrue,
+				Reason:             "Pushed",
+				Message:            marker,
+				ObservedGeneration: cc.Generation,
+			})
+		}
+	}
+
 	if err := r.Status().Update(ctx, cc); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -249,6 +352,73 @@ func (r *NTNCellConfigReconciler) handleFinalizer(
 	}
 
 	return false, ctrl.Result{}, nil
+}
+
+func (r *NTNCellConfigReconciler) pushEphemerisUpdateIfNeeded(
+	ctx context.Context,
+	cc *ntnv1alpha1.NTNCellConfig,
+	spec *ntnv1alpha1.NTNCellConfigSpec,
+) (bool, string, error) {
+	if spec.EphemerisRef == "" {
+		return false, "", nil
+	}
+
+	eph := &ntnv1alpha1.SatelliteEphemeris{}
+	ephKey := client.ObjectKey{Namespace: cc.Namespace, Name: spec.EphemerisRef}
+	if err := r.Get(ctx, ephKey, eph); err != nil {
+		reason := ephemerisReasonGetFailed
+		if apierrors.IsNotFound(err) {
+			reason = ephemerisReasonRefNotFound
+		}
+		return false, "", newEphemerisPushError(
+			reason,
+			fmt.Errorf("getting referenced SatelliteEphemeris %q: %w", spec.EphemerisRef, err),
+		)
+	}
+	marker := ephemerisPushMarker(eph)
+	if isEphemerisPushUpToDate(cc, marker) {
+		return false, marker, nil
+	}
+
+	update := provider.EphemerisUpdate{}
+	switch {
+	case spec.NTN.EphemerisOrbital != nil:
+		update.Orbital = spec.NTN.EphemerisOrbital.DeepCopy()
+	case spec.NTN.EphemerisECEF != nil:
+		update.ECEF = spec.NTN.EphemerisECEF.DeepCopy()
+	default:
+		return false, marker, newEphemerisPushError(
+			ephemerisReasonPayloadMissing,
+			fmt.Errorf("ephemeris payload missing in NTNCellConfig spec"),
+		)
+	}
+
+	if err := r.Provider.PushEphemerisUpdate(ctx, cc.Name, spec.Provider.Namespace, update); err != nil {
+		return false, marker, newEphemerisPushError(
+			ephemerisReasonProviderPushFailed,
+			fmt.Errorf("provider PushEphemerisUpdate: %w", err),
+		)
+	}
+
+	return true, marker, nil
+}
+
+func isEphemerisPushUpToDate(cc *ntnv1alpha1.NTNCellConfig, marker string) bool {
+	cond := meta.FindStatusCondition(cc.Status.Conditions, ntnv1alpha1.ConditionEphemerisPushed)
+	if cond == nil {
+		return false
+	}
+	return cond.Status == metav1.ConditionTrue &&
+		cond.ObservedGeneration == cc.Generation &&
+		cond.Message == marker
+}
+
+func ephemerisPushMarker(eph *ntnv1alpha1.SatelliteEphemeris) string {
+	lastUpdated := "none"
+	if eph.Status.LastUpdated != nil {
+		lastUpdated = eph.Status.LastUpdated.UTC().Format(time.RFC3339Nano)
+	}
+	return fmt.Sprintf("ephemerisRef=%s generation=%d lastUpdated=%s", eph.Name, eph.Generation, lastUpdated)
 }
 
 // SetupWithManager sets up the controller with the Manager.
