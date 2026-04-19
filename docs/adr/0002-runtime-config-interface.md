@@ -11,8 +11,8 @@
 
 Today the OCUDU provider in this operator takes the following path to deliver NTN parameter updates to a running gNB:
 
-1. Reconciler resolves `NTNCellConfig.spec` into a YAML blob via `pkg/provider/ocudu/config.go:GenerateConfig`.
-2. Provider writes the blob to a ConfigMap (`pkg/provider/ocudu/provider.go:ApplyCellConfig`).
+1. Reconciler calls `Provider.ApplyCellConfig` for the `NTNCellConfig`.
+2. Inside the OCUDU provider, `ApplyCellConfig` resolves `NTNCellConfig.spec` into a YAML blob via `pkg/provider/ocudu/config.go:GenerateConfig`, then writes that blob to a ConfigMap (`pkg/provider/ocudu/provider.go:ApplyCellConfig`).
 3. On a new ephemeris push, provider **string-replaces** the `ephemeris_info_ecef:` / `ephemeris_orbital:` block in place (`pkg/provider/ocudu/provider.go:replaceEphemeris`, 60+ lines of regex-adjacent string munging).
 4. The gNB is assumed to reload the config (typically on restart).
 
@@ -20,9 +20,9 @@ This was reasonable when it was our only option. A 2026-04-19 upstream survey ha
 
 ### 2026-04-19 fact pattern
 
-1. **OCUDU has a runtime NTN update interface** — `ocudu_ntn::ntn_configuration_manager::handle_ntn_config_update()` declared in `include/ocudu/ntn/ntn_configuration_manager.h`. The struct `ntn_cell_config_update_info` explicitly names itself *"NTN Config update message to be received over a websocket interface"*.
+1. **OCUDU has a runtime NTN update interface** — `ocudu_ntn::ntn_configuration_manager::handle_ntn_config_update()` declared in `include/ocudu/ntn/ntn_configuration_manager.h`. The struct `ntn_cell_config_update_info` explicitly names itself *"NTN Config update message to be received over a websocket interface"*. Any in-tree commentary that says `handle_ntn_param_update` is stale naming.
 2. **MR !411 (merged 2026-02-27)** added SIB19 value-tag-tracked fields — including `ncells`, `moving_ref_location`, `sat_switch_with_resync` — into `ntn_cell_config_update_info`. Runtime reconfig is the upstream-blessed path, not YAML.
-3. **OCUDU YAML CLI11 schema does not parse `ntn.ncells`** — the field exists in the struct but has no CLI11 subcommand (confirmed via grep over `du_high_ntn_config_cli11_schema.cpp`). Our current ConfigMap output for `neighborCells:` is accepted by the YAML reader but lands in a field no one populates from config — the value stays empty inside the gNB.
+3. **OCUDU YAML CLI11 schema does not parse `ntn.ncells`** — the field exists in the struct but has no CLI11 subcommand (confirmed via grep over `du_high_ntn_config_cli11_schema.cpp`). Our current ConfigMap output for `ntn.ncells:` (rendered from CRD field `spec.ntn.neighborCells`) is accepted by the YAML reader but lands in a field no one populates from config — the value stays empty inside the gNB.
 4. **Remote control WebSocket service exists today** — `apps/services/remote_control/` (per OCUDU Issue #310 §"Current State") exposes `ssb_set` + `rrm_policy_ratio_set` as non-disruptive operations. NTN update is the obvious next addition; MR !411 is the data-model step.
 5. **Our existing `replaceEphemeris` is a workaround** — it edits YAML that the gNB must then *voluntarily reload*. In practice that means process restart. UE sessions drop. Not production-viable.
 6. **OCUDU Issue #310 is an open design conversation** calling for a *"Cell Configuration Reconciler"* with per-cell non-disruptive updates — exactly the capability this ADR unlocks.
@@ -80,7 +80,7 @@ Delete the ConfigMap path; every `NTNCellConfig` change opens a WS connection to
 2. **Define a `RuntimeUpdate` interface** in `pkg/provider` with one method `PushRuntimeUpdate(ctx, cr, update)`; generalise `EphemerisUpdate` to `RuntimeUpdate{Ephemeris, Polarization, TAInfo, NeighborCells, ...}` mirroring `ntn_cell_config_update_info`.
 3. **Implement `pkg/provider/ocudu/wsclient.go`**:
    - Gorilla WebSocket client with connection pool keyed by `(namespace, endpoint)`.
-   - Send framing: JSON-encoded `ntn_config_update_info` (field names must match OCUDU's Boost.PropertyTree layout; see §Risks).
+   - Send framing: JSON-encoded `ntn_cell_config_update_info` (field names must match OCUDU's Boost.PropertyTree layout; see §Risks).
    - Wait for `ntn_config_update_result` response, correlate by cell NCGI.
    - On WS failure: degrade to ConfigMap path and surface `Condition{Type=RuntimeUpdateDegraded, Status=True}`.
 4. **Add `ProviderRef.RemoteControl { endpoint, authSecretRef }`** (optional). If unset, provider stays on ConfigMap path exclusively.
@@ -88,7 +88,7 @@ Delete the ConfigMap path; every `NTNCellConfig` change opens a WS connection to
 
 **Explicitly out of scope for the first PR** (separate issues):
 
-- Mutual TLS / token rotation for WS auth — start with plaintext or bearer token referenced via Secret; raise the bar later.
+- Mutual TLS / token rotation for WS auth — secure transport (`wss`/TLS) is required for production WS remote-control. If plaintext WS exists at all, it is strictly for local dev/test and not supported for production deployments.
 - Multi-gNB fan-out — single gNB per `NTNCellConfig` for now.
 - Bootstrap-via-WS — we keep first-boot on ConfigMap indefinitely.
 - Retiring ConfigMap entirely — not considered.
@@ -122,7 +122,7 @@ Delete the ConfigMap path; every `NTNCellConfig` change opens a WS connection to
 
 ## Open Questions
 
-1. **WS auth model.** Does OCUDU require bearer tokens, mTLS, or anything yet? `apps/services/remote_control/` Boost.Beast server may accept plaintext WS today. Needs clarification before adoption in regulated deployments.
+1. **WS auth model.** Does OCUDU require bearer tokens, mTLS, or anything yet? Clarify current expectations in `apps/services/remote_control/`; regardless, production deployments in this ADR require `wss`/TLS.
 2. **Message schema stability.** MR !411 defines the C++ struct; the over-the-wire JSON layout depends on Boost.PropertyTree conventions. If it's fragile to field renames, we need a versioning handshake.
 3. **Fallback policy when WS is down.** Degrade silently to ConfigMap (risk: UE drop on restart) OR surface as `Condition{Ready=False}` and block reconcile (risk: stale config pushed never reaches gNB)? Probably the former with a prominent metric.
 
