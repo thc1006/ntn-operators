@@ -65,20 +65,22 @@ var _ = Describe("NTNCellConfig Controller", func() {
 		Expect(k8sClient.Create(context.Background(), cr)).To(Succeed())
 	}
 
-	deleteCR := func() {
+	// deleteCellConfig deletes an NTNCellConfig by NamespacedName, removing finalizers first.
+	deleteCellConfig := func(nn types.NamespacedName) {
 		cr := &ntnv1alpha1.NTNCellConfig{}
-		err := k8sClient.Get(context.Background(), typeNamespacedName, cr)
+		err := k8sClient.Get(context.Background(), nn, cr)
 		if apierrors.IsNotFound(err) {
 			return
 		}
 		Expect(err).NotTo(HaveOccurred())
-		// Remove finalizer if present (otherwise CR stays in Terminating).
 		if controllerutil.ContainsFinalizer(cr, "ntn.operators.dev/configmap-cleanup") {
 			controllerutil.RemoveFinalizer(cr, "ntn.operators.dev/configmap-cleanup")
 			Expect(k8sClient.Update(context.Background(), cr)).To(Succeed())
 		}
 		Expect(k8sClient.Delete(context.Background(), cr)).To(Succeed())
 	}
+
+	deleteCR := func() { deleteCellConfig(typeNamespacedName) }
 
 	newReconciler := func(p provider.NTNProvider) *NTNCellConfigReconciler {
 		return &NTNCellConfigReconciler{
@@ -406,19 +408,7 @@ var _ = Describe("NTNCellConfig Controller", func() {
 		const cellWithRefName = "test-eph-ref-cell"
 		cellWithRefNN := types.NamespacedName{Name: cellWithRefName, Namespace: namespace}
 
-		AfterEach(func() {
-			cr := &ntnv1alpha1.NTNCellConfig{}
-			err := k8sClient.Get(context.Background(), cellWithRefNN, cr)
-			if apierrors.IsNotFound(err) {
-				return
-			}
-			Expect(err).NotTo(HaveOccurred())
-			if controllerutil.ContainsFinalizer(cr, "ntn.operators.dev/configmap-cleanup") {
-				controllerutil.RemoveFinalizer(cr, "ntn.operators.dev/configmap-cleanup")
-				Expect(k8sClient.Update(context.Background(), cr)).To(Succeed())
-			}
-			Expect(k8sClient.Delete(context.Background(), cr)).To(Succeed())
-		})
+		AfterEach(func() { deleteCellConfig(cellWithRefNN) })
 
 		It("should accept a CR with ephemerisRef set", func() {
 			cr := &ntnv1alpha1.NTNCellConfig{
@@ -488,18 +478,7 @@ var _ = Describe("NTNCellConfig Controller", func() {
 
 		AfterEach(func() {
 			for _, name := range []string{ccWithRef, ccWithoutRef} {
-				cr := &ntnv1alpha1.NTNCellConfig{}
-				nn := types.NamespacedName{Name: name, Namespace: namespace}
-				err := k8sClient.Get(context.Background(), nn, cr)
-				if apierrors.IsNotFound(err) {
-					continue
-				}
-				Expect(err).NotTo(HaveOccurred())
-				if controllerutil.ContainsFinalizer(cr, "ntn.operators.dev/configmap-cleanup") {
-					controllerutil.RemoveFinalizer(cr, "ntn.operators.dev/configmap-cleanup")
-					Expect(k8sClient.Update(context.Background(), cr)).To(Succeed())
-				}
-				Expect(k8sClient.Delete(context.Background(), cr)).To(Succeed())
+				deleteCellConfig(types.NamespacedName{Name: name, Namespace: namespace})
 			}
 		})
 
