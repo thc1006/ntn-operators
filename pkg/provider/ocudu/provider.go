@@ -181,7 +181,8 @@ func (p *Provider) PushEphemerisUpdate(
 		Namespace: namespace,
 	}
 	if err := p.client.Get(ctx, key, cm); err != nil {
-		return fmt.Errorf("reading ConfigMap: %w", err)
+		return fmt.Errorf("reading ConfigMap %s/%s: %w",
+			namespace, ConfigMapNameFor(crName), err)
 	}
 
 	yamlContent, ok := cm.Data["geo_ntn.yml"]
@@ -260,7 +261,7 @@ func replaceEphemeris(
 		if skip {
 			// Skip all lines more indented than the key (4+ spaces),
 			// including comments and blank lines within the block.
-			if strings.HasPrefix(line, "    ") {
+			if strings.HasPrefix(line, "    ") || trimmed == "" {
 				continue
 			}
 			skip = false
