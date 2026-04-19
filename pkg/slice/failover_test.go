@@ -463,60 +463,36 @@ func TestEvaluateWithHysteresis_MultipleTriggers_RequiresAllRecovered(t *testing
 	}
 }
 
-func TestEvaluateWithHysteresis_RSRPRecovery_BoundarySemantics(t *testing.T) {
-	t.Run("at recovery threshold stays", func(t *testing.T) {
-		// rsrp < -120, margin 10 → recovery at >= -110. At exactly -110: NOT recovered.
-		result := EvaluateFailoverWithHysteresis(
-			context.Background(),
-			PathSatellite, []string{"rsrp < -120"},
-			Metrics{RSRP: -110, LatencyMs: 20, PacketLossPercent: 0.1},
-			true, 60*time.Second, now.Add(-90*time.Second), now, 10,
-		)
-		if result.Decision != DecisionSwitchback {
-			t.Errorf("expected Switchback at exact boundary, got %s: %s",
-				result.Decision, result.Reason)
-		}
-	})
-
-	t.Run("past recovery threshold switches back", func(t *testing.T) {
-		result := EvaluateFailoverWithHysteresis(
-			context.Background(),
-			PathSatellite, []string{"rsrp < -120"},
-			Metrics{RSRP: -109, LatencyMs: 20, PacketLossPercent: 0.1},
-			true, 60*time.Second, now.Add(-90*time.Second), now, 10,
-		)
-		if result.Decision != DecisionSwitchback {
-			t.Errorf("expected Switchback past boundary, got %s: %s",
-				result.Decision, result.Reason)
-		}
-	})
-}
-
-func TestEvaluateWithHysteresis_LatencyRecovery_BoundarySemantics(t *testing.T) {
-	t.Run("at recovery threshold stays", func(t *testing.T) {
-		// latency > 200, margin 30 → recovery at <= 170. At exactly 170: recovered.
-		result := EvaluateFailoverWithHysteresis(
-			context.Background(),
-			PathSatellite, []string{"latency > 200"},
-			Metrics{RSRP: -90, LatencyMs: 170, PacketLossPercent: 0.1},
-			true, 60*time.Second, now.Add(-90*time.Second), now, 30,
-		)
-		if result.Decision != DecisionSwitchback {
-			t.Errorf("expected Switchback at exact boundary, got %s: %s",
-				result.Decision, result.Reason)
-		}
-	})
-
-	t.Run("past recovery threshold switches back", func(t *testing.T) {
-		result := EvaluateFailoverWithHysteresis(
-			context.Background(),
-			PathSatellite, []string{"latency > 200"},
-			Metrics{RSRP: -90, LatencyMs: 169, PacketLossPercent: 0.1},
-			true, 60*time.Second, now.Add(-90*time.Second), now, 30,
-		)
-		if result.Decision != DecisionSwitchback {
-			t.Errorf("expected Switchback past boundary, got %s: %s",
-				result.Decision, result.Reason)
-		}
-	})
+func TestEvaluateWithHysteresis_RecoveryBoundarySemantics(t *testing.T) {
+	tests := []struct {
+		name     string
+		trigger  string
+		metrics  Metrics
+		margin   float64
+		wantDec  Decision
+	}{
+		// rsrp < -120, margin 10 → recovery at >= -110
+		{"rsrp at boundary", "rsrp < -120",
+			Metrics{RSRP: -110, LatencyMs: 20, PacketLossPercent: 0.1}, 10, DecisionSwitchback},
+		{"rsrp past boundary", "rsrp < -120",
+			Metrics{RSRP: -109, LatencyMs: 20, PacketLossPercent: 0.1}, 10, DecisionSwitchback},
+		// latency > 200, margin 30 → recovery at <= 170
+		{"latency at boundary", "latency > 200",
+			Metrics{RSRP: -90, LatencyMs: 170, PacketLossPercent: 0.1}, 30, DecisionSwitchback},
+		{"latency past boundary", "latency > 200",
+			Metrics{RSRP: -90, LatencyMs: 169, PacketLossPercent: 0.1}, 30, DecisionSwitchback},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := EvaluateFailoverWithHysteresis(
+				context.Background(),
+				PathSatellite, []string{tt.trigger}, tt.metrics,
+				true, 60*time.Second, now.Add(-90*time.Second), now, tt.margin,
+			)
+			if result.Decision != tt.wantDec {
+				t.Errorf("expected %s, got %s: %s",
+					tt.wantDec, result.Decision, result.Reason)
+			}
+		})
+	}
 }
