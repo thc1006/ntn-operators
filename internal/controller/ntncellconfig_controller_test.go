@@ -565,7 +565,7 @@ var _ = Describe("NTNCellConfig Controller", func() {
 			ephCond := meta.FindStatusCondition(updated.Status.Conditions, ntnv1alpha1.ConditionEphemerisPushed)
 			Expect(ephCond).NotTo(BeNil())
 			Expect(ephCond.Status).To(Equal(metav1.ConditionFalse))
-			Expect(ephCond.Reason).To(Equal("PushFailed"))
+			Expect(ephCond.Reason).To(Equal("ProviderPushFailed"))
 			Expect(ephCond.Message).To(ContainSubstring("runtime push failed"))
 		})
 	})

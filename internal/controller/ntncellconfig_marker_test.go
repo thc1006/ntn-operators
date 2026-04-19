@@ -1,6 +1,24 @@
+/*
+Copyright 2026.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package controller
 
 import (
+	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -39,4 +57,20 @@ func TestEphemerisPushMarkerUsesGenerationAndLastUpdated(t *testing.T) {
 	if gotA, gotD := ephemerisPushMarker(ephA), ephemerisPushMarker(ephD); gotA == gotD {
 		t.Fatalf("marker should change when lastUpdated changes: %q == %q", gotA, gotD)
 	}
+}
+
+func TestEphemerisPushConditionReason(t *testing.T) {
+	t.Run("typed reason is preserved through wrapping", func(t *testing.T) {
+		typedErr := newEphemerisPushError(ephemerisReasonProviderPushFailed, errors.New("push failed"))
+		wrapped := fmt.Errorf("reconcile step failed: %w", typedErr)
+		if got := ephemerisPushConditionReason(wrapped); got != ephemerisReasonProviderPushFailed {
+			t.Fatalf("unexpected reason: got %q want %q", got, ephemerisReasonProviderPushFailed)
+		}
+	})
+
+	t.Run("fallback reason for untyped errors", func(t *testing.T) {
+		if got := ephemerisPushConditionReason(errors.New("plain error")); got != ephemerisReasonPushFailed {
+			t.Fatalf("unexpected fallback reason: got %q want %q", got, ephemerisReasonPushFailed)
+		}
+	})
 }

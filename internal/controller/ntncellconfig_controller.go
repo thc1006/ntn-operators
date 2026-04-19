@@ -18,9 +18,11 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -48,6 +50,48 @@ type NTNCellConfigReconciler struct {
 	Scheme   *runtime.Scheme
 	Recorder events.EventRecorder
 	Provider provider.NTNProvider
+}
+
+const (
+	ephemerisReasonPushFailed         = "PushFailed"
+	ephemerisReasonRefNotFound        = "EphemerisRefNotFound"
+	ephemerisReasonGetFailed          = "EphemerisGetFailed"
+	ephemerisReasonPayloadMissing     = "EphemerisPayloadMissing"
+	ephemerisReasonProviderPushFailed = "ProviderPushFailed"
+)
+
+type ephemerisPushError struct {
+	reason string
+	err    error
+}
+
+func (e *ephemerisPushError) Error() string {
+	if e == nil || e.err == nil {
+		return ""
+	}
+	return e.err.Error()
+}
+
+func (e *ephemerisPushError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.err
+}
+
+func newEphemerisPushError(reason string, err error) error {
+	if err == nil {
+		return nil
+	}
+	return &ephemerisPushError{reason: reason, err: err}
+}
+
+func ephemerisPushConditionReason(err error) string {
+	var pushErr *ephemerisPushError
+	if errors.As(err, &pushErr) && pushErr.reason != "" {
+		return pushErr.reason
+	}
+	return ephemerisReasonPushFailed
 }
 
 // +kubebuilder:rbac:groups=ntn.operators.dev,resources=ntncellconfigs,verbs=get;list;watch;create;update;patch;delete
@@ -203,7 +247,7 @@ func (r *NTNCellConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			meta.SetStatusCondition(&cc.Status.Conditions, metav1.Condition{
 				Type:               ntnv1alpha1.ConditionEphemerisPushed,
 				Status:             metav1.ConditionFalse,
-				Reason:             "PushFailed",
+				Reason:             ephemerisPushConditionReason(pushErr),
 				Message:            pushErr.Error(),
 				ObservedGeneration: cc.Generation,
 			})
@@ -298,7 +342,14 @@ func (r *NTNCellConfigReconciler) pushEphemerisUpdateIfNeeded(
 	eph := &ntnv1alpha1.SatelliteEphemeris{}
 	ephKey := client.ObjectKey{Namespace: cc.Namespace, Name: spec.EphemerisRef}
 	if err := r.Get(ctx, ephKey, eph); err != nil {
-		return false, "", fmt.Errorf("getting referenced SatelliteEphemeris %q: %w", spec.EphemerisRef, err)
+		reason := ephemerisReasonGetFailed
+		if apierrors.IsNotFound(err) {
+			reason = ephemerisReasonRefNotFound
+		}
+		return false, "", newEphemerisPushError(
+			reason,
+			fmt.Errorf("getting referenced SatelliteEphemeris %q: %w", spec.EphemerisRef, err),
+		)
 	}
 	marker := ephemerisPushMarker(eph)
 	if isEphemerisPushUpToDate(cc, marker) {
@@ -312,11 +363,17 @@ func (r *NTNCellConfigReconciler) pushEphemerisUpdateIfNeeded(
 	case spec.NTN.EphemerisECEF != nil:
 		update.ECEF = spec.NTN.EphemerisECEF.DeepCopy()
 	default:
-		return false, marker, fmt.Errorf("ephemeris payload missing in NTNCellConfig spec")
+		return false, marker, newEphemerisPushError(
+			ephemerisReasonPayloadMissing,
+			fmt.Errorf("ephemeris payload missing in NTNCellConfig spec"),
+		)
 	}
 
 	if err := r.Provider.PushEphemerisUpdate(ctx, cc.Name, spec.Provider.Namespace, update); err != nil {
-		return false, marker, fmt.Errorf("provider PushEphemerisUpdate: %w", err)
+		return false, marker, newEphemerisPushError(
+			ephemerisReasonProviderPushFailed,
+			fmt.Errorf("provider PushEphemerisUpdate: %w", err),
+		)
 	}
 
 	return true, marker, nil
