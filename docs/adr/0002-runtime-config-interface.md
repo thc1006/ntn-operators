@@ -59,18 +59,18 @@ Delete the ConfigMap path; every `NTNCellConfig` change opens a WS connection to
 
 ### Option C — Hybrid: ConfigMap for bootstrap + WebSocket for runtime (recommended)
 
-- **ConfigMap path** continues to own first-boot / static fields. It is the source of truth when the gNB cold-starts.
+- **ConfigMap path** continues to own first-boot / static fields. It is the source of truth when the gNB cold-starts, and remains the persistence path for fields that are not runtime-pushable.
 - **WebSocket path** handles runtime updates for fields that OCUDU accepts dynamically: `ncells`, `ephemeris_info`, `epoch_time`, `ta_info`, `polarization`, `moving_ref_location`, `sat_switch_with_resync` (the set in MR !411's `ntn_cell_config_update_info`). `replaceEphemeris` retires.
-- A new `pkg/provider/ocudu/wsclient.go` talks to the gNB's remote-control endpoint.
-- The provider interface gains a `PushRuntimeUpdate` method (generalising the existing `PushEphemerisUpdate`); ConfigMap provider implements it as a **no-op** when WS is unavailable, degrading gracefully.
-- Provider configuration (existing `ProviderRef`) gains an optional `RemoteControl` block: `ProviderRef.RemoteControl { endpoint, authSecretRef }`.
+- A new `pkg/provider/ocudu/wsclient.go` (using `nhooyr.io/websocket`) talks to the gNB's remote-control endpoint.
+- The provider interface gains a `PushRuntimeUpdate` method (generalising the existing `PushEphemerisUpdate`); when remote-control is unavailable or a WS push fails, it MUST return an explicit degraded result / typed error rather than silently no-op.
+- Provider configuration (existing `ProviderRef`) gains an optional `RemoteControl` block: `ProviderRef.RemoteControl { endpoint, authSecretRef }`. If this block is absent, the provider remains valid for bootstrap/static reconciliation via ConfigMap, but runtime-only fields are treated as degraded/unavailable rather than implicitly applied.
 
-- ➕ D1 satisfied: runtime-only fields reach OTA.
+- ➕ D1 satisfied: runtime-only fields reach OTA when WS is available, and delivery failures are observable instead of silently dropped.
 - ➕ D2 satisfied: no process restart for covered fields.
 - ➕ D3 satisfied: uses upstream-blessed data model directly.
 - ➕ D4 satisfied: ConfigMap path remains for bootstrap; migration is additive.
-- ➖ Two code paths to reason about — offset by a clean layering (bootstrap fields vs runtime fields are disjoint per MR !411).
-- ➖ Depends on WS message format stability. Mitigation: version-check the first exchanged message; fall back to ConfigMap-only if version mismatch.
+- ➖ Two code paths to reason about — offset by a clean layering (bootstrap/static fields via ConfigMap; runtime-capable fields via WS, with explicit degraded reporting when WS is unavailable).
+- ➖ Depends on WS message format stability. Mitigation: version-check the first exchanged message; on mismatch/failure, surface `RuntimeUpdateDegraded` and continue to rely on ConfigMap for bootstrap/static fields.
 
 ## Decision
 
@@ -110,7 +110,7 @@ Delete the ConfigMap path; every `NTNCellConfig` change opens a WS connection to
 
 ### Neutral
 
-- Adds `github.com/gorilla/websocket` or `nhooyr.io/websocket` as a dependency. Both are maintained; prefer the latter for `context.Context` support.
+- Adds `nhooyr.io/websocket` as a dependency, chosen for `context.Context` support.
 
 ## Rollout Plan
 
