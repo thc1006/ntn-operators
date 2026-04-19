@@ -415,8 +415,9 @@ type NTNCellConfigStatus struct {
 
 // Condition types for NTNCellConfig.
 const (
-	ConditionConfigApplied = "ConfigApplied"
-	ConditionConfigValid   = "ConfigValid"
+	ConditionConfigApplied   = "ConfigApplied"
+	ConditionConfigValid     = "ConfigValid"
+	ConditionEphemerisPushed = "EphemerisPushed"
 )
 
 // +kubebuilder:object:root=true

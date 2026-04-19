@@ -442,17 +442,7 @@ var _ = Describe("NTNCellConfig Controller", func() {
 		cellNN := types.NamespacedName{Name: cellName, Namespace: namespace}
 		ephNN := types.NamespacedName{Name: ephName, Namespace: namespace}
 
-		AfterEach(func() {
-			deleteCellConfig(cellNN)
-			eph := &ntnv1alpha1.SatelliteEphemeris{}
-			err := k8sClient.Get(context.Background(), ephNN, eph)
-			if err == nil {
-				_ = k8sClient.Delete(context.Background(), eph)
-			}
-		})
-
-		It("should invoke PushEphemerisUpdate on provider", func() {
-			// Referenced SatelliteEphemeris exists in the same namespace.
+		createReferencedEphemeris := func() {
 			eph := &ntnv1alpha1.SatelliteEphemeris{
 				ObjectMeta: metav1.ObjectMeta{Name: ephName, Namespace: namespace},
 				Spec: ntnv1alpha1.SatelliteEphemerisSpec{
@@ -464,7 +454,9 @@ var _ = Describe("NTNCellConfig Controller", func() {
 				},
 			}
 			Expect(k8sClient.Create(context.Background(), eph)).To(Succeed())
+		}
 
+		createCellConfig := func() {
 			cr := &ntnv1alpha1.NTNCellConfig{
 				ObjectMeta: metav1.ObjectMeta{Name: cellName, Namespace: namespace},
 				Spec: ntnv1alpha1.NTNCellConfigSpec{
@@ -480,6 +472,20 @@ var _ = Describe("NTNCellConfig Controller", func() {
 				},
 			}
 			Expect(k8sClient.Create(context.Background(), cr)).To(Succeed())
+		}
+
+		AfterEach(func() {
+			deleteCellConfig(cellNN)
+			eph := &ntnv1alpha1.SatelliteEphemeris{}
+			err := k8sClient.Get(context.Background(), ephNN, eph)
+			if err == nil {
+				_ = k8sClient.Delete(context.Background(), eph)
+			}
+		})
+
+		It("should invoke PushEphemerisUpdate on provider", func() {
+			createReferencedEphemeris()
+			createCellConfig()
 
 			mock := &provider.MockProvider{}
 			reconciler := newReconciler(mock)
@@ -497,6 +503,53 @@ var _ = Describe("NTNCellConfig Controller", func() {
 			Expect(mock.LastEphemeris).NotTo(BeNil())
 			Expect(mock.LastEphemeris.ECEF).NotTo(BeNil())
 			Expect(mock.LastEphemeris.ECEF.PosX).To(Equal(20922195))
+
+			updated := &ntnv1alpha1.NTNCellConfig{}
+			Expect(k8sClient.Get(context.Background(), cellNN, updated)).To(Succeed())
+			ephCond := meta.FindStatusCondition(updated.Status.Conditions, ntnv1alpha1.ConditionEphemerisPushed)
+			Expect(ephCond).NotTo(BeNil())
+			Expect(ephCond.Status).To(Equal(metav1.ConditionTrue))
+			Expect(ephCond.Reason).To(Equal("Pushed"))
+
+			// Third reconcile should not re-push if referenced ephemeris resourceVersion is unchanged.
+			result, err = reconciler.Reconcile(context.Background(), reconcile.Request{NamespacedName: cellNN})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(Equal(5 * time.Minute))
+			Expect(mock.EphemerisCalls).To(Equal(1))
+		})
+
+		It("should keep ConfigApplied true and set EphemerisPushed=false when push fails", func() {
+			createReferencedEphemeris()
+			createCellConfig()
+
+			mock := &provider.MockProvider{EphemerisErr: errors.New("runtime push failed")}
+			reconciler := newReconciler(mock)
+
+			result, err := reconciler.Reconcile(context.Background(), reconcile.Request{NamespacedName: cellNN})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(Equal(time.Second))
+
+			result, err = reconciler.Reconcile(context.Background(), reconcile.Request{NamespacedName: cellNN})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(Equal(time.Minute))
+
+			Expect(mock.ApplyCalls).To(Equal(1))
+			Expect(mock.StatusCalls).To(Equal(1))
+			Expect(mock.EphemerisCalls).To(Equal(1))
+
+			updated := &ntnv1alpha1.NTNCellConfig{}
+			Expect(k8sClient.Get(context.Background(), cellNN, updated)).To(Succeed())
+
+			appliedCond := meta.FindStatusCondition(updated.Status.Conditions, ntnv1alpha1.ConditionConfigApplied)
+			Expect(appliedCond).NotTo(BeNil())
+			Expect(appliedCond.Status).To(Equal(metav1.ConditionTrue))
+			Expect(appliedCond.Reason).To(Equal("Applied"))
+
+			ephCond := meta.FindStatusCondition(updated.Status.Conditions, ntnv1alpha1.ConditionEphemerisPushed)
+			Expect(ephCond).NotTo(BeNil())
+			Expect(ephCond.Status).To(Equal(metav1.ConditionFalse))
+			Expect(ephCond.Reason).To(Equal("PushFailed"))
+			Expect(ephCond.Message).To(ContainSubstring("runtime push failed"))
 		})
 	})
 

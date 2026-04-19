@@ -147,26 +147,6 @@ func (r *NTNCellConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{RequeueAfter: time.Minute}, nil
 	}
 
-	// Step 5a: Push ephemeris update when this config references SatelliteEphemeris.
-	// This ensures ephemeris-triggered requeues invoke the runtime update path.
-	if err := r.pushEphemerisUpdateIfNeeded(ctx, cc, spec); err != nil {
-		log.Error(err, "failed to push ephemeris update")
-		meta.SetStatusCondition(&cc.Status.Conditions, metav1.Condition{
-			Type:               ntnv1alpha1.ConditionConfigApplied,
-			Status:             metav1.ConditionUnknown,
-			Reason:             "EphemerisPushFailed",
-			Message:            fmt.Sprintf("config applied but ephemeris push failed: %v", err),
-			ObservedGeneration: cc.Generation,
-		})
-		if err := r.Status().Update(ctx, cc); err != nil {
-			return ctrl.Result{}, err
-		}
-		if r.Recorder != nil {
-			r.Recorder.Eventf(cc, nil, "Warning", "EphemerisPushFailed", "EphemerisPushFailed", "%s", err.Error())
-		}
-		return ctrl.Result{RequeueAfter: time.Minute}, nil
-	}
-
 	// Step 5b: Ensure OwnerReference on ConfigMap for garbage collection.
 	cm := &corev1.ConfigMap{}
 	cmKey := client.ObjectKey{
@@ -210,6 +190,40 @@ func (r *NTNCellConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		Message:            fmt.Sprintf("NTN config applied via %s provider", spec.Provider.Type),
 		ObservedGeneration: cc.Generation,
 	})
+
+	// Step 8: Push runtime ephemeris update if ephemerisRef is configured.
+	// Keep ConfigApplied semantics independent from ephemeris push status.
+	if cc.Spec.EphemerisRef == "" {
+		meta.RemoveStatusCondition(&cc.Status.Conditions, ntnv1alpha1.ConditionEphemerisPushed)
+	} else {
+		pushed, marker, err := r.pushEphemerisUpdateIfNeeded(ctx, cc, spec)
+		if err != nil {
+			log.Error(err, "failed to push ephemeris update")
+			meta.SetStatusCondition(&cc.Status.Conditions, metav1.Condition{
+				Type:               ntnv1alpha1.ConditionEphemerisPushed,
+				Status:             metav1.ConditionFalse,
+				Reason:             "PushFailed",
+				Message:            err.Error(),
+				ObservedGeneration: cc.Generation,
+			})
+			if r.Recorder != nil {
+				r.Recorder.Eventf(cc, nil, "Warning", "EphemerisPushFailed", "EphemerisPushFailed", "%s", err.Error())
+			}
+			if err := r.Status().Update(ctx, cc); err != nil {
+				return ctrl.Result{}, err
+			}
+			return ctrl.Result{RequeueAfter: time.Minute}, nil
+		}
+		if pushed {
+			meta.SetStatusCondition(&cc.Status.Conditions, metav1.Condition{
+				Type:               ntnv1alpha1.ConditionEphemerisPushed,
+				Status:             metav1.ConditionTrue,
+				Reason:             "Pushed",
+				Message:            marker,
+				ObservedGeneration: cc.Generation,
+			})
+		}
+	}
 
 	if err := r.Status().Update(ctx, cc); err != nil {
 		return ctrl.Result{}, err
@@ -275,15 +289,19 @@ func (r *NTNCellConfigReconciler) pushEphemerisUpdateIfNeeded(
 	ctx context.Context,
 	cc *ntnv1alpha1.NTNCellConfig,
 	spec *ntnv1alpha1.NTNCellConfigSpec,
-) error {
+) (bool, string, error) {
 	if cc.Spec.EphemerisRef == "" {
-		return nil
+		return false, "", nil
 	}
 
 	eph := &ntnv1alpha1.SatelliteEphemeris{}
 	ephKey := client.ObjectKey{Namespace: cc.Namespace, Name: cc.Spec.EphemerisRef}
 	if err := r.Get(ctx, ephKey, eph); err != nil {
-		return fmt.Errorf("getting referenced SatelliteEphemeris %q: %w", cc.Spec.EphemerisRef, err)
+		return false, "", fmt.Errorf("getting referenced SatelliteEphemeris %q: %w", cc.Spec.EphemerisRef, err)
+	}
+	marker := ephemerisPushMarker(cc.Spec.EphemerisRef, eph.ResourceVersion)
+	if isEphemerisPushUpToDate(cc, marker) {
+		return false, marker, nil
 	}
 
 	update := provider.EphemerisUpdate{}
@@ -293,14 +311,28 @@ func (r *NTNCellConfigReconciler) pushEphemerisUpdateIfNeeded(
 	case spec.NTN.EphemerisECEF != nil:
 		update.ECEF = spec.NTN.EphemerisECEF.DeepCopy()
 	default:
-		return fmt.Errorf("ephemeris payload missing in NTNCellConfig spec")
+		return false, marker, fmt.Errorf("ephemeris payload missing in NTNCellConfig spec")
 	}
 
 	if err := r.Provider.PushEphemerisUpdate(ctx, cc.Name, spec.Provider.Namespace, update); err != nil {
-		return fmt.Errorf("provider PushEphemerisUpdate: %w", err)
+		return false, marker, fmt.Errorf("provider PushEphemerisUpdate: %w", err)
 	}
 
-	return nil
+	return true, marker, nil
+}
+
+func isEphemerisPushUpToDate(cc *ntnv1alpha1.NTNCellConfig, marker string) bool {
+	cond := meta.FindStatusCondition(cc.Status.Conditions, ntnv1alpha1.ConditionEphemerisPushed)
+	if cond == nil {
+		return false
+	}
+	return cond.Status == metav1.ConditionTrue &&
+		cond.ObservedGeneration == cc.Generation &&
+		cond.Message == marker
+}
+
+func ephemerisPushMarker(ephemerisRef, resourceVersion string) string {
+	return fmt.Sprintf("ephemerisRef=%s resourceVersion=%s", ephemerisRef, resourceVersion)
 }
 
 // SetupWithManager sets up the controller with the Manager.
