@@ -651,5 +651,15 @@ var _ = Describe("GroundStationLifecycle Controller", func() {
 			// Should contain a hash separator
 			Expect(strings.Count(val, "-")).To(BeNumerically(">=", 1))
 		})
+
+		It("should fall back to pure hash for extremely long namespace", func() {
+			// Namespace so long that prefix (ns + ".") >= 55 chars → remaining < 1
+			ns := strings.Repeat("n", 58)
+			name := strings.Repeat("g", 10) // total = 58 + 1 + 10 = 69 > 63
+			val := groundStationLabelValue(ns, name)
+			Expect(len(val)).To(BeNumerically("<=", 63))
+			// Pure hash — 16 hex chars, no dot separator.
+			Expect(len(val)).To(Equal(16))
+		})
 	})
 })

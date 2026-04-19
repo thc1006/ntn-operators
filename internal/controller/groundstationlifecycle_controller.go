@@ -186,7 +186,9 @@ func groundStationLabelValue(namespace, gsName string) string {
 	prefix := namespace + "."
 	remaining := maxLabelValueLen - len(prefix) - 9 // room for "-" + 8-char hash
 	if remaining < 1 {
-		// Namespace alone is too long — hash the whole thing.
+		// Namespace alone is too long (≥54 chars) — hash the whole thing.
+		// Note: this loses the "." separator so nodeToGroundStation won't
+		// parse it. The GS controller still works via periodic reconcile.
 		h := sha256.Sum256([]byte(labelValue))
 		return hex.EncodeToString(h[:4]) + hex.EncodeToString(h[4:8])
 	}
