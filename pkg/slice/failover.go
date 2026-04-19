@@ -208,12 +208,13 @@ func parseTriggerSet(log logr.Logger, triggers []string, metrics Metrics) trigge
 	for _, triggerStr := range triggers {
 		trigger, err := ParseTrigger(triggerStr)
 		if err != nil {
-			// Only count parse errors seen before (or without) a match,
-			// matching legacy short-circuit semantics for parseSuffix.
+			// Only count/log parse errors before first match,
+			// matching legacy short-circuit semantics.
 			if !result.anyTriggered {
 				parseErrors++
+				log.V(1).Info("invalid trigger expression",
+					"trigger", triggerStr, "error", err.Error())
 			}
-			log.V(1).Info("invalid trigger expression", "trigger", triggerStr, "error", err.Error())
 			continue
 		}
 		result.parsed = append(result.parsed, trigger)
