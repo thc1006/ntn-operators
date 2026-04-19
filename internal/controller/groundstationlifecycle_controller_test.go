@@ -580,4 +580,71 @@ var _ = Describe("GroundStationLifecycle Controller", func() {
 			Expect(err.Error()).To(ContainSubstring("lon"))
 		})
 	})
+
+	// --- nodeToGroundStation mapper tests ---
+
+	Context("nodeToGroundStation mapper", func() {
+		It("should map labeled node to ground station request", func() {
+			reconciler := &GroundStationLifecycleReconciler{Client: k8sClient}
+			node := &corev1.Node{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:   "edge-node-1",
+					Labels: map[string]string{groundStationLabel: "default.gs-test"},
+				},
+			}
+			requests := reconciler.nodeToGroundStation(context.Background(), node)
+			Expect(requests).To(HaveLen(1))
+			Expect(requests[0].Name).To(Equal("gs-test"))
+			Expect(requests[0].Namespace).To(Equal("default"))
+		})
+
+		It("should return nil for node without label", func() {
+			reconciler := &GroundStationLifecycleReconciler{Client: k8sClient}
+			node := &corev1.Node{
+				ObjectMeta: metav1.ObjectMeta{Name: "unlabeled"},
+			}
+			requests := reconciler.nodeToGroundStation(context.Background(), node)
+			Expect(requests).To(BeEmpty())
+		})
+
+		It("should return nil for invalid label format", func() {
+			reconciler := &GroundStationLifecycleReconciler{Client: k8sClient}
+			node := &corev1.Node{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:   "bad-label",
+					Labels: map[string]string{groundStationLabel: "no-dot-separator"},
+				},
+			}
+			requests := reconciler.nodeToGroundStation(context.Background(), node)
+			Expect(requests).To(BeEmpty())
+		})
+	})
+
+	// --- groundStationLabelValue tests ---
+
+	Context("groundStationLabelValue", func() {
+		It("should return namespace.name when within limit", func() {
+			val := groundStationLabelValue("default", "gs-hsinchu-01")
+			Expect(val).To(Equal("default.gs-hsinchu-01"))
+		})
+
+		It("should truncate+hash when exceeding 63 chars", func() {
+			longName := "a-very-long-ground-station-name-that-exceeds"
+			longNs := "a-long-namespace-name"
+			val := groundStationLabelValue(longNs, longName)
+			Expect(len(val)).To(BeNumerically("<=", 63))
+			// Different long names produce different hashes.
+			val2 := groundStationLabelValue(longNs, longName+"-2")
+			Expect(val).NotTo(Equal(val2))
+		})
+
+		It("should produce exactly 63 chars for long values", func() {
+			longName := "station-" + "x"
+			for len(longName)+len("namespace.")+1 <= 63 {
+				longName += "x"
+			}
+			val := groundStationLabelValue("namespace", longName)
+			Expect(len(val)).To(BeNumerically("<=", 63))
+		})
+	})
 })
