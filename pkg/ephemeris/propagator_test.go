@@ -36,16 +36,25 @@ func parseEpoch(t *testing.T, s string) time.Time {
 	return epoch
 }
 
+// 3GPP TS 38.331 spec values — hardcoded in tests as independent check
+// against the exported constants in api/v1alpha1.
+const (
+	specPositionStep = 1.3
+	specVelocityStep = 0.06
+	specECEFPosMax   = 67108863
+	specECEFPosMin   = -67108864
+)
+
 // posMagnitudeKm computes the ECEF position vector magnitude in km.
 func posMagnitudeKm(px, py, pz int) float64 {
 	x, y, z := float64(px), float64(py), float64(pz)
-	return math.Sqrt(x*x+y*y+z*z) * positionStep / 1000.0
+	return math.Sqrt(x*x+y*y+z*z) * specPositionStep / 1000.0
 }
 
 // velMagnitudeKmS computes the ECEF velocity vector magnitude in km/s.
 func velMagnitudeKmS(vx, vy, vz int) float64 {
 	x, y, z := float64(vx), float64(vy), float64(vz)
-	return math.Sqrt(x*x+y*y+z*z) * velocityStep / 1000.0
+	return math.Sqrt(x*x+y*y+z*z) * specVelocityStep / 1000.0
 }
 
 // OneWeb satellite OMM (NORAD 56700) — known test vector.
@@ -141,8 +150,8 @@ func TestPropagateToECEF_FitsIn3GPPRange(t *testing.T) {
 	}{
 		{"PosX", ecef.PosX}, {"PosY", ecef.PosY}, {"PosZ", ecef.PosZ},
 	} {
-		if v.val < minECEFPos || v.val > maxECEFPos {
-			t.Errorf("%s = %d out of 3GPP range [%d, %d]", v.name, v.val, minECEFPos, maxECEFPos)
+		if v.val < specECEFPosMin || v.val > specECEFPosMax {
+			t.Errorf("%s = %d out of 3GPP range [%d, %d]", v.name, v.val, specECEFPosMin, specECEFPosMax)
 		}
 	}
 }

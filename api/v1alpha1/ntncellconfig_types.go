@@ -296,6 +296,18 @@ type EphemerisOrbital struct {
 	MeanAnomaly int `json:"meanAnomaly"`
 }
 
+// 3GPP TS 38.331 ECEF scaling and range constants for ntn-Config-r17.
+const (
+	// ECEFPositionStep is the position quantization step in metres (1.3 m per LSB).
+	ECEFPositionStep = 1.3
+	// ECEFVelocityStep is the velocity quantization step in m/s (0.06 m/s per LSB).
+	ECEFVelocityStep = 0.06
+	// ECEFPosMax is the maximum ECEF position value (2^26 - 1).
+	ECEFPosMax = 67108863
+	// ECEFPosMin is the minimum ECEF position value (-2^26).
+	ECEFPosMin = -67108864
+)
+
 // EphemerisECEF defines the satellite position and velocity in Earth-Centered
 // Earth-Fixed coordinates. For GEO satellites, velocity fields should be 0.
 type EphemerisECEF struct {
