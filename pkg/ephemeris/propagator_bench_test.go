@@ -41,7 +41,10 @@ func benchOMM() sgp4.OMM {
 
 func BenchmarkPropagateToECEF(b *testing.B) {
 	omm := benchOMM()
-	t, _ := time.Parse("2006-01-02T15:04:05.000000", omm.EpochStr)
+	t, err := time.Parse("2006-01-02T15:04:05.000000", omm.EpochStr)
+	if err != nil {
+		b.Fatal(err)
+	}
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {

@@ -60,7 +60,7 @@ vet: ## Run go vet against code.
 
 .PHONY: bench
 bench: ## Run Go benchmarks with memory allocation stats.
-	go test -bench=. -benchmem -benchtime=3s ./pkg/...
+	go test -bench=. -benchmem -benchtime=3s -run='^$$' ./pkg/...
 
 .PHONY: test
 test: manifests generate fmt vet setup-envtest ## Run tests.

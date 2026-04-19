@@ -22,6 +22,8 @@ import (
 	"time"
 )
 
+var benchResult FailoverResult // prevent compiler from eliding calls
+
 func BenchmarkParseTrigger(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		_, err := ParseTrigger("rsrp < -120")
@@ -32,36 +34,37 @@ func BenchmarkParseTrigger(b *testing.B) {
 }
 
 func BenchmarkEvaluateFailover_Healthy(b *testing.B) {
+	ctx := context.Background()
 	trigs := []string{"rsrp < -120", "latency > 200", "packetLoss > 5"}
 	m := Metrics{RSRP: -90, LatencyMs: 20, PacketLossPercent: 0.1}
 	t := time.Date(2026, 4, 17, 12, 0, 0, 0, time.UTC)
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		EvaluateFailoverWithContext(
-			context.Background(),
-			PathTerrestrial, trigs, m,
+		benchResult = EvaluateFailoverWithContext(
+			ctx, PathTerrestrial, trigs, m,
 			true, 60*time.Second, time.Time{}, t,
 		)
 	}
 }
 
 func BenchmarkEvaluateFailover_Degraded(b *testing.B) {
+	ctx := context.Background()
 	trigs := []string{"rsrp < -120", "latency > 200", "packetLoss > 5"}
 	m := Metrics{RSRP: -130, LatencyMs: 20, PacketLossPercent: 0.1}
 	t := time.Date(2026, 4, 17, 12, 0, 0, 0, time.UTC)
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		EvaluateFailoverWithContext(
-			context.Background(),
-			PathTerrestrial, trigs, m,
+		benchResult = EvaluateFailoverWithContext(
+			ctx, PathTerrestrial, trigs, m,
 			true, 60*time.Second, time.Time{}, t,
 		)
 	}
 }
 
 func BenchmarkEvaluateFailoverWithHysteresis(b *testing.B) {
+	ctx := context.Background()
 	trigs := []string{"rsrp < -120"}
 	m := Metrics{RSRP: -115, LatencyMs: 20, PacketLossPercent: 0.1}
 	t := time.Date(2026, 4, 17, 12, 0, 0, 0, time.UTC)
@@ -69,9 +72,8 @@ func BenchmarkEvaluateFailoverWithHysteresis(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		EvaluateFailoverWithHysteresis(
-			context.Background(),
-			PathSatellite, trigs, m,
+		benchResult = EvaluateFailoverWithHysteresis(
+			ctx, PathSatellite, trigs, m,
 			true, 60*time.Second, lastFO, t, 10,
 		)
 	}
