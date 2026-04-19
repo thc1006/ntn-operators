@@ -21,7 +21,28 @@ spec:
       velY: 0
       velZ: 0
     payloadType: transparent
+    # SIB19 ntn-PolarizationDL/UL-r17 (v0.3+): nested {dl, ul} with
+    # values rhcp|lhcp|linear. The flat "circular" enum from v0.2 was
+    # removed — see docs/migration-v0.2-v0.3.md.
+    polarization:
+      dl: rhcp
+      ul: lhcp
+    # SIB11 per-neighbor reselection: omit reselectionInfo entirely to
+    # accept OCUDU defaults, or set one or more sub-fields.
+    neighborCells:
+      - physicalCellID: 7
+        frequency: 632628
+        reselectionInfo:
+          qHyst: 4
+          qOffsetCell: 0
   cellOverrides:
     pdschMaxHarqRetxs: 0
     prachMaxMsg3HarqRetx: 0
     rrcGuardTimeMs: 12800
+    # Optional: tune SIB19 broadcast scheduling for tight PDCCH capacity
+    # or short ntn-UlSyncValidityDur. Unset sub-fields keep the OCUDU
+    # defaults (window=5, period=16, position=1).
+    sibSchedule:
+      siWindowLength: 5
+      siPeriod: 16
+      siWindowPosition: 1

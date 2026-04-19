@@ -5,6 +5,39 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **SIB11 per-neighbor reselection** (#47): `NTNNeighborCell.reselectionInfo`
+  carries `qHyst`, `qOffsetCell`, `sIntraSearchP`, `threshServingLowP` per
+  3GPP TS 38.331 `IntraFreqCellReselectionInfo`.
+- **SIB19 scheduling overrides** (#46): `CellOverrides.sibSchedule` with
+  `siWindowLength`, `siPeriod`, `siWindowPosition` (previously hardcoded).
+- **Table-driven TS 38.331 conformance test** mapping rendered YAML
+  fragments back to their IE origin so future SIB additions extend by
+  appending a row.
+- **YAML string-injection defense**: renderer now `strconv.Quote`s
+  user-controlled polarization strings and sanitizes the payloadType
+  header-comment interpolation.
+- **`neighborCells` bounded at MaxItems=32** with `+listType=map` for
+  Server-Side Apply deduplication by `physicalCellID`.
+
+### Changed (breaking — v1alpha1 pre-stable)
+- **`spec.ntn.polarization`** (#45): flat `string` enum `linear|circular`
+  replaced with nested `{dl, ul}` object accepting `rhcp|lhcp|linear`, per
+  SIB19 `ntn-PolarizationDL-r17` / `ntn-PolarizationUL-r17` (independent
+  IEs) and OCUDU's CLI11 schema. Existing CRs using the old form will be
+  rejected; see `docs/migration-v0.2-v0.3.md` for the jq migration script.
+
+### Fixed
+- **Helm chart CRDs** now stay in sync with `config/crd/bases/` via the
+  `manifests` make target — previously the chart shipped a stale copy and
+  `helm install` of a v0.3 CR against a v0.2 chart would fail validation.
+
+### Tracked (blocked on upstream OCUDU parser)
+- **#52** — `k_mac` NTN-Config-r17 field (milestone v0.4)
+- **#53** — `ta_common_drift_correction` Rel-18 field (milestone v0.4)
+
 ## [0.1.0] - 2026-04-17
 
 ### Added
