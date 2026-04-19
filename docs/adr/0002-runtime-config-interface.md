@@ -82,7 +82,7 @@ Delete the ConfigMap path; every `NTNCellConfig` change opens a WS connection to
    - Gorilla WebSocket client with connection pool keyed by `(namespace, endpoint)`.
    - Send framing: JSON-encoded `ntn_cell_config_update_info` (field names must match OCUDU's Boost.PropertyTree layout; see §Risks).
    - Wait for `ntn_config_update_result` response, correlate by cell NCGI.
-   - On WS failure: degrade to ConfigMap path and surface `Condition{Type=RuntimeUpdateDegraded, Status=True}`.
+   - On WS failure: degrade to ConfigMap path and surface `Condition{Type="RuntimeUpdateDegraded", Status="True"}`.
 4. **Add `ProviderRef.RemoteControl { endpoint, authSecretRef }`** (optional). If unset, provider stays on ConfigMap path exclusively.
 5. **Test matrix**: unit tests with a fake WS server; integration test with a stubbed gNB that records received messages.
 
@@ -105,7 +105,7 @@ Delete the ConfigMap path; every `NTNCellConfig` change opens a WS connection to
 ### Negative
 
 - Introduces a TCP-level dependency on the gNB being reachable from the operator's network namespace. Needs documentation on network policy.
-- Operators must now configure `remoteControlEndpoint`; migration path for existing users who don't set it = no behaviour change (ConfigMap-only).
+- Operators must now configure `ProviderRef.RemoteControl.endpoint`; migration path for existing users who don't set it = no behaviour change (ConfigMap-only).
 - WS message format is implicit today — first version may need a rewrite if OCUDU formalises the schema differently.
 
 ### Neutral
@@ -124,7 +124,7 @@ Delete the ConfigMap path; every `NTNCellConfig` change opens a WS connection to
 
 1. **WS auth model.** Does OCUDU require bearer tokens, mTLS, or anything yet? Clarify current expectations in `apps/services/remote_control/`; regardless, production deployments in this ADR require `wss`/TLS.
 2. **Message schema stability.** MR !411 defines the C++ struct; the over-the-wire JSON layout depends on Boost.PropertyTree conventions. If it's fragile to field renames, we need a versioning handshake.
-3. **Fallback policy when WS is down.** Degrade silently to ConfigMap (risk: UE drop on restart) OR surface as `Condition{Ready=False}` and block reconcile (risk: stale config pushed never reaches gNB)? Probably the former with a prominent metric.
+3. **Fallback policy when WS is down.** Degrade silently to ConfigMap (risk: UE drop on restart) OR surface the failure via existing `ConfigApplied=False` / `ConfigValid=False` status conditions and block reconcile (risk: stale config pushed never reaches gNB)? Probably the former with a prominent metric.
 
 ## References
 
