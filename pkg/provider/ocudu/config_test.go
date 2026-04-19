@@ -384,11 +384,12 @@ func TestGenerateConfig_PolarizationStringInjectionResistant(t *testing.T) {
 	// malicious polarization value somehow reaches GenerateConfig, the rendered
 	// YAML MUST NOT allow the injected string to break out and create sibling
 	// YAML keys. yamlQuote escapes newlines and colons into a quoted scalar.
+	const injected = "rhcp\ninjected_key: pwned"
 	spec := &ntnv1alpha1.NTNCellConfigSpec{
 		NTN: ntnv1alpha1.NTNParams{
 			EphemerisECEF: &ntnv1alpha1.EphemerisECEF{PosX: 1, PosY: 2, PosZ: 3},
 			Polarization: &ntnv1alpha1.NTNPolarization{
-				DL: "rhcp\ninjected_key: pwned",
+				DL: injected,
 				UL: "lhcp",
 			},
 		},
@@ -398,9 +399,36 @@ func TestGenerateConfig_PolarizationStringInjectionResistant(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	yaml := string(data)
-	// The injection MUST be inside a quoted string, not a bare scalar.
+	// Surface check: the injection MUST NOT appear as a top-level sibling key.
 	assertNotContains(t, yaml, "\ninjected_key: pwned")
-	assertContains(t, yaml, `\n`) // escape sequence inside the quoted string
+
+	// Structural check: parse the YAML and verify the injected payload lives
+	// entirely inside the polarization.dl scalar — no sibling key leaked into
+	// the ntn map. This is stronger than substring matching because it fails
+	// if escaping regresses in a way that still happens to avoid the literal
+	// "\ninjected_key:" string.
+	var parsed map[string]any
+	if err := k8syaml.Unmarshal(data, &parsed); err != nil {
+		t.Fatalf("generated YAML did not unmarshal: %v\nYAML:\n%s", err, yaml)
+	}
+	ntn, ok := parsed["ntn"].(map[string]any)
+	if !ok {
+		t.Fatalf("generated YAML missing ntn map: %#v", parsed["ntn"])
+	}
+	if _, ok := ntn["injected_key"]; ok {
+		t.Fatalf("injection leaked: ntn.injected_key should not exist, got %#v", ntn["injected_key"])
+	}
+	polarization, ok := ntn["polarization"].(map[string]any)
+	if !ok {
+		t.Fatalf("generated YAML missing polarization map: %#v", ntn["polarization"])
+	}
+	dl, ok := polarization["dl"].(string)
+	if !ok {
+		t.Fatalf("generated YAML missing polarization.dl string: %#v", polarization["dl"])
+	}
+	if dl != injected {
+		t.Fatalf("unexpected polarization.dl round-trip value: got %q, want %q", dl, injected)
+	}
 }
 
 func TestGenerateConfig_PayloadTypeStringInjectionResistant(t *testing.T) {
