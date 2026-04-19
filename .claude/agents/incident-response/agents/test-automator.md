@@ -1,5 +1,5 @@
 ---
-name: test-automator
+name: incident-test-automator
 description: Creates comprehensive test suites including unit, integration, regression, and security tests. Validates fixes with full coverage and cross-environment testing.
 model: sonnet
 ---

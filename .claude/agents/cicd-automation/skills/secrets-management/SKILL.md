@@ -92,16 +92,20 @@ jobs:
             secret/data/api key | API_KEY
 
       - name: Use secrets
+        env:
+          DB_USERNAME: ${{ env.DB_USERNAME }}
+          DB_PASSWORD: ${{ env.DB_PASSWORD }}
+          API_KEY: ${{ env.API_KEY }}
         run: |
-          echo "Connecting to database as $DB_USERNAME"
-          # Use $DB_PASSWORD, $API_KEY
+          # Secrets are available as env vars — never echo/print them
+          ./deploy.sh
 ```
 
 ### GitLab CI with Vault
 
 ```yaml
 deploy:
-  image: vault:latest
+  image: vault:1.17
   before_script:
     - export VAULT_ADDR=https://vault.example.com:8200
     - export VAULT_TOKEN=$VAULT_TOKEN
@@ -173,9 +177,12 @@ resource "aws_db_instance" "main" {
 
 ```yaml
 - name: Use GitHub secret
+  env:
+    API_KEY: ${{ secrets.API_KEY }}
+    DATABASE_URL: ${{ secrets.DATABASE_URL }}
   run: |
-    echo "API Key: ${{ secrets.API_KEY }}"
-    echo "Database URL: ${{ secrets.DATABASE_URL }}"
+    # Secrets are injected as env vars — never print them to logs
+    ./deploy.sh
 ```
 
 ### Environment Secrets
@@ -186,8 +193,11 @@ deploy:
   environment: production
   steps:
     - name: Deploy
+      env:
+        PROD_API_KEY: ${{ secrets.PROD_API_KEY }}
       run: |
-        echo "Deploying with ${{ secrets.PROD_API_KEY }}"
+        # Secret injected as env var — never print to logs
+        ./deploy.sh
 ```
 
 **Reference:** See `references/github-secrets.md`

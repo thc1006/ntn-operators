@@ -65,9 +65,9 @@ If a preset is specified, use these configurations:
 
 If "custom" is specified:
 
-1. Use AskUserQuestion to prompt for team size (2-5 members)
-2. For each member, ask for role selection: team-lead, team-reviewer, team-debugger, team-implementer
-3. Ask for team name if not provided via `--name`
+1. Prompt the user for team size (2-5 members)
+2. For each member, prompt for role selection: team-lead, team-reviewer, team-debugger, team-implementer
+3. Prompt for a team name if not provided via `--name`
 
 ## Phase 2: Team Creation
 
@@ -75,8 +75,13 @@ If "custom" is specified:
 2. For each team member, use the `Agent` tool with:
    - `team_name`: the team name
    - `name`: descriptive member name (e.g., "security-reviewer", "hypothesis-1")
-   - `subagent_type`: "general-purpose" (teammates need full tool access)
-   - `prompt`: Role-specific instructions referencing the appropriate agent definition
+   - `subagent_type`: set based on the member role/preset:
+     - `agent-teams:team-reviewer` for reviewer roles in `review`, `security`, and `migration`
+     - `agent-teams:team-debugger` for debugger roles in `debug`
+     - `agent-teams:team-implementer` for implementer roles in `feature`, `fullstack`, and `migration`
+     - `agent-teams:team-lead` for lead/coordinator roles in `feature`, `fullstack`, and `migration`
+     - `general-purpose` only for truly generic members such as `research` agents or explicitly generic custom members
+   - `prompt`: Role-specific instructions aligned with the selected `subagent_type` and the teammate's assignment
 
 ## Phase 3: Initial Setup
 

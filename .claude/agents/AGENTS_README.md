@@ -1,27 +1,20 @@
-# Project: claude-agents
+# Vendored Claude Code Agent Plugins
 
-Claude Code plugin marketplace — 79 plugins (77 local + 2 external via git-subdir), 184 agents, 150 skills, 98 commands.
+Vendored subset of Claude Code plugins for local TDD, K8s, and security workflows.
+Sourced from [wshobson/agents](https://github.com/wshobson/agents).
 
-## Repository Structure
+## Directory Structure
 
 ```
-claude-agents/
-├── .claude-plugin/marketplace.json   # Registry of all plugins
-├── plugins/                          # All 77 local plugins (2 more installed via git-subdir from external repos)
-│   ├── <plugin-name>/
-│   │   ├── .claude-plugin/plugin.json
-│   │   ├── agents/*.md
-│   │   ├── commands/*.md
-│   │   └── skills/<skill-name>/SKILL.md
-│   └── ...
-├── docs/                             # Documentation
-│   ├── plugins.md                    # Plugin catalog
-│   ├── agents.md                     # Agent reference
-│   ├── agent-skills.md               # Skills reference
-│   ├── usage.md                      # Usage guide
-│   ├── architecture.md               # Design principles
-│   └── plugin-eval.md                # Evaluation framework
-└── tools/                            # Development utilities
+.claude/agents/
+├── agent-teams/          # Multi-agent team orchestration
+├── cicd-automation/      # CI/CD pipeline templates and patterns
+├── git-pr-workflows/     # PR review and Git workflow agents
+├── incident-response/    # Incident triage and response
+├── k8s-platform/         # Kubernetes platform engineering
+├── security-devsecops/   # Security scanning and DevSecOps
+├── tdd-quality/          # Test-driven development workflows
+└── AGENTS_README.md      # This file
 ```
 
 ## Plugin Authoring Conventions
