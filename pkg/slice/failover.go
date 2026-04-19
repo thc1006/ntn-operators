@@ -101,6 +101,36 @@ func ParseTrigger(s string) (Trigger, error) {
 	return Trigger{}, fmt.Errorf("invalid trigger format %q: expected 'metric operator value'", s)
 }
 
+// EvaluateRecovery checks if the trigger has recovered with hysteresis margin.
+// For "<"/"<=" triggers, recovery requires actual >= threshold + margin.
+// For ">"/">=" triggers, recovery requires actual <= threshold - margin.
+func (t Trigger) EvaluateRecovery(m Metrics, margin float64) bool {
+	var actual float64
+	switch t.Metric {
+	case "rsrp", "terrestrialRSRP":
+		actual = m.RSRP
+	case "latency", "terrestrialLatency":
+		actual = m.LatencyMs
+	case "packetLoss", "terrestrialPacketLoss":
+		actual = m.PacketLossPercent
+	default:
+		return true // unknown metric — assume recovered
+	}
+
+	switch t.Operator {
+	case "<":
+		return actual >= t.Value+margin
+	case "<=":
+		return actual > t.Value+margin
+	case ">":
+		return actual <= t.Value-margin
+	case ">=":
+		return actual < t.Value-margin
+	default:
+		return true
+	}
+}
+
 // Evaluate checks if a trigger condition is met given the current metrics.
 func (t Trigger) Evaluate(m Metrics) bool {
 	var actual float64
@@ -306,4 +336,123 @@ func EvaluateFailoverWithContext(
 			TargetPath: PathUnavailable,
 		})
 	}
+}
+
+// EvaluateFailoverWithHysteresis is like EvaluateFailoverWithContext but applies
+// a dead-band margin to trigger thresholds during switchback evaluation.
+//
+// During failover (terrestrial → satellite), triggers use their original thresholds.
+// During switchback (satellite → terrestrial), triggers require the metric to clear
+// the threshold by the hysteresis margin before considering recovery.
+//
+// Example: trigger "rsrp < -120" with hysteresisDB=10 means failover fires at
+// RSRP < -120 dBm, but switchback requires RSRP >= -110 dBm (10 dB dead-band).
+func EvaluateFailoverWithHysteresis(
+	ctx context.Context,
+	currentPath PathType,
+	triggers []string,
+	metrics Metrics,
+	satelliteAvailable bool,
+	switchbackDelay time.Duration,
+	lastFailover time.Time,
+	now time.Time,
+	hysteresisDB float64,
+) FailoverResult {
+	// If not on satellite or no hysteresis, delegate to the standard evaluator.
+	if currentPath != PathSatellite || hysteresisDB <= 0 {
+		return EvaluateFailoverWithContext(
+			ctx, currentPath, triggers, metrics,
+			satelliteAvailable, switchbackDelay, lastFailover, now,
+		)
+	}
+
+	log := logr.FromContextOrDiscard(ctx)
+	log.V(2).Info("evaluate failover with hysteresis",
+		"hysteresisDB", hysteresisDB,
+		"currentPath", currentPath,
+	)
+	finish := func(res FailoverResult) FailoverResult {
+		log.V(1).Info("failover decision (hysteresis)",
+			"decision", res.Decision,
+			"targetPath", res.TargetPath,
+			"reason", res.Reason,
+		)
+		return res
+	}
+
+	// Satellite pass ended — force switchback regardless of hysteresis.
+	if !satelliteAvailable {
+		anyTriggered := false
+		for _, ts := range triggers {
+			if t, err := ParseTrigger(ts); err == nil && t.Evaluate(metrics) {
+				anyTriggered = true
+				break
+			}
+		}
+		if anyTriggered {
+			return finish(FailoverResult{
+				Decision:   DecisionSwitchback,
+				Reason:     "Satellite pass ended, falling back to degraded terrestrial",
+				TargetPath: PathTerrestrial,
+			})
+		}
+		return finish(FailoverResult{
+			Decision:   DecisionSwitchback,
+			Reason:     "Satellite pass ended, terrestrial recovered",
+			TargetPath: PathTerrestrial,
+		})
+	}
+
+	// Check if ANY trigger is still firing (original thresholds).
+	for _, ts := range triggers {
+		t, err := ParseTrigger(ts)
+		if err != nil {
+			continue
+		}
+		if t.Evaluate(metrics) {
+			return finish(FailoverResult{
+				Decision:   DecisionStay,
+				Reason:     "Terrestrial still degraded, staying on satellite",
+				TargetPath: PathSatellite,
+			})
+		}
+	}
+
+	// Triggers no longer firing at original thresholds.
+	// Check hysteresis: have ALL triggers recovered past the dead-band?
+	allRecovered := true
+	for _, ts := range triggers {
+		t, err := ParseTrigger(ts)
+		if err != nil {
+			continue
+		}
+		if !t.EvaluateRecovery(metrics, hysteresisDB) {
+			allRecovered = false
+			break
+		}
+	}
+
+	if !allRecovered {
+		return finish(FailoverResult{
+			Decision:   DecisionStay,
+			Reason:     fmt.Sprintf("Terrestrial in hysteresis dead-band (margin=%.1f), staying on satellite", hysteresisDB),
+			TargetPath: PathSatellite,
+		})
+	}
+
+	// Recovered past dead-band — check switchback delay.
+	if !lastFailover.IsZero() && now.Sub(lastFailover) < switchbackDelay {
+		return finish(FailoverResult{
+			Decision: DecisionStay,
+			Reason: fmt.Sprintf("Terrestrial recovered past dead-band but switchback delay not elapsed (%s remaining)",
+				switchbackDelay-now.Sub(lastFailover)),
+			TargetPath: PathSatellite,
+		})
+	}
+
+	return finish(FailoverResult{
+		Decision:   DecisionSwitchback,
+		Reason:     "Terrestrial recovered past hysteresis dead-band, switchback delay elapsed",
+		TargetPath: PathTerrestrial,
+	})
 }
