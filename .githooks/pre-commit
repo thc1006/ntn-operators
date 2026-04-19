@@ -19,7 +19,7 @@ echo "==> pre-commit: go test (short)"
 go test -short -count=1 ./... || exit 1
 
 echo "==> pre-commit: golangci-lint"
-if command -v ./bin/golangci-lint > /dev/null 2>&1; then
+if [ -x ./bin/golangci-lint ]; then
   ./bin/golangci-lint run || exit 1
 elif command -v golangci-lint > /dev/null 2>&1; then
   golangci-lint run || exit 1

@@ -95,7 +95,7 @@ ntn:
     target_pci: {{ .SatSwitchTargetPCI }}
     t304: {{ .SatSwitchT304 }}
 {{- end }}
-{{- if .UlSyncValidityDur }}
+{{- if .UlSyncValidityDurSet }}
   ntn_ul_sync_validity_dur: {{ .UlSyncValidityDur }}
 {{- end }}
 
@@ -159,6 +159,7 @@ type configData struct {
 	Polarization              string
 	TAReportSet               bool
 	TAReport                  bool
+	UlSyncValidityDurSet      bool
 	UlSyncValidityDur         int
 	PdschMaxHarqRetxs         int
 	PrachMaxMsg3HarqRetx      int
@@ -236,6 +237,7 @@ func GenerateConfig(spec *ntnv1alpha1.NTNCellConfigSpec) ([]byte, error) {
 		data.TAReport = *spec.NTN.TAReport
 	}
 	if spec.NTN.NTNUlSyncValidityDur != nil {
+		data.UlSyncValidityDurSet = true
 		data.UlSyncValidityDur = *spec.NTN.NTNUlSyncValidityDur
 	}
 
