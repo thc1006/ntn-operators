@@ -116,10 +116,12 @@ type NTNParams struct {
 	// +optional
 	SatSwitchWithResync *SatSwitchWithResync `json:"satSwitchWithResync,omitempty"`
 
-	// polarization specifies the antenna polarization.
-	// +kubebuilder:validation:Enum=linear;circular
+	// polarization specifies the antenna polarization for downlink and uplink.
+	// Per 3GPP TS 38.331 SIB19, ntn-PolarizationDL-r17 and ntn-PolarizationUL-r17
+	// are independent IEs. OCUDU collapses them under a single `polarization:` map
+	// with `dl:` / `ul:` sub-keys, matching this CRD layout.
 	// +optional
-	Polarization string `json:"polarization,omitempty"`
+	Polarization *NTNPolarization `json:"polarization,omitempty"`
 
 	// taReport enables UE TA reporting.
 	// +optional
@@ -235,6 +237,23 @@ type MovingRefLocation struct {
 	Longitude int `json:"longitude"`
 }
 
+// NTNPolarization sets the antenna polarization for downlink and uplink
+// independently, matching OCUDU's nested `polarization: { dl:, ul: }` YAML layout
+// and 3GPP TS 38.331 `ntn-PolarizationDL-r17` / `ntn-PolarizationUL-r17`.
+// At least one of `dl` / `ul` must be set when the parent is present.
+// +kubebuilder:validation:XValidation:rule="has(self.dl) || has(self.ul)",message="at least one of dl or ul must be set"
+type NTNPolarization struct {
+	// dl is the downlink polarization broadcast in SIB19 ntn-PolarizationDL-r17.
+	// +kubebuilder:validation:Enum=rhcp;lhcp;linear
+	// +optional
+	DL string `json:"dl,omitempty"`
+
+	// ul is the uplink polarization broadcast in SIB19 ntn-PolarizationUL-r17.
+	// +kubebuilder:validation:Enum=rhcp;lhcp;linear
+	// +optional
+	UL string `json:"ul,omitempty"`
+}
+
 // SatSwitchWithResync provides handover hints for satellite-to-satellite transitions.
 // 3GPP Release 18 SIB19. Allows UEs to prepare for serving cell change when
 // the current satellite leaves coverage.
@@ -345,6 +364,37 @@ type CellOverrides struct {
 	// rrcGuardTimeMs sets the RRC procedure guard time in ms.
 	// +kubebuilder:default=12800
 	RrcGuardTimeMs int `json:"rrcGuardTimeMs,omitempty"`
+
+	// sibSchedule tunes SIB19 broadcast scheduling. Any unset sub-field
+	// falls back to the defaults (siWindowLength=5, siPeriod=16,
+	// siWindowPosition=1). Tune when PDCCH capacity is tight or when
+	// SIB19 broadcast cadence needs to track short ntn-UlSyncValidityDur.
+	// +optional
+	SIBSchedule *SIBSchedule `json:"sibSchedule,omitempty"`
+}
+
+// SIBSchedule tunes SIB19 scheduling parameters per 3GPP TS 38.331
+// SI-SchedulingInfo. Enums follow OCUDU's CLI11 accepted values.
+type SIBSchedule struct {
+	// siWindowLength is the SI window length in slots. OCUDU accepts
+	// the standard set; picking a larger value increases PDCCH pressure.
+	// +kubebuilder:validation:Enum=5;10;20;40;80;160;320;640;1280
+	// +optional
+	SIWindowLength int `json:"siWindowLength,omitempty"`
+
+	// siPeriod is the SIB19 broadcast period in radio frames.
+	// Shorter periods keep UEs' NTN assistance fresh but cost air time.
+	// +kubebuilder:validation:Enum=8;16;32;64;128;256;512
+	// +optional
+	SIPeriod int `json:"siPeriod,omitempty"`
+
+	// siWindowPosition is the slot offset within the SI period. Adjust
+	// to avoid collision with SIB1/SIB2 scheduling windows. Pointer so 0
+	// (the first slot) can be distinguished from unset.
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=79
+	// +optional
+	SIWindowPosition *int `json:"siWindowPosition,omitempty"`
 }
 
 // NTNCellConfigStatus defines the observed state of NTNCellConfig.

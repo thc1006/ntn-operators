@@ -74,6 +74,50 @@ spec:
                     description: rrcGuardTimeMs sets the RRC procedure guard time
                       in ms.
                     type: integer
+                  sibSchedule:
+                    description: |-
+                      sibSchedule tunes SIB19 broadcast scheduling. Any unset sub-field
+                      falls back to the defaults (siWindowLength=5, siPeriod=16,
+                      siWindowPosition=1). Tune when PDCCH capacity is tight or when
+                      SIB19 broadcast cadence needs to track short ntn-UlSyncValidityDur.
+                    properties:
+                      siPeriod:
+                        description: |-
+                          siPeriod is the SIB19 broadcast period in radio frames.
+                          Shorter periods keep UEs' NTN assistance fresh but cost air time.
+                        enum:
+                        - 8
+                        - 16
+                        - 32
+                        - 64
+                        - 128
+                        - 256
+                        - 512
+                        type: integer
+                      siWindowLength:
+                        description: |-
+                          siWindowLength is the SI window length in slots. OCUDU accepts
+                          the standard set; picking a larger value increases PDCCH pressure.
+                        enum:
+                        - 5
+                        - 10
+                        - 20
+                        - 40
+                        - 80
+                        - 160
+                        - 320
+                        - 640
+                        - 1280
+                        type: integer
+                      siWindowPosition:
+                        description: |-
+                          siWindowPosition is the slot offset within the SI period. Adjust
+                          to avoid collision with SIB1/SIB2 scheduling windows. Pointer so 0
+                          (the first slot) can be distinguished from unset.
+                        maximum: 79
+                        minimum: 0
+                        type: integer
+                    type: object
                 type: object
               ephemerisRef:
                 description: |-
@@ -331,11 +375,32 @@ spec:
                     - regenerative
                     type: string
                   polarization:
-                    description: polarization specifies the antenna polarization.
-                    enum:
-                    - linear
-                    - circular
-                    type: string
+                    description: |-
+                      polarization specifies the antenna polarization for downlink and uplink.
+                      Per 3GPP TS 38.331 SIB19, ntn-PolarizationDL-r17 and ntn-PolarizationUL-r17
+                      are independent IEs. OCUDU collapses them under a single `polarization:` map
+                      with `dl:` / `ul:` sub-keys, matching this CRD layout.
+                    properties:
+                      dl:
+                        description: dl is the downlink polarization broadcast in
+                          SIB19 ntn-PolarizationDL-r17.
+                        enum:
+                        - rhcp
+                        - lhcp
+                        - linear
+                        type: string
+                      ul:
+                        description: ul is the uplink polarization broadcast in SIB19
+                          ntn-PolarizationUL-r17.
+                        enum:
+                        - rhcp
+                        - lhcp
+                        - linear
+                        type: string
+                    type: object
+                    x-kubernetes-validations:
+                    - message: at least one of dl or ul must be set
+                      rule: has(self.dl) || has(self.ul)
                   referenceLocation:
                     description: referenceLocation defines the NTN cell reference
                       location.

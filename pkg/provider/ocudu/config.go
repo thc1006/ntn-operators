@@ -109,8 +109,14 @@ ntn:
     target_pci: {{ .SatSwitchTargetPCI }}
     t304: {{ .SatSwitchT304 }}
 {{- end }}
-{{- if .Polarization }}
-  polarization: {{ .Polarization }}
+{{- if .HasPolarization }}
+  polarization:
+{{- if .PolarizationDL }}
+    dl: {{ .PolarizationDL }}
+{{- end }}
+{{- if .PolarizationUL }}
+    ul: {{ .PolarizationUL }}
+{{- end }}
 {{- end }}
 {{- if .TAReportSet }}
   ta_report: {{ .TAReport }}
@@ -121,11 +127,11 @@ ntn:
 
 cell_cfg:
   sib:
-    si_window_length: 5
+    si_window_length: {{ .SIWindowLength }}
     si_sched_info:
-      - si_period: 16
+      - si_period: {{ .SIPeriod }}
         sib_mapping: 19
-        si_window_position: 1
+        si_window_position: {{ .SIWindowPosition }}
   pdsch:
     max_nof_harq_retxs: {{ .PdschMaxHarqRetxs }}
   prach:
@@ -191,7 +197,9 @@ type configData struct {
 	SatSwitchWithResync       bool
 	SatSwitchTargetPCI        int
 	SatSwitchT304             int
-	Polarization              string
+	HasPolarization           bool
+	PolarizationDL            string
+	PolarizationUL            string
 	TAReportSet               bool
 	TAReport                  bool
 	UlSyncValidityDurSet      bool
@@ -199,7 +207,17 @@ type configData struct {
 	PdschMaxHarqRetxs         int
 	PrachMaxMsg3HarqRetx      int
 	RrcGuardTimeMs            int
+	SIWindowLength            int
+	SIPeriod                  int
+	SIWindowPosition          int
 }
+
+// SI scheduling defaults mirror the live-gNB-verified geo_ntn.yml values.
+const (
+	defaultSIWindowLength   = 5
+	defaultSIPeriod         = 16
+	defaultSIWindowPosition = 1
+)
 
 // GenerateConfig produces OCUDU-compatible NTN configuration YAML
 // from an NTNCellConfigSpec. The output matches the CLI11 config format
@@ -209,34 +227,60 @@ func GenerateConfig(spec *ntnv1alpha1.NTNCellConfigSpec) ([]byte, error) {
 		return nil, fmt.Errorf("spec must not be nil")
 	}
 
+	data := baseConfigData(spec)
+	applyTAInfo(&data, spec)
+	applyOptionalNTNFields(&data, spec)
+	applyStage3Fields(&data, spec)
+	applyCellOverrides(&data, spec)
+	if err := applyEphemeris(&data, spec); err != nil {
+		return nil, err
+	}
+
+	var buf bytes.Buffer
+	if err := parsedTemplate.Execute(&buf, data); err != nil {
+		return nil, fmt.Errorf("executing config template: %w", err)
+	}
+
+	return buf.Bytes(), nil
+}
+
+func baseConfigData(spec *ntnv1alpha1.NTNCellConfigSpec) configData {
 	payloadType := spec.NTN.PayloadType
 	if payloadType == "" {
 		payloadType = "transparent"
 	}
 
-	data := configData{
+	return configData{
 		PayloadType:          payloadType,
 		Koffset:              spec.NTN.CellSpecificKoffset,
 		TACommon:             spec.NTN.TACommon,
 		PdschMaxHarqRetxs:    0,
 		PrachMaxMsg3HarqRetx: 0,
 		RrcGuardTimeMs:       12800,
+		SIWindowLength:       defaultSIWindowLength,
+		SIPeriod:             defaultSIPeriod,
+		SIWindowPosition:     defaultSIWindowPosition,
+	}
+}
+
+func applyTAInfo(data *configData, spec *ntnv1alpha1.NTNCellConfigSpec) {
+	if spec.NTN.TAInfo == nil {
+		return
 	}
 
-	// Populate extended TA info fields.
-	if spec.NTN.TAInfo != nil {
-		data.TACommon = spec.NTN.TAInfo.TACommon
-		// Emit drift/offset sub-fields only when at least one is non-zero.
-		ta := spec.NTN.TAInfo
-		if ta.TACommonDrift != 0 || ta.TACommonDriftVariant != 0 || ta.TACommonOffset != 0 {
-			data.TAInfoExtended = true
-			data.TACommonDrift = spec.NTN.TAInfo.TACommonDrift
-			data.TACommonDriftVariant = spec.NTN.TAInfo.TACommonDriftVariant
-			data.TACommonOffset = spec.NTN.TAInfo.TACommonOffset
-		}
-	}
+	ta := spec.NTN.TAInfo
+	data.TACommon = ta.TACommon
 
-	// Populate optional NTN fields (Rel-17 + Rel-18).
+	// Emit drift/offset sub-fields only when at least one is non-zero.
+	if ta.TACommonDrift != 0 || ta.TACommonDriftVariant != 0 || ta.TACommonOffset != 0 {
+		data.TAInfoExtended = true
+		data.TACommonDrift = ta.TACommonDrift
+		data.TACommonDriftVariant = ta.TACommonDriftVariant
+		data.TACommonOffset = ta.TACommonOffset
+	}
+}
+
+func applyOptionalNTNFields(data *configData, spec *ntnv1alpha1.NTNCellConfigSpec) {
 	if spec.NTN.EpochTime != nil {
 		data.EpochTime = true
 		data.EpochSFN = spec.NTN.EpochTime.SFN
@@ -264,8 +308,13 @@ func GenerateConfig(spec *ntnv1alpha1.NTNCellConfigSpec) ([]byte, error) {
 		data.SatSwitchTargetPCI = spec.NTN.SatSwitchWithResync.TargetPCI
 		data.SatSwitchT304 = spec.NTN.SatSwitchWithResync.T304
 	}
-	if spec.NTN.Polarization != "" {
-		data.Polarization = spec.NTN.Polarization
+	if spec.NTN.Polarization != nil {
+		pol := spec.NTN.Polarization
+		if pol.DL != "" || pol.UL != "" {
+			data.HasPolarization = true
+			data.PolarizationDL = pol.DL
+			data.PolarizationUL = pol.UL
+		}
 	}
 	if spec.NTN.TAReport != nil {
 		data.TAReportSet = true
@@ -275,32 +324,9 @@ func GenerateConfig(spec *ntnv1alpha1.NTNCellConfigSpec) ([]byte, error) {
 		data.UlSyncValidityDurSet = true
 		data.UlSyncValidityDur = *spec.NTN.NTNUlSyncValidityDur
 	}
+}
 
-	if spec.NTN.EphemerisECEF != nil && spec.NTN.EphemerisOrbital != nil {
-		return nil, fmt.Errorf("ephemerisECEF and ephemerisOrbital are mutually exclusive")
-	}
-
-	switch {
-	case spec.NTN.EphemerisOrbital != nil:
-		data.UseOrbital = true
-		data.OrbSemiMajorAxis = spec.NTN.EphemerisOrbital.SemiMajorAxis
-		data.OrbEccentricity = spec.NTN.EphemerisOrbital.Eccentricity
-		data.OrbInclination = spec.NTN.EphemerisOrbital.Inclination
-		data.OrbRightAscension = spec.NTN.EphemerisOrbital.RightAscension
-		data.OrbArgOfPeriapsis = spec.NTN.EphemerisOrbital.ArgOfPeriapsis
-		data.OrbMeanAnomaly = spec.NTN.EphemerisOrbital.MeanAnomaly
-	case spec.NTN.EphemerisECEF != nil:
-		data.EphPosX = spec.NTN.EphemerisECEF.PosX
-		data.EphPosY = spec.NTN.EphemerisECEF.PosY
-		data.EphPosZ = spec.NTN.EphemerisECEF.PosZ
-		data.EphVelX = spec.NTN.EphemerisECEF.VelX
-		data.EphVelY = spec.NTN.EphemerisECEF.VelY
-		data.EphVelZ = spec.NTN.EphemerisECEF.VelZ
-	default:
-		return nil, fmt.Errorf("either ephemerisECEF or ephemerisOrbital must be set")
-	}
-
-	// Map Stage 3 multi-cell NTN fields.
+func applyStage3Fields(data *configData, spec *ntnv1alpha1.NTNCellConfigSpec) {
 	if len(spec.NTN.NeighborCells) > 0 {
 		data.HasNCells = true
 		for _, nc := range spec.NTN.NeighborCells {
@@ -323,24 +349,59 @@ func GenerateConfig(spec *ntnv1alpha1.NTNCellConfigSpec) ([]byte, error) {
 		data.HasTService = true
 		data.TService = *spec.NTN.TService
 	}
+}
 
-	// Apply custom overrides if provided.
-	if spec.CellOverrides != nil {
-		if spec.CellOverrides.PdschMaxHarqRetxs > 0 {
-			data.PdschMaxHarqRetxs = spec.CellOverrides.PdschMaxHarqRetxs
-		}
-		if spec.CellOverrides.PrachMaxMsg3HarqRetx > 0 {
-			data.PrachMaxMsg3HarqRetx = spec.CellOverrides.PrachMaxMsg3HarqRetx
-		}
-		if spec.CellOverrides.RrcGuardTimeMs > 0 {
-			data.RrcGuardTimeMs = spec.CellOverrides.RrcGuardTimeMs
-		}
+func applyCellOverrides(data *configData, spec *ntnv1alpha1.NTNCellConfigSpec) {
+	if spec.CellOverrides == nil {
+		return
 	}
 
-	var buf bytes.Buffer
-	if err := parsedTemplate.Execute(&buf, data); err != nil {
-		return nil, fmt.Errorf("executing config template: %w", err)
+	if spec.CellOverrides.PdschMaxHarqRetxs > 0 {
+		data.PdschMaxHarqRetxs = spec.CellOverrides.PdschMaxHarqRetxs
+	}
+	if spec.CellOverrides.PrachMaxMsg3HarqRetx > 0 {
+		data.PrachMaxMsg3HarqRetx = spec.CellOverrides.PrachMaxMsg3HarqRetx
+	}
+	if spec.CellOverrides.RrcGuardTimeMs > 0 {
+		data.RrcGuardTimeMs = spec.CellOverrides.RrcGuardTimeMs
+	}
+	if sched := spec.CellOverrides.SIBSchedule; sched != nil {
+		if sched.SIWindowLength > 0 {
+			data.SIWindowLength = sched.SIWindowLength
+		}
+		if sched.SIPeriod > 0 {
+			data.SIPeriod = sched.SIPeriod
+		}
+		if sched.SIWindowPosition != nil {
+			data.SIWindowPosition = *sched.SIWindowPosition
+		}
+	}
+}
+
+func applyEphemeris(data *configData, spec *ntnv1alpha1.NTNCellConfigSpec) error {
+	if spec.NTN.EphemerisECEF != nil && spec.NTN.EphemerisOrbital != nil {
+		return fmt.Errorf("ephemerisECEF and ephemerisOrbital are mutually exclusive")
 	}
 
-	return buf.Bytes(), nil
+	switch {
+	case spec.NTN.EphemerisOrbital != nil:
+		data.UseOrbital = true
+		data.OrbSemiMajorAxis = spec.NTN.EphemerisOrbital.SemiMajorAxis
+		data.OrbEccentricity = spec.NTN.EphemerisOrbital.Eccentricity
+		data.OrbInclination = spec.NTN.EphemerisOrbital.Inclination
+		data.OrbRightAscension = spec.NTN.EphemerisOrbital.RightAscension
+		data.OrbArgOfPeriapsis = spec.NTN.EphemerisOrbital.ArgOfPeriapsis
+		data.OrbMeanAnomaly = spec.NTN.EphemerisOrbital.MeanAnomaly
+	case spec.NTN.EphemerisECEF != nil:
+		data.EphPosX = spec.NTN.EphemerisECEF.PosX
+		data.EphPosY = spec.NTN.EphemerisECEF.PosY
+		data.EphPosZ = spec.NTN.EphemerisECEF.PosZ
+		data.EphVelX = spec.NTN.EphemerisECEF.VelX
+		data.EphVelY = spec.NTN.EphemerisECEF.VelY
+		data.EphVelZ = spec.NTN.EphemerisECEF.VelZ
+	default:
+		return fmt.Errorf("either ephemerisECEF or ephemerisOrbital must be set")
+	}
+
+	return nil
 }
