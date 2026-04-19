@@ -65,3 +65,7 @@ func (m *MockProvider) PushEphemerisUpdate(_ context.Context, _, _ string, updat
 	m.LastEphemeris = &update
 	return m.EphemerisErr
 }
+
+func (m *MockProvider) ArtifactName(crName string) string {
+	return "mock-" + crName
+}

@@ -41,15 +41,15 @@ import (
 	ntnv1alpha1 "github.com/thc1006/ntn-operators/api/v1alpha1"
 	ntnmetrics "github.com/thc1006/ntn-operators/pkg/metrics"
 	"github.com/thc1006/ntn-operators/pkg/provider"
-	"github.com/thc1006/ntn-operators/pkg/provider/ocudu"
 )
 
 // NTNCellConfigReconciler reconciles a NTNCellConfig object
 type NTNCellConfigReconciler struct {
 	client.Client
-	Scheme   *runtime.Scheme
-	Recorder events.EventRecorder
-	Provider provider.NTNProvider
+	Scheme                  *runtime.Scheme
+	Recorder                events.EventRecorder
+	Providers               map[string]provider.NTNProvider
+	MaxConcurrentReconciles int
 }
 
 const (
@@ -132,20 +132,17 @@ func (r *NTNCellConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	// Step 2: Handle finalizer for ConfigMap cleanup on deletion.
-	if done, result, err := r.handleFinalizer(ctx, cc); done {
-		return result, err
-	}
-
-	// Step 3: Guard against nil provider.
-	if r.Provider == nil {
+	// Step 2: Look up provider from registry.
+	prov, provOK := r.Providers[cc.Spec.Provider.Type]
+	if !provOK && r.Providers == nil {
+		// Guard against nil registry (misconfigured controller).
 		cc.Status.AppliedKoffset = 0
 		cc.Status.ConfigMapRef = ""
 		meta.SetStatusCondition(&cc.Status.Conditions, metav1.Condition{
 			Type:               ntnv1alpha1.ConditionConfigApplied,
 			Status:             metav1.ConditionFalse,
 			Reason:             "InternalError",
-			Message:            "NTN provider is not configured",
+			Message:            "NTN provider registry is not configured",
 			ObservedGeneration: cc.Generation,
 		})
 		if err := r.Status().Update(ctx, cc); err != nil {
@@ -154,15 +151,18 @@ func (r *NTNCellConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{RequeueAfter: time.Minute}, nil
 	}
 
-	// Step 3: Validate provider type.
-	if cc.Spec.Provider.Type != "ocudu" {
+	// Step 3: Handle finalizer for ConfigMap cleanup on deletion.
+	if done, result, err := r.handleFinalizer(ctx, cc, prov); done {
+		return result, err
+	}
+	if !provOK {
 		cc.Status.AppliedKoffset = 0
 		cc.Status.ConfigMapRef = ""
 		meta.SetStatusCondition(&cc.Status.Conditions, metav1.Condition{
 			Type:               ntnv1alpha1.ConditionConfigApplied,
 			Status:             metav1.ConditionFalse,
 			Reason:             "UnsupportedProvider",
-			Message:            fmt.Sprintf("Provider type %q is not yet supported; only 'ocudu' is available", cc.Spec.Provider.Type),
+			Message:            fmt.Sprintf("Provider type %q is not registered", cc.Spec.Provider.Type),
 			ObservedGeneration: cc.Generation,
 		})
 		if err := r.Status().Update(ctx, cc); err != nil {
@@ -184,7 +184,7 @@ func (r *NTNCellConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		"provider", spec.Provider.Type,
 		"koffset", spec.NTN.CellSpecificKoffset)
 
-	if err := r.Provider.ApplyCellConfig(ctx, cc.Name, spec); err != nil {
+	if err := prov.ApplyCellConfig(ctx, cc.Name, spec); err != nil {
 		log.Error(err, "Failed to apply cell config")
 		ntnmetrics.ConfigApplyErrorsTotal.With(prometheus.Labels{
 			"config": cc.Name, "provider": spec.Provider.Type,
@@ -211,7 +211,7 @@ func (r *NTNCellConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	cm := &corev1.ConfigMap{}
 	cmKey := client.ObjectKey{
 		Namespace: cc.Namespace,
-		Name:      ocudu.ConfigMapNameFor(cc.Name),
+		Name:      prov.ArtifactName(cc.Name),
 	}
 	if err := r.Get(ctx, cmKey, cm); err == nil {
 		if !metav1.IsControlledBy(cm, cc) {
@@ -224,7 +224,7 @@ func (r *NTNCellConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	}
 
 	// Step 6: Get applied status from provider.
-	status, err := r.Provider.GetCellStatus(ctx, cc.Name, spec.Provider.Namespace)
+	status, err := prov.GetCellStatus(ctx, cc.Name, spec.Provider.Namespace)
 	if err != nil {
 		log.Error(err, "failed to get cell status after apply")
 		meta.SetStatusCondition(&cc.Status.Conditions, metav1.Condition{
@@ -256,7 +256,7 @@ func (r *NTNCellConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	if cc.Spec.EphemerisRef == "" {
 		meta.RemoveStatusCondition(&cc.Status.Conditions, ntnv1alpha1.ConditionEphemerisPushed)
 	} else {
-		pushed, marker, err := r.pushEphemerisUpdateIfNeeded(ctx, cc, spec)
+		pushed, marker, err := r.pushEphemerisUpdateIfNeeded(ctx, cc, spec, prov)
 		if err != nil {
 			pushErr := err
 			log.Error(pushErr, "failed to push ephemeris update")
@@ -310,17 +310,23 @@ func (r *NTNCellConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 // handleFinalizer manages ConfigMap cleanup on NTNCellConfig deletion.
 // Returns (done, result, error). If done is true, the caller should return.
 func (r *NTNCellConfigReconciler) handleFinalizer(
-	ctx context.Context, cc *ntnv1alpha1.NTNCellConfig,
+	ctx context.Context, cc *ntnv1alpha1.NTNCellConfig, prov provider.NTNProvider,
 ) (bool, ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 	finalizerName := "ntn.operators.dev/configmap-cleanup"
 
 	if cc.DeletionTimestamp != nil {
 		if controllerutil.ContainsFinalizer(cc, finalizerName) {
+			if prov == nil {
+				log.Info("Provider not in registry during deletion; removing finalizer without cleanup",
+					"providerType", cc.Spec.Provider.Type)
+				controllerutil.RemoveFinalizer(cc, finalizerName)
+				return true, ctrl.Result{}, r.Update(ctx, cc)
+			}
 			cm := &corev1.ConfigMap{}
 			cmKey := client.ObjectKey{
 				Namespace: cc.Namespace,
-				Name:      ocudu.ConfigMapNameFor(cc.Name),
+				Name:      prov.ArtifactName(cc.Name),
 			}
 			if err := r.Get(ctx, cmKey, cm); err != nil {
 				if client.IgnoreNotFound(err) != nil {
@@ -358,6 +364,7 @@ func (r *NTNCellConfigReconciler) pushEphemerisUpdateIfNeeded(
 	ctx context.Context,
 	cc *ntnv1alpha1.NTNCellConfig,
 	spec *ntnv1alpha1.NTNCellConfigSpec,
+	prov provider.NTNProvider,
 ) (bool, string, error) {
 	if spec.EphemerisRef == "" {
 		return false, "", nil
@@ -393,7 +400,7 @@ func (r *NTNCellConfigReconciler) pushEphemerisUpdateIfNeeded(
 		)
 	}
 
-	if err := r.Provider.PushEphemerisUpdate(ctx, cc.Name, spec.Provider.Namespace, update); err != nil {
+	if err := prov.PushEphemerisUpdate(ctx, cc.Name, spec.Provider.Namespace, update); err != nil {
 		return false, marker, newEphemerisPushError(
 			ephemerisReasonProviderPushFailed,
 			fmt.Errorf("provider PushEphemerisUpdate: %w", err),

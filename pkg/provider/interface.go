@@ -50,4 +50,9 @@ type NTNProvider interface {
 	// Phase 1 (ConfigMap): regenerates the ephemeris section of the config.
 	// Phase 2 (future): pushes via OCUDU WebSocket handle_ntn_param_update.
 	PushEphemerisUpdate(ctx context.Context, crName, namespace string, update EphemerisUpdate) error
+
+	// ArtifactName returns the name of the backend artifact (e.g., ConfigMap)
+	// managed by this provider for the given CR name. Used by the controller
+	// for OwnerReference and finalizer cleanup without importing the provider package.
+	ArtifactName(crName string) string
 }

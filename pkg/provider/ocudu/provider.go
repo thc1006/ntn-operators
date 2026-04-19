@@ -61,6 +61,11 @@ type Provider struct {
 	client client.Client
 }
 
+// ArtifactName returns the ConfigMap name managed by this provider for the given CR.
+func (p *Provider) ArtifactName(crName string) string {
+	return ConfigMapNameFor(crName)
+}
+
 // NewProvider creates an OCUDU Provider with the given K8s client.
 func NewProvider(c client.Client) *Provider {
 	return &Provider{client: c}

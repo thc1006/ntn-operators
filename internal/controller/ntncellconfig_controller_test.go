@@ -87,7 +87,9 @@ var _ = Describe("NTNCellConfig Controller", func() {
 			Client:   k8sClient,
 			Scheme:   k8sClient.Scheme(),
 			Recorder: events.NewFakeRecorder(10),
-			Provider: p,
+			Providers: map[string]provider.NTNProvider{
+				"ocudu": p,
+			},
 		}
 	}
 
@@ -382,7 +384,9 @@ var _ = Describe("NTNCellConfig Controller", func() {
 				Client:   k8sClient,
 				Scheme:   k8sClient.Scheme(),
 				Recorder: events.NewFakeRecorder(10),
-				Provider: realProvider,
+				Providers: map[string]provider.NTNProvider{
+					"ocudu": realProvider,
+				},
 			}
 			_, err := reconcileWithFinalizer(reconciler)
 			Expect(err).NotTo(HaveOccurred())
