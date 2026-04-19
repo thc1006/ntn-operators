@@ -84,13 +84,16 @@ type FailoverPolicy struct {
 	// triggers defines conditions that initiate failover (OR logic).
 	// Format: "metric operator value" (e.g., "rsrp < -120").
 	// Validated at runtime by the failover engine (pkg/slice.ParseTrigger).
+	// Order is intentionally not significant; set merge semantics are desired.
 	// +kubebuilder:validation:MinItems=1
 	// +kubebuilder:validation:MaxItems=10
+	// +listType=set
 	Triggers []string `json:"triggers"`
 
 	// switchbackDelay is how long to wait after terrestrial recovers
 	// before switching back (prevents flapping).
 	// +kubebuilder:default="60s"
+	// +kubebuilder:validation:Format=duration
 	SwitchbackDelay metav1.Duration `json:"switchbackDelay,omitempty"`
 
 	// sessionContinuity preserves active sessions during failover.
@@ -113,6 +116,7 @@ type QoSMapping struct {
 	// maxLatencyBudget is the maximum acceptable latency including
 	// satellite propagation delay.
 	// +kubebuilder:default="150ms"
+	// +kubebuilder:validation:Format=duration
 	MaxLatencyBudget metav1.Duration `json:"maxLatencyBudget,omitempty"`
 }
 

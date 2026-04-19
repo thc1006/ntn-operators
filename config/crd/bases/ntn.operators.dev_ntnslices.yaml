@@ -93,17 +93,20 @@ spec:
                     description: |-
                       switchbackDelay is how long to wait after terrestrial recovers
                       before switching back (prevents flapping).
+                    format: duration
                     type: string
                   triggers:
                     description: |-
                       triggers defines conditions that initiate failover (OR logic).
                       Format: "metric operator value" (e.g., "rsrp < -120").
                       Validated at runtime by the failover engine (pkg/slice.ParseTrigger).
+                      Order is intentionally not significant; set merge semantics are desired.
                     items:
                       type: string
                     maxItems: 10
                     minItems: 1
                     type: array
+                    x-kubernetes-list-type: set
                 required:
                 - triggers
                 type: object
@@ -115,6 +118,7 @@ spec:
                     description: |-
                       maxLatencyBudget is the maximum acceptable latency including
                       satellite propagation delay.
+                    format: duration
                     type: string
                   satelliteQCI:
                     default: best-effort
