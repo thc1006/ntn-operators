@@ -5,7 +5,7 @@
 #
 # The wrappers are:
 #   1. {{- if .Values.crd.enable }} / {{- end }} around the whole CRD
-#   2. {{- if .Values.crd.keep }} "helm.sh/resource-policy": keep {{- end }}
+#   2. {{ if .Values.crd.keep }} "helm.sh/resource-policy": keep {{ end }}
 #      injected under metadata.annotations
 #
 # Without (1), users cannot opt out of CRD installation via `helm install
@@ -48,9 +48,9 @@ for src in "$SRC_DIR"/*.yaml; do
 		# Inject the keep annotation as the first entries under metadata.annotations.
 		/^  annotations:$/ {
 			print
-			print "    {{- if .Values.crd.keep }}"
+			print "    {{ if .Values.crd.keep }}"
 			print "    \"helm.sh/resource-policy\": keep"
-			print "    {{- end }}"
+			print "    {{ end }}"
 			next
 		}
 		{ print }
