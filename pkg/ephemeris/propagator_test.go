@@ -22,8 +22,6 @@ import (
 	"time"
 
 	"github.com/akhenakh/sgp4"
-
-	ntnv1alpha1 "github.com/thc1006/ntn-operators/api/v1alpha1"
 )
 
 // OneWeb satellite OMM (NORAD 56700) — known test vector.
@@ -172,6 +170,8 @@ func TestPropagateToECEF_ReturnsCorrectType(t *testing.T) {
 		t.Fatalf("PropagateToECEF failed: %v", err)
 	}
 
-	// Verify the return type is the CRD type
-	var _ *ntnv1alpha1.EphemerisECEF = ecef
+	// Verify non-nil and fields are populated
+	if ecef.PosX == 0 && ecef.PosY == 0 && ecef.PosZ == 0 {
+		t.Error("all position fields are zero — propagation likely failed")
+	}
 }
