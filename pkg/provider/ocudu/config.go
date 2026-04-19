@@ -27,12 +27,12 @@ import (
 )
 
 // yamlQuote emits a YAML 1.2 double-quoted string using Go's strconv.Quote.
-// JSON-style double-quoted strings are a valid subset of YAML 1.2 scalars;
-// newlines, colons, and other YAML-significant chars are escaped, preventing
-// string injection from bleeding into the surrounding YAML structure even
-// if apiserver enum validation is somehow bypassed (webhook misconfig,
-// direct etcd write during migration, apiserver with --feature-gates=
-// CRDValidation=false).
+// strconv.Quote produces a Go-escaped double-quoted string; YAML 1.2
+// double-quoted scalars accept these escapes, so newlines, colons, and other
+// YAML-significant chars are escaped, preventing string injection from
+// bleeding into the surrounding YAML structure even if apiserver enum
+// validation is somehow bypassed (webhook misconfig, direct etcd write during
+// migration, apiserver with --feature-gates=CRDValidation=false).
 func yamlQuote(s string) string {
 	return strconv.Quote(s)
 }
