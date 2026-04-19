@@ -1,0 +1,30 @@
+#!/bin/bash
+# Pre-commit hook: runs gofmt + go build + golangci-lint before commit.
+# Install: git config core.hooksPath .githooks
+set -euo pipefail
+
+echo "==> pre-commit: gofmt check"
+GOFMT_OUT=$(gofmt -l . 2>&1 | grep -v vendor) || true
+if [ -n "$GOFMT_OUT" ]; then
+  echo "gofmt: files not formatted:"
+  echo "$GOFMT_OUT"
+  echo "Run: gofmt -w ."
+  exit 1
+fi
+
+echo "==> pre-commit: go build"
+go build ./... || exit 1
+
+echo "==> pre-commit: go test (short)"
+go test -short -count=1 ./... || exit 1
+
+echo "==> pre-commit: golangci-lint"
+if [ -x ./bin/golangci-lint ]; then
+  ./bin/golangci-lint run || exit 1
+elif command -v golangci-lint > /dev/null 2>&1; then
+  golangci-lint run || exit 1
+else
+  echo "WARNING: golangci-lint not found, skipping lint"
+fi
+
+echo "==> pre-commit: all checks passed"

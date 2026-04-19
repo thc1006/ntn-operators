@@ -40,6 +40,11 @@ ntn:
   cell_specific_koffset: {{ .Koffset }}
   ta_info:
     ta_common: {{ .TACommon }}
+{{- if .TAInfoExtended }}
+    ta_common_drift: {{ .TACommonDrift }}
+    ta_common_drift_variant: {{ .TACommonDriftVariant }}
+    ta_common_offset: {{ .TACommonOffset }}
+{{- end }}
 {{- if .UseOrbital }}
   ephemeris_orbital:
     semi_major_axis: {{ .OrbSemiMajorAxis }}
@@ -56,6 +61,23 @@ ntn:
     vel_x: {{ .EphVelX }}
     vel_y: {{ .EphVelY }}
     vel_z: {{ .EphVelZ }}
+{{- end }}
+{{- if .EpochTime }}
+  epoch_time:
+    sfn: {{ .EpochSFN }}
+    subframe_number: {{ .EpochSubframeNumber }}
+{{- end }}
+{{- if .FeederLink }}
+  feeder_link_info:
+    enable_doppler_compensation: {{ .FeederDopplerCompensation }}
+    dl_freq: {{ .FeederDLFreq }}
+    ul_freq: {{ .FeederULFreq }}
+{{- end }}
+{{- if .GatewayLocation }}
+  ntn_gateway_location:
+    latitude: {{ .GatewayLatitude }}
+    longitude: {{ .GatewayLongitude }}
+    altitude: {{ .GatewayAltitude }}
 {{- end }}
 {{- if .HasNCells }}
   ncells:
@@ -76,6 +98,25 @@ ntn:
 {{- end }}
 {{- if .HasTService }}
   t_service: {{ .TService }}
+{{- end }}
+{{- if .MovingRefLocation }}
+  moving_ref_location:
+    latitude: {{ .MovingRefLatitude }}
+    longitude: {{ .MovingRefLongitude }}
+{{- end }}
+{{- if .SatSwitchWithResync }}
+  sat_switch_with_resync:
+    target_pci: {{ .SatSwitchTargetPCI }}
+    t304: {{ .SatSwitchT304 }}
+{{- end }}
+{{- if .Polarization }}
+  polarization: {{ .Polarization }}
+{{- end }}
+{{- if .TAReportSet }}
+  ta_report: {{ .TAReport }}
+{{- end }}
+{{- if .UlSyncValidityDurSet }}
+  ntn_ul_sync_validity_dur: {{ .UlSyncValidityDur }}
 {{- end }}
 
 cell_cfg:
@@ -104,34 +145,60 @@ type ntnNeighborCellData struct {
 }
 
 type configData struct {
-	PayloadType          string
-	Koffset              int
-	TACommon             int
-	UseOrbital           bool
-	EphPosX              int
-	EphPosY              int
-	EphPosZ              int
-	EphVelX              int
-	EphVelY              int
-	EphVelZ              int
-	OrbSemiMajorAxis     int
-	OrbEccentricity      int
-	OrbInclination       int
-	OrbRightAscension    int
-	OrbArgOfPeriapsis    int
-	OrbMeanAnomaly       int
-	PdschMaxHarqRetxs    int
-	PrachMaxMsg3HarqRetx int
-	RrcGuardTimeMs       int
-	HasNCells            bool
-	NCells               []ntnNeighborCellData
-	HasReferenceLocation bool
-	RefLatitude          int
-	RefLongitude         int
-	HasDistanceThreshold bool
-	DistanceThreshold    int
-	HasTService          bool
-	TService             int
+	PayloadType               string
+	Koffset                   int
+	TACommon                  int
+	TAInfoExtended            bool
+	TACommonDrift             int
+	TACommonDriftVariant      int
+	TACommonOffset            int
+	UseOrbital                bool
+	EphPosX                   int
+	EphPosY                   int
+	EphPosZ                   int
+	EphVelX                   int
+	EphVelY                   int
+	EphVelZ                   int
+	OrbSemiMajorAxis          int
+	OrbEccentricity           int
+	OrbInclination            int
+	OrbRightAscension         int
+	OrbArgOfPeriapsis         int
+	OrbMeanAnomaly            int
+	EpochTime                 bool
+	EpochSFN                  int
+	EpochSubframeNumber       int
+	FeederLink                bool
+	FeederDopplerCompensation bool
+	FeederDLFreq              int64
+	FeederULFreq              int64
+	GatewayLocation           bool
+	GatewayLatitude           int
+	GatewayLongitude          int
+	GatewayAltitude           int
+	HasNCells                 bool
+	NCells                    []ntnNeighborCellData
+	HasReferenceLocation      bool
+	RefLatitude               int
+	RefLongitude              int
+	HasDistanceThreshold      bool
+	DistanceThreshold         int
+	HasTService               bool
+	TService                  int
+	MovingRefLocation         bool
+	MovingRefLatitude         int
+	MovingRefLongitude        int
+	SatSwitchWithResync       bool
+	SatSwitchTargetPCI        int
+	SatSwitchT304             int
+	Polarization              string
+	TAReportSet               bool
+	TAReport                  bool
+	UlSyncValidityDurSet      bool
+	UlSyncValidityDur         int
+	PdschMaxHarqRetxs         int
+	PrachMaxMsg3HarqRetx      int
+	RrcGuardTimeMs            int
 }
 
 // GenerateConfig produces srsRAN/OCUDU-compatible NTN configuration YAML
@@ -154,6 +221,59 @@ func GenerateConfig(spec *ntnv1alpha1.NTNCellConfigSpec) ([]byte, error) {
 		PdschMaxHarqRetxs:    0,
 		PrachMaxMsg3HarqRetx: 0,
 		RrcGuardTimeMs:       12800,
+	}
+
+	// Populate extended TA info fields.
+	if spec.NTN.TAInfo != nil {
+		data.TACommon = spec.NTN.TAInfo.TACommon
+		// Emit drift/offset sub-fields only when at least one is non-zero.
+		ta := spec.NTN.TAInfo
+		if ta.TACommonDrift != 0 || ta.TACommonDriftVariant != 0 || ta.TACommonOffset != 0 {
+			data.TAInfoExtended = true
+			data.TACommonDrift = spec.NTN.TAInfo.TACommonDrift
+			data.TACommonDriftVariant = spec.NTN.TAInfo.TACommonDriftVariant
+			data.TACommonOffset = spec.NTN.TAInfo.TACommonOffset
+		}
+	}
+
+	// Populate optional NTN fields (Rel-17 + Rel-18).
+	if spec.NTN.EpochTime != nil {
+		data.EpochTime = true
+		data.EpochSFN = spec.NTN.EpochTime.SFN
+		data.EpochSubframeNumber = spec.NTN.EpochTime.SubframeNumber
+	}
+	if spec.NTN.FeederLinkInfo != nil {
+		data.FeederLink = true
+		data.FeederDopplerCompensation = spec.NTN.FeederLinkInfo.EnableDopplerCompensation
+		data.FeederDLFreq = spec.NTN.FeederLinkInfo.DLFreqHz
+		data.FeederULFreq = spec.NTN.FeederLinkInfo.ULFreqHz
+	}
+	if spec.NTN.NTNGatewayLocation != nil {
+		data.GatewayLocation = true
+		data.GatewayLatitude = spec.NTN.NTNGatewayLocation.Latitude
+		data.GatewayLongitude = spec.NTN.NTNGatewayLocation.Longitude
+		data.GatewayAltitude = spec.NTN.NTNGatewayLocation.Altitude
+	}
+	if spec.NTN.MovingRefLocation != nil {
+		data.MovingRefLocation = true
+		data.MovingRefLatitude = spec.NTN.MovingRefLocation.Latitude
+		data.MovingRefLongitude = spec.NTN.MovingRefLocation.Longitude
+	}
+	if spec.NTN.SatSwitchWithResync != nil {
+		data.SatSwitchWithResync = true
+		data.SatSwitchTargetPCI = spec.NTN.SatSwitchWithResync.TargetPCI
+		data.SatSwitchT304 = spec.NTN.SatSwitchWithResync.T304
+	}
+	if spec.NTN.Polarization != "" {
+		data.Polarization = spec.NTN.Polarization
+	}
+	if spec.NTN.TAReport != nil {
+		data.TAReportSet = true
+		data.TAReport = *spec.NTN.TAReport
+	}
+	if spec.NTN.NTNUlSyncValidityDur != nil {
+		data.UlSyncValidityDurSet = true
+		data.UlSyncValidityDur = *spec.NTN.NTNUlSyncValidityDur
 	}
 
 	if spec.NTN.EphemerisECEF != nil && spec.NTN.EphemerisOrbital != nil {
