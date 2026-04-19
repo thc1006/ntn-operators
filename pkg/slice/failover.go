@@ -121,7 +121,13 @@ func (t Trigger) EvaluateRecovery(m Metrics, margin float64) bool {
 	case "<", "<=":
 		return actual >= t.Value+margin
 	case ">", ">=":
-		return actual <= t.Value-margin
+		// Clamp recovery threshold to 0 for non-negative metrics
+		// (e.g., packetLoss > 5 with margin 10 → threshold 0, not -5).
+		recoveryThreshold := t.Value - margin
+		if recoveryThreshold < 0 {
+			recoveryThreshold = 0
+		}
+		return actual <= recoveryThreshold
 	default:
 		return false // unknown operator — fail-safe
 	}
@@ -202,7 +208,11 @@ func parseTriggerSet(log logr.Logger, triggers []string, metrics Metrics) trigge
 	for _, triggerStr := range triggers {
 		trigger, err := ParseTrigger(triggerStr)
 		if err != nil {
-			parseErrors++
+			// Only count parse errors seen before (or without) a match,
+			// matching legacy short-circuit semantics for parseSuffix.
+			if !result.anyTriggered {
+				parseErrors++
+			}
 			log.V(1).Info("invalid trigger expression", "trigger", triggerStr, "error", err.Error())
 			continue
 		}
@@ -212,12 +222,12 @@ func parseTriggerSet(log logr.Logger, triggers []string, metrics Metrics) trigge
 			log.V(2).Info("trigger matched", "trigger", triggerStr)
 		}
 	}
-	if parseErrors > 0 {
-		if parseErrors == len(triggers) {
-			result.allInvalid = true
-		} else {
-			result.parseSuffix = fmt.Sprintf(" (%d of %d triggers had parse errors)", parseErrors, len(triggers))
-		}
+	if len(result.parsed) == 0 && parseErrors > 0 {
+		result.allInvalid = true
+	} else if parseErrors > 0 {
+		result.parseSuffix = fmt.Sprintf(
+			" (%d of %d triggers had parse errors)",
+			parseErrors, len(triggers))
 	}
 	return result
 }

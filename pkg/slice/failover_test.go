@@ -418,7 +418,8 @@ func TestEvaluateWithHysteresis_AllInvalidTriggers(t *testing.T) {
 }
 
 func TestEvaluateWithHysteresis_MixedValidInvalidTriggers(t *testing.T) {
-	mixed := []string{"latency > 200", "rsrp << -120"} // second is invalid
+	// Invalid trigger appears BEFORE the valid one → parse error counted.
+	mixed := []string{"rsrp << -120", "latency > 200"} // first is invalid
 	got := EvaluateFailoverWithHysteresis(
 		context.Background(),
 		PathSatellite, mixed,
