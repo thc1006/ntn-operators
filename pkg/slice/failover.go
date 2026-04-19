@@ -446,7 +446,9 @@ func EvaluateFailoverWithHysteresis(
 	if !allRecovered {
 		return finish(FailoverResult{
 			Decision:   DecisionStay,
-			Reason:     fmt.Sprintf("Terrestrial in hysteresis dead-band (margin=%g), staying on satellite%s", hysteresisDB, parseSuffix),
+			Reason: fmt.Sprintf(
+				"Terrestrial in hysteresis dead-band (margin=%g), staying on satellite%s",
+				hysteresisDB, parseSuffix),
 			TargetPath: PathSatellite,
 		})
 	}
