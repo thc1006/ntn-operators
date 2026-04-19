@@ -71,9 +71,9 @@ jobs:
           severity: 'CRITICAL,HIGH'
           timeout: '10m'
 
-      # Note: The local scan covers the Go binary and distroless base image
-      # (arch-independent). ko multi-arch builds share the same binary and
-      # base layer, so a local amd64 scan is sufficient to gate the push.
+      # Note: The local scan only covers the amd64 platform. arm64-specific
+      # base layer differences are not scanned here. This is a best-effort
+      # gate; for full coverage, per-platform scanning would be needed.
 
       - name: Push multi-arch image to GHCR
         id: ko-push
@@ -93,13 +93,15 @@ jobs:
         run: cosign sign --yes --recursive ${{ steps.ko-push.outputs.DIGEST }}
 
       - name: Generate SBOM (SPDX)
+        # Syft resolves multi-arch ref to the runner's platform (amd64).
+        # The SBOM is attached to the index digest only (not per-platform).
         run: |
           syft ${{ steps.ko-push.outputs.DIGEST }} \
             -o spdx-json=sbom.spdx.json
 
-      - name: Attest SBOM to image
+      - name: Attest SBOM to image index
         run: |
-          cosign attest --yes --recursive \
+          cosign attest --yes \
             --type spdxjson \
             --predicate sbom.spdx.json \
             ${{ steps.ko-push.outputs.DIGEST }}
