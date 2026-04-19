@@ -291,14 +291,14 @@ func (r *NTNCellConfigReconciler) pushEphemerisUpdateIfNeeded(
 	cc *ntnv1alpha1.NTNCellConfig,
 	spec *ntnv1alpha1.NTNCellConfigSpec,
 ) (bool, string, error) {
-	if cc.Spec.EphemerisRef == "" {
+	if spec.EphemerisRef == "" {
 		return false, "", nil
 	}
 
 	eph := &ntnv1alpha1.SatelliteEphemeris{}
-	ephKey := client.ObjectKey{Namespace: cc.Namespace, Name: cc.Spec.EphemerisRef}
+	ephKey := client.ObjectKey{Namespace: cc.Namespace, Name: spec.EphemerisRef}
 	if err := r.Get(ctx, ephKey, eph); err != nil {
-		return false, "", fmt.Errorf("getting referenced SatelliteEphemeris %q: %w", cc.Spec.EphemerisRef, err)
+		return false, "", fmt.Errorf("getting referenced SatelliteEphemeris %q: %w", spec.EphemerisRef, err)
 	}
 	marker := ephemerisPushMarker(eph)
 	if isEphemerisPushUpToDate(cc, marker) {

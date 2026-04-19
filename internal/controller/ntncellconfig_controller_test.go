@@ -478,9 +478,16 @@ var _ = Describe("NTNCellConfig Controller", func() {
 			deleteCellConfig(cellNN)
 			eph := &ntnv1alpha1.SatelliteEphemeris{}
 			err := k8sClient.Get(context.Background(), ephNN, eph)
-			if err == nil {
-				_ = k8sClient.Delete(context.Background(), eph)
+			if apierrors.IsNotFound(err) {
+				return
 			}
+			Expect(err).NotTo(HaveOccurred())
+
+			err = k8sClient.Delete(context.Background(), eph)
+			if apierrors.IsNotFound(err) {
+				return
+			}
+			Expect(err).NotTo(HaveOccurred())
 		})
 
 		It("should invoke PushEphemerisUpdate on provider", func() {
