@@ -75,6 +75,16 @@ spec:
                       in ms.
                     type: integer
                 type: object
+              ephemerisRef:
+                description: |-
+                  ephemerisRef is the name of a SatelliteEphemeris CR in the same namespace.
+                  When set, the controller re-reconciles this NTNCellConfig whenever the
+                  referenced SatelliteEphemeris is updated. Future work will consume the
+                  ephemeris data for dynamic NTN parameter updates; currently this field
+                  only triggers reconciliation. The static ephemeris in spec.ntn
+                  (ephemerisECEF or ephemerisOrbital) remains required.
+                minLength: 1
+                type: string
               ntn:
                 description: ntn contains NTN-specific radio parameters per 3GPP TS
                   38.213 / OCUDU geo_ntn.yml.

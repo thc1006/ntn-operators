@@ -33,6 +33,16 @@ type NTNCellConfigSpec struct {
 	// cellOverrides allows fine-tuning PUCCH, PDSCH, PRACH, and RRC parameters.
 	// +optional
 	CellOverrides *CellOverrides `json:"cellOverrides,omitempty"`
+
+	// ephemerisRef is the name of a SatelliteEphemeris CR in the same namespace.
+	// When set, the controller re-reconciles this NTNCellConfig whenever the
+	// referenced SatelliteEphemeris is updated. Future work will consume the
+	// ephemeris data for dynamic NTN parameter updates; currently this field
+	// only triggers reconciliation. The static ephemeris in spec.ntn
+	// (ephemerisECEF or ephemerisOrbital) remains required.
+	// +kubebuilder:validation:MinLength=1
+	// +optional
+	EphemerisRef string `json:"ephemerisRef,omitempty"`
 }
 
 // ProviderRef identifies the NTN backend provider.
