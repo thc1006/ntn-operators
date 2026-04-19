@@ -1,9 +1,15 @@
 #!/usr/bin/env bash
 # Verify .claude/ follows the flat Claude Code directory structure.
-# Usage: hack/verify-claude-structure.sh
+# Usage: hack/verify-claude-structure.sh [--strict AGENTS COMMANDS SKILLS]
+# Example: hack/verify-claude-structure.sh --strict 45 33 32
 
 set -euo pipefail
 ERRORS=0
+STRICT=""
+EXPECT_AGENTS=0; EXPECT_COMMANDS=0; EXPECT_SKILLS=0
+if [ "${1:-}" = "--strict" ] && [ $# -eq 4 ]; then
+  STRICT=1; EXPECT_AGENTS=$2; EXPECT_COMMANDS=$3; EXPECT_SKILLS=$4
+fi
 
 echo "=== Verifying .claude/ flat structure ==="
 
@@ -40,7 +46,7 @@ for d in .claude/skills/*/; do
   fi
 done
 
-# 4. Count summary (informational, not enforced)
+# 4. Count summary (enforced only with --strict)
 agents=$(find .claude/agents -maxdepth 1 -name '*.md' -type f 2>/dev/null | wc -l)
 commands=$(find .claude/commands -maxdepth 1 -name '*.md' -type f 2>/dev/null | wc -l)
 skills=$(find .claude/skills -maxdepth 1 -mindepth 1 -type d 2>/dev/null | wc -l)
@@ -48,6 +54,12 @@ echo ""
 echo "Agents:   $agents"
 echo "Commands: $commands"
 echo "Skills:   $skills"
+
+if [ -n "$STRICT" ]; then
+  [ "$agents" -eq "$EXPECT_AGENTS" ] || { echo "ERROR: expected $EXPECT_AGENTS agents, got $agents"; ERRORS=$((ERRORS + 1)); }
+  [ "$commands" -eq "$EXPECT_COMMANDS" ] || { echo "ERROR: expected $EXPECT_COMMANDS commands, got $commands"; ERRORS=$((ERRORS + 1)); }
+  [ "$skills" -eq "$EXPECT_SKILLS" ] || { echo "ERROR: expected $EXPECT_SKILLS skills, got $skills"; ERRORS=$((ERRORS + 1)); }
+fi
 
 if [ "$ERRORS" -eq 0 ]; then
   echo ""
