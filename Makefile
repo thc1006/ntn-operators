@@ -260,7 +260,7 @@ CRDOC ?= $(LOCALBIN)/crdoc
 
 .PHONY: docs
 docs: ## Generate API reference documentation from CRDs.
-	@command -v $(CRDOC) >/dev/null 2>&1 || GOBIN="$(LOCALBIN)" go install fybrik.io/crdoc@latest
+	@command -v $(CRDOC) >/dev/null 2>&1 || GOBIN="$(LOCALBIN)" go install fybrik.io/crdoc@v0.6.4
 	$(CRDOC) --resources config/crd/bases --output docs/api-reference.md
 
 ##@ ko Build
@@ -279,7 +279,7 @@ ko-push: ## Build and push multi-arch image with ko.
 ##@ Helm Deployment
 
 ## Helm binary to use for deploying the chart
-HELM ?= helm
+HELM ?= $(LOCALBIN)/helm
 ## Namespace to deploy the Helm release
 HELM_NAMESPACE ?= ntn-operators-system
 ## Name of the Helm release
@@ -289,11 +289,20 @@ HELM_CHART_DIR ?= dist/chart
 ## Additional arguments to pass to helm commands
 HELM_EXTRA_ARGS ?=
 
+HELM_VERSION ?= v3.17.4
 .PHONY: install-helm
-install-helm: ## Install the latest version of Helm.
-	@command -v $(HELM) >/dev/null 2>&1 || { \
-		echo "Installing Helm..." && \
-		curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash; \
+install-helm: $(LOCALBIN) ## Install Helm (pinned version).
+	@{ command -v "$(HELM)" > /dev/null 2>&1 && "$(HELM)" version --short 2>/dev/null | grep -q "$(HELM_VERSION)"; } || { \
+		HELM_OS=$$(uname -s | tr '[:upper:]' '[:lower:]') && \
+		HELM_ARCH=$$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/') && \
+		HELM_TMPDIR=$$(mktemp -d) && \
+		trap "rm -rf \"$${HELM_TMPDIR}\"" EXIT && \
+		echo "Installing Helm $(HELM_VERSION) ($${HELM_OS}/$${HELM_ARCH})..." && \
+		curl -fsSL -o "$${HELM_TMPDIR}/helm.tar.gz" "https://get.helm.sh/helm-$(HELM_VERSION)-$${HELM_OS}-$${HELM_ARCH}.tar.gz" && \
+		curl -fsSL -o "$${HELM_TMPDIR}/helm.tar.gz.sha256" "https://get.helm.sh/helm-$(HELM_VERSION)-$${HELM_OS}-$${HELM_ARCH}.tar.gz.sha256" && \
+		echo "$$(cat $${HELM_TMPDIR}/helm.tar.gz.sha256)  $${HELM_TMPDIR}/helm.tar.gz" | sha256sum -c - && \
+		tar -xzf "$${HELM_TMPDIR}/helm.tar.gz" -C "$${HELM_TMPDIR}" && \
+		mv "$${HELM_TMPDIR}/$${HELM_OS}-$${HELM_ARCH}/helm" "$(HELM)"; \
 	}
 
 .PHONY: helm-deploy
