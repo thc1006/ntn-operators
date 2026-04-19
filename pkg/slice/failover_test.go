@@ -471,10 +471,10 @@ func TestEvaluateWithHysteresis_RecoveryBoundarySemantics(t *testing.T) {
 		margin  float64
 		wantDec Decision
 	}{
-		// rsrp < -120, margin 10 → recovery at >= -110
-		{"rsrp at boundary", "rsrp < -120",
+		// rsrp < -120, margin 10 → recovery at >= -110, so exactly -110 triggers switchback
+		{"rsrp at inclusive recovery boundary", "rsrp < -120",
 			Metrics{RSRP: -110, LatencyMs: 20, PacketLossPercent: 0.1}, 10, DecisionSwitchback},
-		{"rsrp past boundary", "rsrp < -120",
+		{"rsrp beyond recovery boundary", "rsrp < -120",
 			Metrics{RSRP: -109, LatencyMs: 20, PacketLossPercent: 0.1}, 10, DecisionSwitchback},
 		// latency > 200, margin 30 → recovery at <= 170
 		{"latency at boundary", "latency > 200",
