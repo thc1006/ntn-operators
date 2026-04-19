@@ -20,6 +20,10 @@ import (
 	"strings"
 	"testing"
 
+	// Aliased to k8syaml so tests can freely use a local `yaml := string(data)`
+	// without shadowing the import (revive import-shadowing check).
+	k8syaml "sigs.k8s.io/yaml"
+
 	ntnv1alpha1 "github.com/thc1006/ntn-operators/api/v1alpha1"
 )
 
@@ -765,6 +769,61 @@ func TestGenerateConfig_SIBScheduleZeroPositionRespected(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	assertContains(t, string(data), "si_window_position: 0")
+}
+
+// TestGenerateConfig_YAMLRoundTrip asserts the renderer emits structurally
+// valid YAML for a maximal spec combining every field set PRs #45 and #46
+// introduced. Catches indentation drift from future template edits.
+func TestGenerateConfig_YAMLRoundTrip(t *testing.T) {
+	dur := 900
+	pos := 3
+	spec := &ntnv1alpha1.NTNCellConfigSpec{
+		NTN: ntnv1alpha1.NTNParams{
+			CellSpecificKoffset:  150,
+			TACommon:             0,
+			NTNUlSyncValidityDur: &dur,
+			PayloadType:          "regenerative",
+			Polarization:         &ntnv1alpha1.NTNPolarization{DL: "rhcp", UL: "lhcp"},
+			TAInfo: &ntnv1alpha1.TAInfo{
+				TACommon:             1000,
+				TACommonDrift:        50,
+				TACommonDriftVariant: 10,
+				TACommonOffset:       200,
+			},
+			EpochTime:           &ntnv1alpha1.EpochTime{SFN: 512, SubframeNumber: 5},
+			EphemerisECEF:       &ntnv1alpha1.EphemerisECEF{PosX: 1, PosY: 2, PosZ: 3, VelX: 10, VelY: 20, VelZ: 30},
+			MovingRefLocation:   &ntnv1alpha1.MovingRefLocation{Latitude: 248500, Longitude: 1210000},
+			SatSwitchWithResync: &ntnv1alpha1.SatSwitchWithResync{TargetPCI: 1, T304: 100},
+			NeighborCells: []ntnv1alpha1.NTNNeighborCell{
+				{PhysicalCellID: 7, Frequency: 632628},
+				{PhysicalCellID: 42},
+			},
+		},
+		CellOverrides: &ntnv1alpha1.CellOverrides{
+			PdschMaxHarqRetxs:    2,
+			PrachMaxMsg3HarqRetx: 1,
+			RrcGuardTimeMs:       25600,
+			SIBSchedule: &ntnv1alpha1.SIBSchedule{
+				SIWindowLength:   20,
+				SIPeriod:         32,
+				SIWindowPosition: &pos,
+			},
+		},
+	}
+	data, err := GenerateConfig(spec)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var parsed map[string]any
+	if err := k8syaml.Unmarshal(data, &parsed); err != nil {
+		t.Fatalf("rendered output is not valid YAML: %v\n\n%s", err, data)
+	}
+	if _, ok := parsed["ntn"]; !ok {
+		t.Errorf("round-trip parse missing ntn key: %s", data)
+	}
+	if _, ok := parsed["cell_cfg"]; !ok {
+		t.Errorf("round-trip parse missing cell_cfg key: %s", data)
+	}
 }
 
 func assertContains(t *testing.T, haystack, needle string) {
