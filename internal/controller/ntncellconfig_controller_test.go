@@ -511,11 +511,21 @@ var _ = Describe("NTNCellConfig Controller", func() {
 			Expect(ephCond.Status).To(Equal(metav1.ConditionTrue))
 			Expect(ephCond.Reason).To(Equal("Pushed"))
 
-			// Third reconcile should not re-push if referenced ephemeris resourceVersion is unchanged.
-			result, err = reconciler.Reconcile(context.Background(), reconcile.Request{NamespacedName: cellNN})
-			Expect(err).NotTo(HaveOccurred())
-			Expect(result.RequeueAfter).To(Equal(5 * time.Minute))
-			Expect(mock.EphemerisCalls).To(Equal(1))
+				// Metadata-only updates can bump resourceVersion without changing ephemeris data.
+				// Ensure dedupe does not treat this as a new ephemeris revision.
+				eph := &ntnv1alpha1.SatelliteEphemeris{}
+				Expect(k8sClient.Get(context.Background(), ephNN, eph)).To(Succeed())
+				if eph.Annotations == nil {
+					eph.Annotations = map[string]string{}
+				}
+				eph.Annotations["review/test-rv-bump"] = "true"
+				Expect(k8sClient.Update(context.Background(), eph)).To(Succeed())
+
+				// Third reconcile should not re-push when generation + lastUpdated marker is unchanged.
+				result, err = reconciler.Reconcile(context.Background(), reconcile.Request{NamespacedName: cellNN})
+				Expect(err).NotTo(HaveOccurred())
+				Expect(result.RequeueAfter).To(Equal(5 * time.Minute))
+				Expect(mock.EphemerisCalls).To(Equal(1))
 		})
 
 		It("should keep ConfigApplied true and set EphemerisPushed=false when push fails", func() {

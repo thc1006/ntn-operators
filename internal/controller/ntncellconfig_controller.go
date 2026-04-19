@@ -300,7 +300,7 @@ func (r *NTNCellConfigReconciler) pushEphemerisUpdateIfNeeded(
 	if err := r.Get(ctx, ephKey, eph); err != nil {
 		return false, "", fmt.Errorf("getting referenced SatelliteEphemeris %q: %w", cc.Spec.EphemerisRef, err)
 	}
-	marker := ephemerisPushMarker(cc.Spec.EphemerisRef, eph.ResourceVersion)
+	marker := ephemerisPushMarker(eph)
 	if isEphemerisPushUpToDate(cc, marker) {
 		return false, marker, nil
 	}
@@ -332,8 +332,12 @@ func isEphemerisPushUpToDate(cc *ntnv1alpha1.NTNCellConfig, marker string) bool 
 		cond.Message == marker
 }
 
-func ephemerisPushMarker(ephemerisRef, resourceVersion string) string {
-	return fmt.Sprintf("ephemerisRef=%s resourceVersion=%s", ephemerisRef, resourceVersion)
+func ephemerisPushMarker(eph *ntnv1alpha1.SatelliteEphemeris) string {
+	lastUpdated := "none"
+	if eph.Status.LastUpdated != nil {
+		lastUpdated = eph.Status.LastUpdated.UTC().Format(time.RFC3339Nano)
+	}
+	return fmt.Sprintf("ephemerisRef=%s generation=%d lastUpdated=%s", eph.Name, eph.Generation, lastUpdated)
 }
 
 // SetupWithManager sets up the controller with the Manager.
