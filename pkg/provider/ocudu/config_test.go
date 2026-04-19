@@ -290,18 +290,88 @@ func TestGenerateConfig_GatewayLocation(t *testing.T) {
 	assertContains(t, yaml, "altitude: 100")
 }
 
-func TestGenerateConfig_Polarization(t *testing.T) {
+func TestGenerateConfig_PolarizationBoth(t *testing.T) {
 	spec := &ntnv1alpha1.NTNCellConfigSpec{
 		NTN: ntnv1alpha1.NTNParams{
 			EphemerisECEF: &ntnv1alpha1.EphemerisECEF{PosX: 1, PosY: 2, PosZ: 3},
-			Polarization:  "circular",
+			Polarization:  &ntnv1alpha1.NTNPolarization{DL: "rhcp", UL: "lhcp"},
 		},
 	}
 	data, err := GenerateConfig(spec)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	assertContains(t, string(data), "polarization: circular")
+	yaml := string(data)
+	// Nested OCUDU layout: polarization: { dl:, ul: }
+	assertContains(t, yaml, "polarization:")
+	assertContains(t, yaml, "    dl: rhcp")
+	assertContains(t, yaml, "    ul: lhcp")
+	// MUST NOT emit the old flat scalar form.
+	assertNotContains(t, yaml, "polarization: rhcp")
+	assertNotContains(t, yaml, "polarization: lhcp")
+	assertNotContains(t, yaml, "polarization: circular")
+}
+
+func TestGenerateConfig_PolarizationDLOnly(t *testing.T) {
+	spec := &ntnv1alpha1.NTNCellConfigSpec{
+		NTN: ntnv1alpha1.NTNParams{
+			EphemerisECEF: &ntnv1alpha1.EphemerisECEF{PosX: 1, PosY: 2, PosZ: 3},
+			Polarization:  &ntnv1alpha1.NTNPolarization{DL: "linear"},
+		},
+	}
+	data, err := GenerateConfig(spec)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	yaml := string(data)
+	assertContains(t, yaml, "polarization:")
+	assertContains(t, yaml, "    dl: linear")
+	assertNotContains(t, yaml, "ul:")
+}
+
+func TestGenerateConfig_PolarizationULOnly(t *testing.T) {
+	spec := &ntnv1alpha1.NTNCellConfigSpec{
+		NTN: ntnv1alpha1.NTNParams{
+			EphemerisECEF: &ntnv1alpha1.EphemerisECEF{PosX: 1, PosY: 2, PosZ: 3},
+			Polarization:  &ntnv1alpha1.NTNPolarization{UL: "rhcp"},
+		},
+	}
+	data, err := GenerateConfig(spec)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	yaml := string(data)
+	assertContains(t, yaml, "polarization:")
+	assertContains(t, yaml, "    ul: rhcp")
+	assertNotContains(t, yaml, "dl:")
+}
+
+func TestGenerateConfig_PolarizationOmittedWhenNil(t *testing.T) {
+	spec := &ntnv1alpha1.NTNCellConfigSpec{
+		NTN: ntnv1alpha1.NTNParams{
+			EphemerisECEF: &ntnv1alpha1.EphemerisECEF{PosX: 1, PosY: 2, PosZ: 3},
+		},
+	}
+	data, err := GenerateConfig(spec)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	assertNotContains(t, string(data), "polarization:")
+}
+
+func TestGenerateConfig_PolarizationOmittedWhenBothEmpty(t *testing.T) {
+	spec := &ntnv1alpha1.NTNCellConfigSpec{
+		NTN: ntnv1alpha1.NTNParams{
+			EphemerisECEF: &ntnv1alpha1.EphemerisECEF{PosX: 1, PosY: 2, PosZ: 3},
+			Polarization:  &ntnv1alpha1.NTNPolarization{},
+		},
+	}
+	data, err := GenerateConfig(spec)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Empty struct → no DL/UL set → omit entire block (matches OCUDU's if-guarded writer).
+	assertNotContains(t, string(data), "polarization:")
 }
 
 func TestGenerateConfig_TAReport(t *testing.T) {

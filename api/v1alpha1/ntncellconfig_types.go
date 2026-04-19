@@ -116,10 +116,12 @@ type NTNParams struct {
 	// +optional
 	SatSwitchWithResync *SatSwitchWithResync `json:"satSwitchWithResync,omitempty"`
 
-	// polarization specifies the antenna polarization.
-	// +kubebuilder:validation:Enum=linear;circular
+	// polarization specifies the antenna polarization for downlink and uplink.
+	// Per 3GPP TS 38.331 SIB19, ntn-PolarizationDL-r17 and ntn-PolarizationUL-r17
+	// are independent IEs. OCUDU collapses them under a single `polarization:` map
+	// with `dl:` / `ul:` sub-keys, matching this CRD layout.
 	// +optional
-	Polarization string `json:"polarization,omitempty"`
+	Polarization *NTNPolarization `json:"polarization,omitempty"`
 
 	// taReport enables UE TA reporting.
 	// +optional
@@ -233,6 +235,23 @@ type MovingRefLocation struct {
 	// +kubebuilder:validation:Minimum=-1800000
 	// +kubebuilder:validation:Maximum=1800000
 	Longitude int `json:"longitude"`
+}
+
+// NTNPolarization sets the antenna polarization for downlink and uplink
+// independently, matching OCUDU's nested `polarization: { dl:, ul: }` YAML layout
+// and 3GPP TS 38.331 `ntn-PolarizationDL-r17` / `ntn-PolarizationUL-r17`.
+// At least one of `dl` / `ul` must be set when the parent is present.
+// +kubebuilder:validation:XValidation:rule="has(self.dl) || has(self.ul)",message="at least one of dl or ul must be set"
+type NTNPolarization struct {
+	// dl is the downlink polarization broadcast in SIB19 ntn-PolarizationDL-r17.
+	// +kubebuilder:validation:Enum=rhcp;lhcp;linear
+	// +optional
+	DL string `json:"dl,omitempty"`
+
+	// ul is the uplink polarization broadcast in SIB19 ntn-PolarizationUL-r17.
+	// +kubebuilder:validation:Enum=rhcp;lhcp;linear
+	// +optional
+	UL string `json:"ul,omitempty"`
 }
 
 // SatSwitchWithResync provides handover hints for satellite-to-satellite transitions.

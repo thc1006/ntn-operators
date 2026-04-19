@@ -331,11 +331,32 @@ spec:
                     - regenerative
                     type: string
                   polarization:
-                    description: polarization specifies the antenna polarization.
-                    enum:
-                    - linear
-                    - circular
-                    type: string
+                    description: |-
+                      polarization specifies the antenna polarization for downlink and uplink.
+                      Per 3GPP TS 38.331 SIB19, ntn-PolarizationDL-r17 and ntn-PolarizationUL-r17
+                      are independent IEs. OCUDU collapses them under a single `polarization:` map
+                      with `dl:` / `ul:` sub-keys, matching this CRD layout.
+                    properties:
+                      dl:
+                        description: dl is the downlink polarization broadcast in
+                          SIB19 ntn-PolarizationDL-r17.
+                        enum:
+                        - rhcp
+                        - lhcp
+                        - linear
+                        type: string
+                      ul:
+                        description: ul is the uplink polarization broadcast in SIB19
+                          ntn-PolarizationUL-r17.
+                        enum:
+                        - rhcp
+                        - lhcp
+                        - linear
+                        type: string
+                    type: object
+                    x-kubernetes-validations:
+                    - message: at least one of dl or ul must be set
+                      rule: has(self.dl) || has(self.ul)
                   referenceLocation:
                     description: referenceLocation defines the NTN cell reference
                       location.

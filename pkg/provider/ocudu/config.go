@@ -109,8 +109,14 @@ ntn:
     target_pci: {{ .SatSwitchTargetPCI }}
     t304: {{ .SatSwitchT304 }}
 {{- end }}
-{{- if .Polarization }}
-  polarization: {{ .Polarization }}
+{{- if .HasPolarization }}
+  polarization:
+{{- if .PolarizationDL }}
+    dl: {{ .PolarizationDL }}
+{{- end }}
+{{- if .PolarizationUL }}
+    ul: {{ .PolarizationUL }}
+{{- end }}
 {{- end }}
 {{- if .TAReportSet }}
   ta_report: {{ .TAReport }}
@@ -191,7 +197,9 @@ type configData struct {
 	SatSwitchWithResync       bool
 	SatSwitchTargetPCI        int
 	SatSwitchT304             int
-	Polarization              string
+	HasPolarization           bool
+	PolarizationDL            string
+	PolarizationUL            string
 	TAReportSet               bool
 	TAReport                  bool
 	UlSyncValidityDurSet      bool
@@ -264,8 +272,13 @@ func GenerateConfig(spec *ntnv1alpha1.NTNCellConfigSpec) ([]byte, error) {
 		data.SatSwitchTargetPCI = spec.NTN.SatSwitchWithResync.TargetPCI
 		data.SatSwitchT304 = spec.NTN.SatSwitchWithResync.T304
 	}
-	if spec.NTN.Polarization != "" {
-		data.Polarization = spec.NTN.Polarization
+	if spec.NTN.Polarization != nil {
+		pol := spec.NTN.Polarization
+		if pol.DL != "" || pol.UL != "" {
+			data.HasPolarization = true
+			data.PolarizationDL = pol.DL
+			data.PolarizationUL = pol.UL
+		}
 	}
 	if spec.NTN.TAReport != nil {
 		data.TAReportSet = true
