@@ -11,7 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **4 CRDs**: SatelliteEphemeris, GroundStationLifecycle, NTNCellConfig, NTNSlice
 - **CelesTrak GP fetcher**: OMM JSON with ETag caching, SGP4 pass prediction
 - **SpaceTrack GP fetcher**: Cookie-based auth, session reuse, Secret credential reading
-- **OCUDU/srsRAN provider**: ConfigMap generation for NTN gNB configuration
+- **OCUDU provider**: ConfigMap generation for NTN gNB configuration
 - **Failover engine**: Terrestrial-satellite path switching with switchback delay
 - **QoS/Security/Billing**: Status reporting per active path in NTNSlice
 - **CEL validation rules**: URL scheme, lat/lon range, path priority, ECEF non-zero, SpaceTrack credentials

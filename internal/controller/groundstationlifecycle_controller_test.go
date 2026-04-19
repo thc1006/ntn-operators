@@ -641,15 +641,18 @@ var _ = Describe("GroundStationLifecycle Controller", func() {
 			Expect(val).NotTo(Equal(val2))
 		})
 
-		It("should produce <=63 chars and end with hash suffix", func() {
-			// 70 chars total — definitely exceeds 63
+		It("should produce <=63 chars and end with 8-char hex hash suffix", func() {
 			ns := "long-ns"
-			name := strings.Repeat("x", 60)
+			name := strings.Repeat("x", 60) // total 68 > 63
 			val := groundStationLabelValue(ns, name)
 			Expect(len(val)).To(BeNumerically("<=", 63))
-			Expect(len(val)).To(BeNumerically(">", len(ns)+1))
-			// Should contain a hash separator
-			Expect(strings.Count(val, "-")).To(BeNumerically(">=", 1))
+			Expect(val).To(HavePrefix(ns + "."))
+			// Suffix after the last "-" must be 8 hex chars.
+			lastDash := strings.LastIndex(val, "-")
+			Expect(lastDash).To(BeNumerically(">", len(ns)+1))
+			hexSuffix := val[lastDash+1:]
+			Expect(hexSuffix).To(HaveLen(8))
+			Expect(hexSuffix).To(MatchRegexp("^[0-9a-f]{8}$"))
 		})
 
 		It("should fall back to pure hash for extremely long namespace", func() {
