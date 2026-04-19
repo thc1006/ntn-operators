@@ -60,6 +60,11 @@ type NTNSliceReconciler struct {
 // Reconcile evaluates failover policy and manages path switching.
 func (r *NTNSliceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
+	log.V(1).Info("reconciling")
+	reconcileStart := time.Now()
+	defer func() {
+		log.V(1).Info("reconcile complete", "duration", time.Since(reconcileStart))
+	}()
 
 	// Step 1: Get the NTNSlice resource.
 	ns := &ntnv1alpha1.NTNSlice{}
@@ -71,9 +76,11 @@ func (r *NTNSliceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 
 	// Step 2: Read simulated metrics from annotations.
 	metrics := r.readMetrics(ns)
+	log.V(2).Info("metrics read", "rsrp", metrics.RSRP, "latencyMs", metrics.LatencyMs, "packetLossPercent", metrics.PacketLossPercent)
 
 	// Step 3: Check satellite availability via SatelliteEphemeris.
 	satelliteAvailable := r.checkSatelliteAvailability(ctx, ns, now)
+	log.V(1).Info("satellite availability", "available", satelliteAvailable, "ephemerisRef", ns.Spec.SatellitePath.EphemerisRef)
 
 	// Set FailoverReady condition based on satellite availability.
 	failoverReadyStatus := metav1.ConditionTrue
@@ -288,7 +295,7 @@ func (r *NTNSliceReconciler) checkSatelliteAvailability(
 	if err := r.Get(ctx, key, eph); err != nil {
 		if !apierrors.IsNotFound(err) {
 			log := logf.FromContext(ctx)
-			log.Error(err, "Failed to get SatelliteEphemeris", "ref", ns.Spec.SatellitePath.EphemerisRef)
+			log.Error(err, "failed to get SatelliteEphemeris", "ref", ns.Spec.SatellitePath.EphemerisRef)
 		}
 		return false
 	}
@@ -335,7 +342,7 @@ func (r *NTNSliceReconciler) ephemerisToSlice(
 	var sliceList ntnv1alpha1.NTNSliceList
 	if err := r.List(ctx, &sliceList, client.InNamespace(eph.Namespace)); err != nil {
 		log := logf.FromContext(ctx)
-		log.Error(err, "Failed to list NTNSlices for ephemeris mapper")
+		log.Error(err, "failed to list NTNSlices for ephemeris mapper")
 		return nil
 	}
 

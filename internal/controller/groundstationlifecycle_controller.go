@@ -87,6 +87,11 @@ type GroundStationLifecycleReconciler struct {
 // Reconcile checks ground station health, manages firmware OTA, and records phase transitions.
 func (r *GroundStationLifecycleReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
+	log.V(1).Info("reconciling")
+	reconcileStart := time.Now()
+	defer func() {
+		log.V(1).Info("reconcile complete", "duration", time.Since(reconcileStart))
+	}()
 
 	// Step 1: Fetch the CR.
 	gs := &ntnv1alpha1.GroundStationLifecycle{}
@@ -168,14 +173,17 @@ const maxLabelValueLen = 63
 
 // findMatchingNode finds a Node labeled ntn.operators.dev/groundstation=<namespace>.<name>.
 func (r *GroundStationLifecycleReconciler) findMatchingNode(ctx context.Context, namespace, gsName string) (*corev1.Node, error) {
+	log := logf.FromContext(ctx)
 	labelValue := namespace + "." + gsName
 	if len(labelValue) > maxLabelValueLen {
+		log.V(1).Info("label value exceeds limit", "value", labelValue, "length", len(labelValue))
 		return nil, fmt.Errorf("label value %q exceeds %d-character Kubernetes limit (namespace.name = %d chars)", labelValue, maxLabelValueLen, len(labelValue))
 	}
 	var nodeList corev1.NodeList
 	if err := r.List(ctx, &nodeList, client.MatchingLabels{groundStationLabel: labelValue}); err != nil {
 		return nil, fmt.Errorf("listing nodes: %w", err)
 	}
+	log.V(2).Info("node lookup", "label", labelValue, "matchCount", len(nodeList.Items))
 	switch len(nodeList.Items) {
 	case 0:
 		return nil, nil
@@ -193,7 +201,9 @@ func (r *GroundStationLifecycleReconciler) reconcileHealth(
 	node *corev1.Node,
 	nodeErr error,
 ) {
+	log := logf.FromContext(ctx)
 	now := r.now()
+	log.V(1).Info("evaluating health", "hasNode", node != nil, "hasNodeErr", nodeErr != nil)
 
 	if nodeErr != nil {
 		reason := "APIError"
@@ -333,10 +343,11 @@ func (r *GroundStationLifecycleReconciler) reconcileHealth(
 
 // reconcileFirmware checks if OTA update should proceed.
 func (r *GroundStationLifecycleReconciler) reconcileFirmware(
-	_ context.Context,
+	ctx context.Context,
 	gs *ntnv1alpha1.GroundStationLifecycle,
 	node *corev1.Node,
 ) {
+	log := logf.FromContext(ctx)
 	if gs.Spec.Firmware == nil {
 		meta.RemoveStatusCondition(&gs.Status.Conditions, ntnv1alpha1.ConditionFirmwareUpToDate)
 		return
@@ -356,6 +367,7 @@ func (r *GroundStationLifecycleReconciler) reconcileFirmware(
 	availableVersion := node.Annotations[availableFirmwareAnnotation]
 	currentVersion := gs.Status.FirmwareVersion
 	upToDate := availableVersion == "" || currentVersion == availableVersion
+	log.V(1).Info("firmware check", "current", currentVersion, "available", availableVersion, "upToDate", upToDate)
 
 	var fwStatus metav1.ConditionStatus
 	var fwReason, fwMsg string
@@ -477,6 +489,7 @@ func (r *GroundStationLifecycleReconciler) reconcileFirmware(
 // SSRF protection: HTTPClient should be created via netutil.NewSafeHTTPClient
 // which validates resolved IPs at TCP dial level. Scheme check is defense in depth.
 func (r *GroundStationLifecycleReconciler) checkHTTPEndpoint(ctx context.Context, endpoint string) bool {
+	log := logf.FromContext(ctx)
 	if r.HTTPClient == nil {
 		return true // no client configured, skip check
 	}
@@ -484,20 +497,29 @@ func (r *GroundStationLifecycleReconciler) checkHTTPEndpoint(ctx context.Context
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
+		// Log without err details — the error may contain the full URL with credentials.
+		log.V(1).Info("invalid endpoint URL")
 		return false
 	}
 	if req.URL.Scheme != "http" && req.URL.Scheme != "https" {
+		log.V(1).Info("unsupported URL scheme", "scheme", req.URL.Scheme)
 		return false
 	}
+	// Log only scheme+host to avoid leaking credentials/tokens in URL path or query.
+	safeEndpoint := req.URL.Scheme + "://" + req.URL.Host
 	resp, err := r.HTTPClient.Do(req)
 	if err != nil {
+		// Don't log err directly — net/http errors embed the full URL which may contain credentials.
+		log.V(2).Info("health check failed", "endpoint", safeEndpoint)
 		return false
 	}
 	defer func() {
 		_, _ = io.Copy(io.Discard, resp.Body)
 		_ = resp.Body.Close()
 	}()
-	return resp.StatusCode >= 200 && resp.StatusCode < 300
+	healthy := resp.StatusCode >= 200 && resp.StatusCode < 300
+	log.V(2).Info("health check result", "endpoint", safeEndpoint, "status", resp.StatusCode, "healthy", healthy)
+	return healthy
 }
 
 // now returns the current time, using r.Now if set, else time.Now().
