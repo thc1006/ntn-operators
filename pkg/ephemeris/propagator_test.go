@@ -24,6 +24,30 @@ import (
 	"github.com/akhenakh/sgp4"
 )
 
+const epochLayout = "2006-01-02T15:04:05.000000"
+
+// parseEpoch parses an OMM epoch string, failing the test on error.
+func parseEpoch(t *testing.T, s string) time.Time {
+	t.Helper()
+	epoch, err := time.Parse(epochLayout, s)
+	if err != nil {
+		t.Fatalf("failed to parse epoch %q: %v", s, err)
+	}
+	return epoch
+}
+
+// posMagnitudeKm computes the ECEF position vector magnitude in km.
+func posMagnitudeKm(px, py, pz int) float64 {
+	x, y, z := float64(px), float64(py), float64(pz)
+	return math.Sqrt(x*x+y*y+z*z) * positionStep / 1000.0
+}
+
+// velMagnitudeKmS computes the ECEF velocity vector magnitude in km/s.
+func velMagnitudeKmS(vx, vy, vz int) float64 {
+	x, y, z := float64(vx), float64(vy), float64(vz)
+	return math.Sqrt(x*x+y*y+z*z) * velocityStep / 1000.0
+}
+
 // OneWeb satellite OMM (NORAD 56700) — known test vector.
 func oneWebOMM() sgp4.OMM {
 	return sgp4.OMM{
@@ -64,28 +88,19 @@ func geoOMM() sgp4.OMM {
 
 func TestPropagateToECEF_LEO_PositionInRange(t *testing.T) {
 	omm := oneWebOMM()
-	epoch, _ := time.Parse("2006-01-02T15:04:05.000000", omm.EpochStr)
-	propagateTime := epoch.Add(30 * time.Minute)
+	epoch := parseEpoch(t, omm.EpochStr)
 
-	ecef, err := PropagateToECEF(omm, propagateTime)
+	ecef, err := PropagateToECEF(omm, epoch.Add(30*time.Minute))
 	if err != nil {
 		t.Fatalf("PropagateToECEF failed: %v", err)
 	}
 
-	// OneWeb LEO orbit ~1200 km altitude → radius ~7571 km
-	// In 3GPP units (1.3m step): 7571 km ≈ 5,823,846 units
-	// Vector magnitude should be in the ballpark.
-	posMag := math.Sqrt(float64(ecef.PosX*ecef.PosX + ecef.PosY*ecef.PosY + ecef.PosZ*ecef.PosZ))
-	posKm := posMag * 1.3 / 1000.0
-
+	posKm := posMagnitudeKm(ecef.PosX, ecef.PosY, ecef.PosZ)
 	if posKm < 6000 || posKm > 8500 {
 		t.Errorf("LEO position magnitude out of range: %.0f km (expected 6000-8500)", posKm)
 	}
 
-	// Velocity should be non-zero for LEO (~7.5 km/s)
-	velMag := math.Sqrt(float64(ecef.VelX*ecef.VelX + ecef.VelY*ecef.VelY + ecef.VelZ*ecef.VelZ))
-	velKmS := velMag * 0.06 / 1000.0
-
+	velKmS := velMagnitudeKmS(ecef.VelX, ecef.VelY, ecef.VelZ)
 	if velKmS < 5.0 || velKmS > 10.0 {
 		t.Errorf("LEO velocity magnitude out of range: %.2f km/s (expected 5-10)", velKmS)
 	}
@@ -93,27 +108,19 @@ func TestPropagateToECEF_LEO_PositionInRange(t *testing.T) {
 
 func TestPropagateToECEF_GEO_LowVelocity(t *testing.T) {
 	omm := geoOMM()
-	epoch, _ := time.Parse("2006-01-02T15:04:05.000000", omm.EpochStr)
-	propagateTime := epoch.Add(1 * time.Hour)
+	epoch := parseEpoch(t, omm.EpochStr)
 
-	ecef, err := PropagateToECEF(omm, propagateTime)
+	ecef, err := PropagateToECEF(omm, epoch.Add(1*time.Hour))
 	if err != nil {
 		t.Fatalf("PropagateToECEF failed: %v", err)
 	}
 
-	// GEO orbit ~35786 km altitude → radius ~42157 km
-	posMag := math.Sqrt(float64(ecef.PosX*ecef.PosX + ecef.PosY*ecef.PosY + ecef.PosZ*ecef.PosZ))
-	posKm := posMag * 1.3 / 1000.0
-
+	posKm := posMagnitudeKm(ecef.PosX, ecef.PosY, ecef.PosZ)
 	if posKm < 35000 || posKm > 50000 {
 		t.Errorf("GEO position magnitude out of range: %.0f km (expected 35000-50000)", posKm)
 	}
 
-	// GEO velocity in ECEF should be very low (satellite is stationary relative to Earth)
-	// In ECI it's ~3 km/s, but ECEF subtracts Earth rotation → near-zero for true GEO
-	velMag := math.Sqrt(float64(ecef.VelX*ecef.VelX + ecef.VelY*ecef.VelY + ecef.VelZ*ecef.VelZ))
-	velKmS := velMag * 0.06 / 1000.0
-
+	velKmS := velMagnitudeKmS(ecef.VelX, ecef.VelY, ecef.VelZ)
 	if velKmS > 1.0 {
 		t.Errorf("GEO ECEF velocity too high: %.2f km/s (expected near 0 for true GEO)", velKmS)
 	}
@@ -121,30 +128,28 @@ func TestPropagateToECEF_GEO_LowVelocity(t *testing.T) {
 
 func TestPropagateToECEF_FitsIn3GPPRange(t *testing.T) {
 	omm := oneWebOMM()
-	epoch, _ := time.Parse("2006-01-02T15:04:05.000000", omm.EpochStr)
+	epoch := parseEpoch(t, omm.EpochStr)
 
 	ecef, err := PropagateToECEF(omm, epoch)
 	if err != nil {
 		t.Fatalf("PropagateToECEF failed: %v", err)
 	}
 
-	const maxPos = 67108863
-	const minPos = -67108864
 	for _, v := range []struct {
 		name string
 		val  int
 	}{
 		{"PosX", ecef.PosX}, {"PosY", ecef.PosY}, {"PosZ", ecef.PosZ},
 	} {
-		if v.val < minPos || v.val > maxPos {
-			t.Errorf("%s = %d out of 3GPP range [%d, %d]", v.name, v.val, minPos, maxPos)
+		if v.val < minECEFPos || v.val > maxECEFPos {
+			t.Errorf("%s = %d out of 3GPP range [%d, %d]", v.name, v.val, minECEFPos, maxECEFPos)
 		}
 	}
 }
 
 func TestPropagateToECEF_DifferentTimesYieldDifferentPositions(t *testing.T) {
 	omm := oneWebOMM()
-	epoch, _ := time.Parse("2006-01-02T15:04:05.000000", omm.EpochStr)
+	epoch := parseEpoch(t, omm.EpochStr)
 
 	ecef1, err := PropagateToECEF(omm, epoch)
 	if err != nil {
@@ -161,16 +166,15 @@ func TestPropagateToECEF_DifferentTimesYieldDifferentPositions(t *testing.T) {
 	}
 }
 
-func TestPropagateToECEF_ReturnsCorrectType(t *testing.T) {
+func TestPropagateToECEF_NonZeroResult(t *testing.T) {
 	omm := oneWebOMM()
-	epoch, _ := time.Parse("2006-01-02T15:04:05.000000", omm.EpochStr)
+	epoch := parseEpoch(t, omm.EpochStr)
 
 	ecef, err := PropagateToECEF(omm, epoch)
 	if err != nil {
 		t.Fatalf("PropagateToECEF failed: %v", err)
 	}
 
-	// Verify non-nil and fields are populated
 	if ecef.PosX == 0 && ecef.PosY == 0 && ecef.PosZ == 0 {
 		t.Error("all position fields are zero — propagation likely failed")
 	}

@@ -26,12 +26,16 @@ import (
 	ntnv1alpha1 "github.com/thc1006/ntn-operators/api/v1alpha1"
 )
 
-// 3GPP TS 38.331 ECEF scaling factors for ntn-Config-r17.
+// 3GPP TS 38.331 ECEF scaling factors and range for ntn-Config-r17.
 const (
 	// positionStep is the position quantization step in metres (1.3 m per LSB).
 	positionStep = 1.3
 	// velocityStep is the velocity quantization step in m/s (0.06 m/s per LSB).
 	velocityStep = 0.06
+	// maxECEFPos is the maximum 3GPP ECEF position value (2^26 - 1).
+	maxECEFPos = 67108863
+	// minECEFPos is the minimum 3GPP ECEF position value (-2^26).
+	minECEFPos = -67108864
 )
 
 // PropagateToECEF propagates an OMM orbital element set to the given UTC time
@@ -64,14 +68,28 @@ func PropagateToECEF(omm sgp4.OMM, t time.Time) (*ntnv1alpha1.EphemerisECEF, err
 	)
 
 	// Quantize to 3GPP integer units.
-	return &ntnv1alpha1.EphemerisECEF{
+	result := &ntnv1alpha1.EphemerisECEF{
 		PosX: kmToPos(ecefX),
 		PosY: kmToPos(ecefY),
 		PosZ: kmToPos(ecefZ),
 		VelX: kmsToVel(ecefVX),
 		VelY: kmsToVel(ecefVY),
 		VelZ: kmsToVel(ecefVZ),
-	}, nil
+	}
+
+	// Validate against 3GPP range.
+	for _, v := range []struct {
+		name string
+		val  int
+	}{
+		{"posX", result.PosX}, {"posY", result.PosY}, {"posZ", result.PosZ},
+	} {
+		if v.val < minECEFPos || v.val > maxECEFPos {
+			return nil, fmt.Errorf("ECEF %s = %d exceeds 3GPP range [%d, %d]", v.name, v.val, minECEFPos, maxECEFPos)
+		}
+	}
+
+	return result, nil
 }
 
 // temeToECEF rotates a TEME position vector to ECEF using GMST.
