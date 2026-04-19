@@ -22,5 +22,6 @@ main
 # Generated kustomize output (regenerate with: make build-installer)
 dist/install.yaml
 
-# Claude Code
-.claude/
+# Claude Code (local config, memory, sessions)
+.claude/*
+!.claude/agents/
