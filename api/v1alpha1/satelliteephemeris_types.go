@@ -41,6 +41,7 @@ type EphemerisSource struct {
 	// refreshInterval is how often to re-fetch GP data.
 	// CelesTrak updates every 2 hours; setting this below 2h wastes bandwidth.
 	// +kubebuilder:default="4h"
+	// +kubebuilder:validation:Format=duration
 	RefreshInterval metav1.Duration `json:"refreshInterval"`
 
 	// credentials is a reference to a Secret containing auth credentials

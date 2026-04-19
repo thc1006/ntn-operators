@@ -121,6 +121,7 @@ spec:
                     description: |-
                       refreshInterval is how often to re-fetch GP data.
                       CelesTrak updates every 2 hours; setting this below 2h wastes bandwidth.
+                    format: duration
                     type: string
                   type:
                     description: 'type is the source type. Supported: "CelesTrak",

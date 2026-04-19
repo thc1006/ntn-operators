@@ -84,6 +84,7 @@ type FailoverPolicy struct {
 	// triggers defines conditions that initiate failover (OR logic).
 	// Format: "metric operator value" (e.g., "rsrp < -120").
 	// Validated at runtime by the failover engine (pkg/slice.ParseTrigger).
+	// Order is intentionally not significant; set merge semantics are desired.
 	// +kubebuilder:validation:MinItems=1
 	// +kubebuilder:validation:MaxItems=10
 	// +listType=set
