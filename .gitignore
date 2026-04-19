@@ -25,3 +25,6 @@ dist/install.yaml
 # Claude Code (local config, memory, sessions)
 .claude/*
 !.claude/agents/
+
+# Codex
+.codex
