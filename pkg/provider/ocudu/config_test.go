@@ -724,6 +724,149 @@ func TestGenerateConfig_SIBScheduleZeroPositionRespected(t *testing.T) {
 	assertContains(t, string(data), "si_window_position: 0")
 }
 
+func TestGenerateConfig_NeighborReselectionInfo(t *testing.T) {
+	qhyst := 4
+	qoff := -3
+	sintra := 12
+	threshLow := 8
+	spec := &ntnv1alpha1.NTNCellConfigSpec{
+		NTN: ntnv1alpha1.NTNParams{
+			EphemerisECEF: &ntnv1alpha1.EphemerisECEF{PosX: 1, PosY: 2, PosZ: 3},
+			NeighborCells: []ntnv1alpha1.NTNNeighborCell{
+				{
+					PhysicalCellID: 42,
+					Frequency:      632628,
+					ReselectionInfo: &ntnv1alpha1.NeighborReselectionInfo{
+						QHyst:             &qhyst,
+						QOffsetCell:       &qoff,
+						SIntraSearchP:     &sintra,
+						ThreshServingLowP: &threshLow,
+					},
+				},
+			},
+		},
+	}
+	data, err := GenerateConfig(spec)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	yaml := string(data)
+	assertContains(t, yaml, "reselection_info:")
+	assertContains(t, yaml, "q_hyst: 4")
+	assertContains(t, yaml, "q_offset_cell: -3")
+	assertContains(t, yaml, "s_intra_search_p: 12")
+	assertContains(t, yaml, "thresh_serving_low_p: 8")
+}
+
+func TestGenerateConfig_NeighborReselectionInfoPartial(t *testing.T) {
+	qhyst := 2
+	spec := &ntnv1alpha1.NTNCellConfigSpec{
+		NTN: ntnv1alpha1.NTNParams{
+			EphemerisECEF: &ntnv1alpha1.EphemerisECEF{PosX: 1, PosY: 2, PosZ: 3},
+			NeighborCells: []ntnv1alpha1.NTNNeighborCell{
+				{
+					PhysicalCellID:  7,
+					Frequency:       632628,
+					ReselectionInfo: &ntnv1alpha1.NeighborReselectionInfo{QHyst: &qhyst},
+				},
+			},
+		},
+	}
+	data, err := GenerateConfig(spec)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	yaml := string(data)
+	assertContains(t, yaml, "reselection_info:")
+	assertContains(t, yaml, "q_hyst: 2")
+	assertNotContains(t, yaml, "q_offset_cell:")
+	assertNotContains(t, yaml, "s_intra_search_p:")
+	assertNotContains(t, yaml, "thresh_serving_low_p:")
+}
+
+func TestGenerateConfig_NeighborReselectionInfoOmittedWhenNil(t *testing.T) {
+	spec := &ntnv1alpha1.NTNCellConfigSpec{
+		NTN: ntnv1alpha1.NTNParams{
+			EphemerisECEF: &ntnv1alpha1.EphemerisECEF{PosX: 1, PosY: 2, PosZ: 3},
+			NeighborCells: []ntnv1alpha1.NTNNeighborCell{
+				{PhysicalCellID: 42, Frequency: 632628},
+			},
+		},
+	}
+	data, err := GenerateConfig(spec)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	assertNotContains(t, string(data), "reselection_info:")
+}
+
+// TestGenerateConfig_TS38331Conformance maps rendered YAML fragments back to
+// their TS 38.331 IE origin so future SIB19/SIB11 additions extend by appending
+// a row. Fragments are presence-only where the exact value is already covered
+// by a dedicated test, keeping this suite stable as IE serializations evolve.
+func TestGenerateConfig_TS38331Conformance(t *testing.T) {
+	dur := 900
+	qhyst := 2
+	spec := &ntnv1alpha1.NTNCellConfigSpec{
+		NTN: ntnv1alpha1.NTNParams{
+			CellSpecificKoffset:  150,
+			TACommon:             0,
+			NTNUlSyncValidityDur: &dur,
+			Polarization:         &ntnv1alpha1.NTNPolarization{DL: "rhcp", UL: "lhcp"},
+			TAInfo: &ntnv1alpha1.TAInfo{
+				TACommon:      0,
+				TACommonDrift: 1,
+			},
+			EpochTime: &ntnv1alpha1.EpochTime{SFN: 0, SubframeNumber: 0},
+			EphemerisECEF: &ntnv1alpha1.EphemerisECEF{
+				PosX: 20922195, PosY: 1967783, PosZ: 19770302,
+			},
+			MovingRefLocation:   &ntnv1alpha1.MovingRefLocation{Latitude: 248500, Longitude: 1210000},
+			SatSwitchWithResync: &ntnv1alpha1.SatSwitchWithResync{TargetPCI: 1, T304: 100},
+			NeighborCells: []ntnv1alpha1.NTNNeighborCell{
+				{
+					PhysicalCellID:  7,
+					Frequency:       632628,
+					ReselectionInfo: &ntnv1alpha1.NeighborReselectionInfo{QHyst: &qhyst},
+				},
+			},
+		},
+	}
+	data, err := GenerateConfig(spec)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	yaml := string(data)
+
+	cases := []struct {
+		name    string
+		ieRef   string
+		present string
+	}{
+		{"cellSpecificKoffset-r17", "NTN-Config-r17", "cell_specific_koffset: 150"},
+		{"ntn-UlSyncValidityDuration-r17", "NTN-Config-r17", "ntn_ul_sync_validity_dur: 900"},
+		{"ntn-PolarizationDL/UL-r17", "NTN-Config-r17", "polarization:"},
+		{"ta-Common-r17", "TA-Info-r17", "ta_common: 0"},
+		{"ta-CommonDrift-r17", "TA-Info-r17", "ta_common_drift: 1"},
+		{"epoch-Time-r17", "EpochTime-r17", "epoch_time:"},
+		{"ephemerisInfo-r17 (ECEF)", "EphemerisInfo-r17", "ephemeris_info_ecef:"},
+		{"ephemeris pos_x", "EphemerisInfo-r17", "pos_x: 20922195"},
+		{"movingRefLocation-r18", "SIB19-v1800", "moving_ref_location:"},
+		{"satSwitchWithResync-r18", "SIB19-v1800", "sat_switch_with_resync:"},
+		{"SIB19 scheduling", "SI-SchedulingInfo", "sib_mapping: 19"},
+		{"q-Hyst (SIB11)", "IntraFreqCellReselectionInfo", "q_hyst: 2"},
+		{"reselection_info block (SIB11)", "IntraFreqCellReselectionInfo", "reselection_info:"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if !strings.Contains(yaml, tc.present) {
+				t.Errorf("TS 38.331 %s (%s) expected fragment %q missing from output:\n%s",
+					tc.ieRef, tc.name, tc.present, yaml)
+			}
+		})
+	}
+}
+
 func assertContains(t *testing.T, haystack, needle string) {
 	t.Helper()
 	if !strings.Contains(haystack, needle) {

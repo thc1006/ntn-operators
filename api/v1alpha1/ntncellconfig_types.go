@@ -334,6 +334,44 @@ type NTNNeighborCell struct {
 	// +kubebuilder:validation:Minimum=1
 	// +optional
 	Frequency int `json:"frequency,omitempty"`
+
+	// reselectionInfo carries SIB11-style per-neighbor cell reselection
+	// parameters per 3GPP TS 38.331 IntraFreqCellReselectionInfo. All
+	// sub-fields are optional; unset fields are omitted from the rendered
+	// config so OCUDU falls back to its internal defaults.
+	// +optional
+	ReselectionInfo *NeighborReselectionInfo `json:"reselectionInfo,omitempty"`
+}
+
+// NeighborReselectionInfo models the SIB11 per-neighbor reselection
+// parameters that NTN operators tune for handover behavior.
+type NeighborReselectionInfo struct {
+	// qHyst is the reselection hysteresis in dB (TS 38.331 Q-Hyst enum:
+	// 0,1,2,3,4,5,6,8,10,12,14,16,18,20,22,24).
+	// +kubebuilder:validation:Enum=0;1;2;3;4;5;6;8;10;12;14;16;18;20;22;24
+	// +optional
+	QHyst *int `json:"qHyst,omitempty"`
+
+	// qOffsetCell is the per-cell reselection offset in dB (TS 38.331
+	// Q-OffsetRange, -24..24).
+	// +kubebuilder:validation:Minimum=-24
+	// +kubebuilder:validation:Maximum=24
+	// +optional
+	QOffsetCell *int `json:"qOffsetCell,omitempty"`
+
+	// sIntraSearchP is the serving-cell RSRP threshold below which intra-frequency
+	// measurements start (TS 38.331 ReselectionThreshold 0-31).
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=31
+	// +optional
+	SIntraSearchP *int `json:"sIntraSearchP,omitempty"`
+
+	// threshServingLowP is the serving-cell low threshold for inter-frequency
+	// reselection (TS 38.331 ReselectionThreshold 0-31, in 2dB steps).
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=31
+	// +optional
+	ThreshServingLowP *int `json:"threshServingLowP,omitempty"`
 }
 
 // ReferenceLocation defines the NTN cell reference location.

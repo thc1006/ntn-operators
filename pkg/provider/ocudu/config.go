@@ -86,6 +86,21 @@ ntn:
 {{- if .Frequency }}
       frequency: {{ .Frequency }}
 {{- end }}
+{{- if .HasReselectionInfo }}
+      reselection_info:
+{{- if .HasQHyst }}
+        q_hyst: {{ .QHyst }}
+{{- end }}
+{{- if .HasQOffsetCell }}
+        q_offset_cell: {{ .QOffsetCell }}
+{{- end }}
+{{- if .HasSIntraSearchP }}
+        s_intra_search_p: {{ .SIntraSearchP }}
+{{- end }}
+{{- if .HasThreshServingLowP }}
+        thresh_serving_low_p: {{ .ThreshServingLowP }}
+{{- end }}
+{{- end }}
 {{- end }}
 {{- end }}
 {{- if .HasReferenceLocation }}
@@ -146,8 +161,17 @@ var parsedTemplate = template.Must(template.New("ocudu-ntn").Parse(configTemplat
 
 // ntnNeighborCellData holds per-neighbor data for template rendering.
 type ntnNeighborCellData struct {
-	PhysicalCellID int
-	Frequency      int
+	PhysicalCellID       int
+	Frequency            int
+	HasReselectionInfo   bool
+	HasQHyst             bool
+	QHyst                int
+	HasQOffsetCell       bool
+	QOffsetCell          int
+	HasSIntraSearchP     bool
+	SIntraSearchP        int
+	HasThreshServingLowP bool
+	ThreshServingLowP    int
 }
 
 type configData struct {
@@ -330,10 +354,33 @@ func GenerateConfig(spec *ntnv1alpha1.NTNCellConfigSpec) ([]byte, error) {
 	if len(spec.NTN.NeighborCells) > 0 {
 		data.HasNCells = true
 		for _, nc := range spec.NTN.NeighborCells {
-			data.NCells = append(data.NCells, ntnNeighborCellData{
+			cell := ntnNeighborCellData{
 				PhysicalCellID: nc.PhysicalCellID,
 				Frequency:      nc.Frequency,
-			})
+			}
+			if ri := nc.ReselectionInfo; ri != nil {
+				if ri.QHyst != nil {
+					cell.HasReselectionInfo = true
+					cell.HasQHyst = true
+					cell.QHyst = *ri.QHyst
+				}
+				if ri.QOffsetCell != nil {
+					cell.HasReselectionInfo = true
+					cell.HasQOffsetCell = true
+					cell.QOffsetCell = *ri.QOffsetCell
+				}
+				if ri.SIntraSearchP != nil {
+					cell.HasReselectionInfo = true
+					cell.HasSIntraSearchP = true
+					cell.SIntraSearchP = *ri.SIntraSearchP
+				}
+				if ri.ThreshServingLowP != nil {
+					cell.HasReselectionInfo = true
+					cell.HasThreshServingLowP = true
+					cell.ThreshServingLowP = *ri.ThreshServingLowP
+				}
+			}
+			data.NCells = append(data.NCells, cell)
 		}
 	}
 	if spec.NTN.ReferenceLocation != nil {
