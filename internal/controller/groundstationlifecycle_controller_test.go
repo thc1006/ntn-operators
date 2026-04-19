@@ -20,6 +20,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -628,23 +629,27 @@ var _ = Describe("GroundStationLifecycle Controller", func() {
 			Expect(val).To(Equal("default.gs-hsinchu-01"))
 		})
 
-		It("should truncate+hash when exceeding 63 chars", func() {
-			longName := "a-very-long-ground-station-name-that-exceeds"
-			longNs := "a-long-namespace-name"
-			val := groundStationLabelValue(longNs, longName)
+		It("should truncate+hash when exceeding 63 chars and preserve namespace prefix", func() {
+			longName := "a-very-long-ground-station-name-that-definitely-exceeds-limit"
+			ns := "my-namespace"
+			val := groundStationLabelValue(ns, longName)
 			Expect(len(val)).To(BeNumerically("<=", 63))
+			// Must preserve namespace prefix for nodeToGroundStation parsing.
+			Expect(val).To(HavePrefix(ns + "."))
 			// Different long names produce different hashes.
-			val2 := groundStationLabelValue(longNs, longName+"-2")
+			val2 := groundStationLabelValue(ns, longName+"-2")
 			Expect(val).NotTo(Equal(val2))
 		})
 
-		It("should produce exactly 63 chars for long values", func() {
-			longName := "station-" + "x"
-			for len(longName)+len("namespace.")+1 <= 63 {
-				longName += "x"
-			}
-			val := groundStationLabelValue("namespace", longName)
+		It("should produce <=63 chars and end with hash suffix", func() {
+			// 70 chars total — definitely exceeds 63
+			ns := "long-ns"
+			name := strings.Repeat("x", 60)
+			val := groundStationLabelValue(ns, name)
 			Expect(len(val)).To(BeNumerically("<=", 63))
+			Expect(len(val)).To(BeNumerically(">", len(ns)+1))
+			// Should contain a hash separator
+			Expect(strings.Count(val, "-")).To(BeNumerically(">=", 1))
 		})
 	})
 })

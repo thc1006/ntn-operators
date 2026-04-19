@@ -174,20 +174,30 @@ func (r *GroundStationLifecycleReconciler) healthCheckInterval(gs *ntnv1alpha1.G
 const maxLabelValueLen = 63
 
 // groundStationLabelValue returns the label value for a ground station.
-// If namespace.name exceeds the 63-char K8s label limit, it is truncated
-// with a 8-char hash suffix to prevent collisions.
+// If namespace.name exceeds the 63-char K8s label limit, the gsName part
+// is truncated with a hash suffix while preserving "namespace." prefix.
+// This ensures nodeToGroundStation can always parse the namespace back.
 func groundStationLabelValue(namespace, gsName string) string {
 	labelValue := namespace + "." + gsName
 	if len(labelValue) <= maxLabelValueLen {
 		return labelValue
 	}
+	// Preserve namespace + "." prefix, truncate+hash only the name part.
+	prefix := namespace + "."
+	remaining := maxLabelValueLen - len(prefix) - 9 // room for "-" + 8-char hash
+	if remaining < 1 {
+		// Namespace alone is too long — hash the whole thing.
+		h := sha256.Sum256([]byte(labelValue))
+		return hex.EncodeToString(h[:4]) + hex.EncodeToString(h[4:8])
+	}
 	h := sha256.Sum256([]byte(labelValue))
-	suffix := hex.EncodeToString(h[:4]) // 8 hex chars
-	truncLen := maxLabelValueLen - 9    // 63 - 9 = 54
-	return strings.TrimRight(labelValue[:truncLen], "-.") + "-" + suffix
+	suffix := hex.EncodeToString(h[:4])
+	truncName := strings.TrimRight(gsName[:remaining], "-.")
+	return prefix + truncName + "-" + suffix
 }
 
 // findMatchingNode finds a Node labeled ntn.operators.dev/groundstation=<namespace>.<name>.
+// For long names, the label value is truncated+hashed via groundStationLabelValue.
 func (r *GroundStationLifecycleReconciler) findMatchingNode(ctx context.Context, namespace, gsName string) (*corev1.Node, error) {
 	log := logf.FromContext(ctx)
 	labelValue := groundStationLabelValue(namespace, gsName)
