@@ -13,6 +13,14 @@ fi
 
 echo "=== Verifying .claude/ flat structure ==="
 
+# 0. Required directories must exist
+for dir in .claude/agents .claude/commands .claude/skills; do
+  if [ ! -d "$dir" ]; then
+    echo "ERROR: required directory $dir does not exist"
+    ERRORS=$((ERRORS + 1))
+  fi
+done
+
 # 1. No nested directories under .claude/agents/ or .claude/commands/
 for dir in .claude/agents .claude/commands; do
   while IFS= read -r d; do
