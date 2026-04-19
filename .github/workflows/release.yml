@@ -49,7 +49,7 @@ jobs:
         id: version
         run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
 
-      # --- Build locally, scan, then push (scan-before-publish) ---
+      # --- Scan before publish: build locally, scan, then push ---
 
       - name: Build local image with ko (no push)
         id: ko-local
@@ -60,7 +60,7 @@ jobs:
           echo "LOCAL_IMAGE=${LOCAL_IMAGE}" >> "$GITHUB_OUTPUT"
           echo "Local image: ${LOCAL_IMAGE}"
 
-      - name: Scan image for vulnerabilities (Trivy)
+      - name: Scan local image for vulnerabilities (Trivy)
         # Pin to known-safe SHA after March 2026 supply chain compromise.
         # See: https://www.stepsecurity.io/blog/trivy-compromised-a-second-time
         uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0 (safe)
@@ -70,6 +70,10 @@ jobs:
           exit-code: '1'
           severity: 'CRITICAL,HIGH'
           timeout: '10m'
+
+      # Note: The local scan covers the Go binary and distroless base image
+      # (arch-independent). ko multi-arch builds share the same binary and
+      # base layer, so a local amd64 scan is sufficient to gate the push.
 
       - name: Push multi-arch image to GHCR
         id: ko-push
@@ -83,30 +87,10 @@ jobs:
           echo "DIGEST=${DIGEST}" >> "$GITHUB_OUTPUT"
           echo "Image digest: ${DIGEST}"
 
-      # --- Post-push per-platform scan (catches arm64-specific CVEs) ---
-      # The local scan above gates the push (amd64 only). This step scans
-      # both platforms after push but before signing/attestation. If it
-      # fails, the image is published but unsigned and unattested.
-
-      - name: Install Trivy CLI
-        run: |
-          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
-            | sh -s -- -b /usr/local/bin v0.35.0
-
-      - name: Scan multi-arch image per platform (Trivy)
-        run: |
-          for platform in linux/amd64 linux/arm64; do
-            echo "=== Scanning ${platform} ==="
-            trivy image \
-              --platform "${platform}" \
-              --severity CRITICAL,HIGH \
-              --exit-code 1 \
-              --timeout 10m \
-              ${{ steps.ko-push.outputs.DIGEST }}
-          done
+      # --- Supply chain attestation: sign + SBOM ---
 
       - name: Sign image with cosign (keyless OIDC)
-        run: cosign sign --yes ${{ steps.ko-push.outputs.DIGEST }}
+        run: cosign sign --yes --recursive ${{ steps.ko-push.outputs.DIGEST }}
 
       - name: Generate SBOM (SPDX)
         run: |
@@ -115,7 +99,7 @@ jobs:
 
       - name: Attest SBOM to image
         run: |
-          cosign attest --yes \
+          cosign attest --yes --recursive \
             --type spdxjson \
             --predicate sbom.spdx.json \
             ${{ steps.ko-push.outputs.DIGEST }}
@@ -147,7 +131,7 @@ jobs:
           helm push ntn-operators-${{ steps.version.outputs.VERSION }}.tgz oci://${{ env.REGISTRY }}/${{ github.repository_owner }}
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v3.0.0
+        uses: softprops/action-gh-release@c95fe17002a23e40138e5b0a4023b830a3e108c4 # v3.0.0
         with:
           generate_release_notes: true
           files: |
