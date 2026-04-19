@@ -74,3 +74,44 @@ func TestEphemerisPushConditionReason(t *testing.T) {
 		}
 	})
 }
+
+func TestEphemerisPushConditionChanged(t *testing.T) {
+	t.Run("nil previous condition is treated as changed", func(t *testing.T) {
+		if !ephemerisPushConditionChanged(nil, ephemerisReasonRefNotFound, "missing", 3) {
+			t.Fatalf("expected condition to be marked changed when previous condition is nil")
+		}
+	})
+
+	t.Run("identical previous condition is not changed", func(t *testing.T) {
+		prev := &metav1.Condition{
+			Status:             metav1.ConditionFalse,
+			Reason:             ephemerisReasonRefNotFound,
+			Message:            "missing",
+			ObservedGeneration: 3,
+		}
+		if ephemerisPushConditionChanged(prev, ephemerisReasonRefNotFound, "missing", 3) {
+			t.Fatalf("expected unchanged condition to be recognized as unchanged")
+		}
+	})
+
+	t.Run("generation bump is treated as changed", func(t *testing.T) {
+		prev := &metav1.Condition{
+			Status:             metav1.ConditionFalse,
+			Reason:             ephemerisReasonRefNotFound,
+			Message:            "missing",
+			ObservedGeneration: 3,
+		}
+		if !ephemerisPushConditionChanged(prev, ephemerisReasonRefNotFound, "missing", 4) {
+			t.Fatalf("expected generation change to be treated as condition change")
+		}
+	})
+}
+
+func TestEphemerisPushShouldRequeue(t *testing.T) {
+	if ephemerisPushShouldRequeue(ephemerisReasonRefNotFound) {
+		t.Fatalf("expected EphemerisRefNotFound to avoid explicit requeue")
+	}
+	if !ephemerisPushShouldRequeue(ephemerisReasonProviderPushFailed) {
+		t.Fatalf("expected provider push failures to keep explicit retry requeue")
+	}
+}

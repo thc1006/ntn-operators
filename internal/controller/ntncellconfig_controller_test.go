@@ -568,6 +568,33 @@ var _ = Describe("NTNCellConfig Controller", func() {
 			Expect(ephCond.Reason).To(Equal("ProviderPushFailed"))
 			Expect(ephCond.Message).To(ContainSubstring("runtime push failed"))
 		})
+
+		It("should avoid tight requeue when ephemerisRef does not exist", func() {
+			createCellConfig()
+
+			mock := &provider.MockProvider{}
+			reconciler := newReconciler(mock)
+
+			result, err := reconciler.Reconcile(context.Background(), reconcile.Request{NamespacedName: cellNN})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(Equal(time.Second))
+
+			result, err = reconciler.Reconcile(context.Background(), reconcile.Request{NamespacedName: cellNN})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(BeZero())
+
+			Expect(mock.ApplyCalls).To(Equal(1))
+			Expect(mock.StatusCalls).To(Equal(1))
+			Expect(mock.EphemerisCalls).To(Equal(0))
+
+			updated := &ntnv1alpha1.NTNCellConfig{}
+			Expect(k8sClient.Get(context.Background(), cellNN, updated)).To(Succeed())
+			ephCond := meta.FindStatusCondition(updated.Status.Conditions, ntnv1alpha1.ConditionEphemerisPushed)
+			Expect(ephCond).NotTo(BeNil())
+			Expect(ephCond.Status).To(Equal(metav1.ConditionFalse))
+			Expect(ephCond.Reason).To(Equal("EphemerisRefNotFound"))
+			Expect(ephCond.Message).To(ContainSubstring(`referenced SatelliteEphemeris "test-eph-push-source"`))
+		})
 	})
 
 	Context("ephemerisToNTNCellConfig mapper", func() {

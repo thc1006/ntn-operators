@@ -94,6 +94,22 @@ func ephemerisPushConditionReason(err error) string {
 	return ephemerisReasonPushFailed
 }
 
+func ephemerisPushConditionChanged(
+	prev *metav1.Condition,
+	reason, message string,
+	generation int64,
+) bool {
+	return prev == nil ||
+		prev.Status != metav1.ConditionFalse ||
+		prev.Reason != reason ||
+		prev.Message != message ||
+		prev.ObservedGeneration != generation
+}
+
+func ephemerisPushShouldRequeue(reason string) bool {
+	return reason != ephemerisReasonRefNotFound
+}
+
 // +kubebuilder:rbac:groups=ntn.operators.dev,resources=ntncellconfigs,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=ntn.operators.dev,resources=ntncellconfigs/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=ntn.operators.dev,resources=ntncellconfigs/finalizers,verbs=update
@@ -244,18 +260,26 @@ func (r *NTNCellConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		if err != nil {
 			pushErr := err
 			log.Error(pushErr, "failed to push ephemeris update")
+			reason := ephemerisPushConditionReason(pushErr)
+			message := pushErr.Error()
+			prevEphemerisCondition := meta.FindStatusCondition(cc.Status.Conditions, ntnv1alpha1.ConditionEphemerisPushed)
+			conditionChanged := ephemerisPushConditionChanged(prevEphemerisCondition, reason, message, cc.Generation)
+
 			meta.SetStatusCondition(&cc.Status.Conditions, metav1.Condition{
 				Type:               ntnv1alpha1.ConditionEphemerisPushed,
 				Status:             metav1.ConditionFalse,
-				Reason:             ephemerisPushConditionReason(pushErr),
-				Message:            pushErr.Error(),
+				Reason:             reason,
+				Message:            message,
 				ObservedGeneration: cc.Generation,
 			})
 			if err := r.Status().Update(ctx, cc); err != nil {
 				return ctrl.Result{}, err
 			}
-			if r.Recorder != nil {
-				r.Recorder.Eventf(cc, nil, "Warning", "EphemerisPushFailed", "EphemerisPushFailed", "%s", pushErr.Error())
+			if conditionChanged && r.Recorder != nil {
+				r.Recorder.Eventf(cc, nil, "Warning", "EphemerisPushFailed", "EphemerisPushFailed", "%s", message)
+			}
+			if !ephemerisPushShouldRequeue(reason) {
+				return ctrl.Result{}, nil
 			}
 			return ctrl.Result{RequeueAfter: time.Minute}, nil
 		}
