@@ -78,6 +78,42 @@ var (
 		},
 		[]string{"ephemeris"},
 	)
+
+	// ReaderQueryDuration measures how long a single call through a
+	// pkg/slice/metrics Reader takes, split by source ("prometheus") and
+	// outcome ("success" or "error"). Used to catch slow-path Prometheus
+	// instances before the 2 s timeout starts biting reconciles.
+	ReaderQueryDuration = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "ntn_metrics_reader_query_duration_seconds",
+			Help:    "Duration of a metrics reader query in seconds.",
+			Buckets: []float64{0.001, 0.005, 0.010, 0.025, 0.050, 0.100, 0.250, 0.500, 1.0, 2.0, 5.0},
+		},
+		[]string{"source", "outcome"},
+	)
+
+	// ReaderErrorsTotal counts metrics-read failures by reason. Populated
+	// by the Prometheus reader; the annotation reader never errors on
+	// correctly-formed input. Cardinality bound: #sources × #reasons,
+	// currently 1 × 4 = 4 series.
+	ReaderErrorsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "ntn_metrics_reader_errors_total",
+			Help: "Count of metrics reader errors by source and reason.",
+		},
+		[]string{"source", "reason"},
+	)
+
+	// ReaderStaleUsedTotal counts reconciles served from the stale-value
+	// cache per NTNSlice. A non-zero derivative is the operator's signal
+	// that the underlying source has been degraded long enough to matter.
+	ReaderStaleUsedTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "ntn_metrics_reader_stale_value_used_total",
+			Help: "Count of reconciles in which the metrics reader served a stale cached value.",
+		},
+		[]string{"namespace", "name"},
+	)
 )
 
 func init() {
@@ -88,6 +124,9 @@ func init() {
 		ConfigApplyErrorsTotal,
 		GPFetchDuration,
 		GPSatelliteCount,
+		ReaderQueryDuration,
+		ReaderErrorsTotal,
+		ReaderStaleUsedTotal,
 	)
 	// Note: logging here is intentionally omitted because init() runs
 	// before controller-runtime's logger is configured. Registration

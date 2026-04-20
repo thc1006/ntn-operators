@@ -17,9 +17,11 @@ import (
 	"sync"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"k8s.io/apimachinery/pkg/types"
 
 	ntnv1alpha1 "github.com/thc1006/ntn-operators/api/v1alpha1"
+	ntnmetrics "github.com/thc1006/ntn-operators/pkg/metrics"
 	"github.com/thc1006/ntn-operators/pkg/slice"
 )
 
@@ -77,5 +79,8 @@ func (c *staleCache) Read(ctx context.Context, ns *ntnv1alpha1.NTNSlice) (Result
 	if !ok {
 		return Result{}, fmt.Errorf("staleCache: no fresh or cached value: %w", err)
 	}
+	ntnmetrics.ReaderStaleUsedTotal.With(prometheus.Labels{
+		"namespace": ns.Namespace, "name": ns.Name,
+	}).Inc()
 	return Result{Metrics: cached.metrics, Stale: true, LastFreshAt: cached.freshAt}, nil
 }

@@ -17,9 +17,21 @@ import (
 	"math"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/common/model"
 
 	ntnv1alpha1 "github.com/thc1006/ntn-operators/api/v1alpha1"
+	ntnmetrics "github.com/thc1006/ntn-operators/pkg/metrics"
+)
+
+const sourceLabelPrometheus = "prometheus"
+
+// Error-reason label values for ReaderErrorsTotal.
+const (
+	reasonQueryError      = "query_error"
+	reasonEmptyVector     = "empty_vector"
+	reasonNonFinite       = "non_finite"
+	reasonUnsupportedType = "unsupported_type"
 )
 
 // defaultPrometheusTimeout is the per-query hard limit used when
@@ -117,33 +129,55 @@ func (r *prometheusReader) Read(ctx context.Context, ns *ntnv1alpha1.NTNSlice) (
 	return Result{Metrics: m}, nil
 }
 
-// fetch issues a single instant query and extracts a finite float64.
-// Empty vectors and non-finite values both surface as ErrNoMetrics so the
-// caller sees a uniform "this metric is unobservable" signal.
-//
-// TODO(cycle 7): wrap this call in a duration histogram
-// (ntn_metrics_reader_query_duration_seconds) and an errors counter.
-func (r *prometheusReader) fetch(ctx context.Context, q string) (float64, error) {
-	v, err := r.client.Query(ctx, q, r.now())
-	if err != nil {
-		return 0, fmt.Errorf("prometheusReader: query %q: %w", q, err)
+// fetch issues a single instant query, extracts a finite float64, and
+// emits observability signals: the duration is always recorded (split by
+// success / error outcome) and a reason-labelled error counter is bumped
+// on every non-success path. Empty vectors and non-finite values surface
+// as ErrNoMetrics so the caller sees a uniform "this metric is
+// unobservable" signal.
+func (r *prometheusReader) fetch(ctx context.Context, q string) (result float64, err error) {
+	start := time.Now()
+	var reason string
+	defer func() {
+		outcome := "success"
+		if err != nil {
+			outcome = "error"
+		}
+		ntnmetrics.ReaderQueryDuration.With(prometheus.Labels{
+			"source": sourceLabelPrometheus, "outcome": outcome,
+		}).Observe(time.Since(start).Seconds())
+		if reason != "" {
+			ntnmetrics.ReaderErrorsTotal.With(prometheus.Labels{
+				"source": sourceLabelPrometheus, "reason": reason,
+			}).Inc()
+		}
+	}()
+	v, qerr := r.client.Query(ctx, q, r.now())
+	if qerr != nil {
+		reason = reasonQueryError
+		return 0, fmt.Errorf("prometheusReader: query %q: %w", q, qerr)
 	}
 	switch value := v.(type) {
 	case *model.Scalar:
-		return finiteOrErr(q, float64(value.Value))
+		f := float64(value.Value)
+		if math.IsNaN(f) || math.IsInf(f, 0) {
+			reason = reasonNonFinite
+			return 0, fmt.Errorf("prometheusReader: query %q non-finite (%v): %w", q, f, ErrNoMetrics)
+		}
+		return f, nil
 	case model.Vector:
 		if len(value) == 0 {
+			reason = reasonEmptyVector
 			return 0, fmt.Errorf("prometheusReader: query %q empty vector: %w", q, ErrNoMetrics)
 		}
-		return finiteOrErr(q, float64(value[0].Value))
+		f := float64(value[0].Value)
+		if math.IsNaN(f) || math.IsInf(f, 0) {
+			reason = reasonNonFinite
+			return 0, fmt.Errorf("prometheusReader: query %q non-finite (%v): %w", q, f, ErrNoMetrics)
+		}
+		return f, nil
 	default:
+		reason = reasonUnsupportedType
 		return 0, fmt.Errorf("prometheusReader: query %q unsupported result type %T: %w", q, v, ErrNoMetrics)
 	}
-}
-
-func finiteOrErr(q string, f float64) (float64, error) {
-	if math.IsNaN(f) || math.IsInf(f, 0) {
-		return 0, fmt.Errorf("prometheusReader: query %q non-finite (%v): %w", q, f, ErrNoMetrics)
-	}
-	return f, nil
 }
