@@ -68,8 +68,22 @@ curl -s http://10.37.10.18:9090/metrics | head
 ```
 
 **Security note.** Binding to a host IP exposes UPF metrics to
-anything that can reach that address. In production, front this
-with a host-level firewall or a Service ExternalName + NetworkPolicy.
+anything that can reach that address. Open5GS `/metrics` leaks
+session IDs and SUPI-hash prefixes, so treat the port as sensitive.
+In production, front this with a host-level firewall or a Service
+ExternalName + NetworkPolicy. A minimal iptables fence that only
+lets the pod CIDR in:
+
+```bash
+# Replace 10.244.0.0/16 with your cluster's podCIDR
+# (kubectl cluster-info dump | grep podCIDR).
+sudo iptables -I INPUT -p tcp --dport 9090 \
+  -s 10.244.0.0/16 -j ACCEPT
+sudo iptables -A INPUT -p tcp --dport 9090 -j DROP
+```
+
+Persist with `iptables-save > /etc/iptables/rules.v4` (or nftables
+equivalent) so the fence survives reboot.
 
 If you skip this step, the runbook still works — Prometheus will
 scrape only the synthetic exporter, which is enough to exercise
@@ -82,7 +96,10 @@ kubectl apply -f config/samples/e2e/01-namespace.yaml
 kubectl apply -f config/samples/e2e/02-test-metrics-exporter.yaml
 kubectl apply -f config/samples/e2e/03-prometheus.yaml
 
-# Optional — only if §3 is done:
+# Optional — only if §3 is done. The scrape file is a full ConfigMap
+# that supersedes the one bundled above; `kubectl apply` will swap the
+# data cleanly. Follow with a /-/reload so Prometheus picks it up
+# without a pod restart.
 #   kubectl apply -f config/samples/e2e/06-open5gs-scrape.yaml
 #   kubectl -n ntn-e2e exec deploy/prometheus -- \
 #     wget -qO- --post-data= http://localhost:9090/-/reload
@@ -112,19 +129,34 @@ kill %1
 
 The failover engine requires `FailoverReady=True`, which in turn
 requires an active pass window in the referenced SatelliteEphemeris.
-Apply the placeholder CR, then patch its status:
+Apply the placeholder CR, then patch its status.
+
+The `date -d "@..."` form below is GNU coreutils; macOS BSD `date`
+wants a different flag. A portable alternative using Python 3 is
+shown second.
 
 ```bash
 kubectl apply -f config/samples/e2e/04-satellite-ephemeris.yaml
 
-# Inject a pass window centred on "now + 1 minute" lasting 1 h.
+# Linux (GNU date):
 NOW=$(date -u +%s)
 AOS=$(date -u -d "@$NOW" +%Y-%m-%dT%H:%M:%SZ)
 LOS=$(date -u -d "@$((NOW + 3600))" +%Y-%m-%dT%H:%M:%SZ)
+
+# macOS / portable (Python 3):
+#   AOS=$(python3 -c 'import datetime; print(datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"))')
+#   LOS=$(python3 -c 'import datetime; print((datetime.datetime.utcnow()+datetime.timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ"))')
+
 kubectl patch satelliteephemeris oneweb-constellation \
   --subresource=status --type=merge -p "{\
 \"status\": {\
-  \"nextPassWindows\": [{\"aos\": \"$AOS\", \"los\": \"$LOS\"}],\
+  \"nextPassWindows\": [{\
+    \"satellite\": \"oneweb-0001\",\
+    \"groundStation\": \"nycu-gs\",\
+    \"aos\": \"$AOS\",\
+    \"los\": \"$LOS\",\
+    \"maxElevation\": \"45\"\
+  }],\
   \"satelliteCount\": 1\
 }}"
 ```

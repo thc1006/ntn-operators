@@ -24,10 +24,10 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"log"
 	"net/http"
-	"os"
 	"os/signal"
 	"syscall"
 	"time"
@@ -74,7 +74,7 @@ func main() {
 	go func() {
 		log.Printf("test-metrics-exporter listening on %s (slice=%s/%s, pass=%s, gap=%s)",
 			*listen, *namespace, *slice, *passDuration, *gapDuration)
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Printf("server error: %v", err)
 			stop()
 		}
@@ -86,5 +86,4 @@ func main() {
 	if err := srv.Shutdown(shutdown); err != nil {
 		log.Printf("shutdown error: %v", err)
 	}
-	_ = os.Stdout // pacify unused import guard when logging is disabled in tests
 }

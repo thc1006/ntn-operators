@@ -34,6 +34,13 @@ must not ship as the default behaviour for production users.
 - Background pull / push-gateway mode. Sync query per reconcile is sufficient
   for the current scale target (tens of NTNSlices).
 - RSRQ / SINR metrics.
+- **Endpoint allow-list for SSRF hardening.** `spec.metricsSource.prometheus.endpoint`
+  is a user-supplied URL that the operator issues HTTP POSTs against. In the
+  current deployment model NTNSlice creation is cluster-admin-only RBAC, which
+  bounds the blast radius: an admin can already curl anything the operator pod
+  can reach. Multi-tenant installs should add an admission-time allow-list of
+  endpoint hosts before granting non-admin tenants `create ntnslices`. Filed
+  as a follow-up; not fixed here.
 
 ## Design decisions
 

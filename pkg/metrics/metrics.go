@@ -85,9 +85,13 @@ var (
 	// instances before the 2 s timeout starts biting reconciles.
 	ReaderQueryDuration = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
-			Name:    "ntn_metrics_reader_query_duration_seconds",
-			Help:    "Duration of a metrics reader query in seconds.",
-			Buckets: []float64{0.001, 0.005, 0.010, 0.025, 0.050, 0.100, 0.250, 0.500, 1.0, 2.0, 5.0},
+			Name: "ntn_metrics_reader_query_duration_seconds",
+			Help: "Duration of a metrics reader query in seconds.",
+			// Upper bucket matches the default Prometheus query timeout
+			// (pkg/slice/metrics.defaultPrometheusTimeout = 2s); any
+			// observation landing above it is already in +Inf and an
+			// outlier worth inspecting directly.
+			Buckets: []float64{0.001, 0.005, 0.010, 0.025, 0.050, 0.100, 0.250, 0.500, 1.0, 2.0},
 		},
 		[]string{"source", "outcome"},
 	)
