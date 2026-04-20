@@ -230,12 +230,15 @@ func main() {
 	}
 	// +kubebuilder:scaffold:builder
 
-	// Validating webhooks.
-	if err := builder.WebhookManagedBy(mgr, &ntnv1alpha1.NTNSlice{}).
-		WithValidator(&ntnwebhook.NTNSliceCustomValidator{}).
-		Complete(); err != nil {
-		setupLog.Error(err, "unable to create webhook", "webhook", "NTNSlice")
-		os.Exit(1)
+	// Validating webhooks — only register when webhook certificates are configured.
+	if len(webhookCertPath) > 0 {
+		if err := builder.WebhookManagedBy(mgr, &ntnv1alpha1.NTNSlice{}).
+			WithValidator(&ntnwebhook.NTNSliceCustomValidator{}).
+			Complete(); err != nil {
+			setupLog.Error(err, "unable to create webhook", "webhook", "NTNSlice")
+			os.Exit(1)
+		}
+		setupLog.Info("Validating webhooks enabled")
 	}
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
