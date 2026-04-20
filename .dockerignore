@@ -9,3 +9,8 @@
 # Re-include Go module files
 !go.mod
 !go.sum
+
+# Re-include OLM bundle for bundle.Dockerfile
+!bundle/manifests/
+!bundle/metadata/
+!bundle/tests/
