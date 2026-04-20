@@ -58,18 +58,27 @@ fmt: ## Run go fmt against code.
 vet: ## Run go vet against code.
 	go vet ./...
 
+IMAGE_TAG_BASE ?= ghcr.io/thc1006/ntn-operators
+VERSION ?= 0.1.0
 BUNDLE_IMG ?= $(IMAGE_TAG_BASE)-bundle:v$(VERSION)
 
 .PHONY: bundle
 bundle: manifests ## Sync CRDs into OLM bundle manifests.
+	@# Remove stale CRDs before copying (handles renames/deletions).
+	@for f in bundle/manifests/*.yaml; do \
+		[ -e "$$f" ] || continue; \
+		if grep -q '^kind: CustomResourceDefinition$$' "$$f"; then \
+			rm -f "$$f"; \
+		fi; \
+	done
 	cp config/crd/bases/*.yaml bundle/manifests/
 
 .PHONY: bundle-build
-bundle-build: ## Build the OLM bundle image.
+bundle-build: bundle ## Build the OLM bundle image.
 	$(CONTAINER_TOOL) build -f bundle.Dockerfile -t $(BUNDLE_IMG) .
 
 .PHONY: bundle-push
-bundle-push: ## Push the OLM bundle image.
+bundle-push: bundle-build ## Push the OLM bundle image.
 	$(CONTAINER_TOOL) push $(BUNDLE_IMG)
 
 .PHONY: bench
