@@ -61,8 +61,8 @@ type Provider struct {
 	client client.Client
 }
 
-// ArtifactName returns the ConfigMap name managed by this provider for the given CR.
-func (p *Provider) ArtifactName(crName string) string {
+// ConfigMapName returns the ConfigMap name managed by this provider for the given CR.
+func (p *Provider) ConfigMapName(crName string) string {
 	return ConfigMapNameFor(crName)
 }
 

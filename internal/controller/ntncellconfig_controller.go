@@ -215,7 +215,7 @@ func (r *NTNCellConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	cm := &corev1.ConfigMap{}
 	cmKey := client.ObjectKey{
 		Namespace: cc.Namespace,
-		Name:      prov.ArtifactName(cc.Name),
+		Name:      prov.ConfigMapName(cc.Name),
 	}
 	if err := r.Get(ctx, cmKey, cm); err == nil {
 		if !metav1.IsControlledBy(cm, cc) {
@@ -330,13 +330,18 @@ func (r *NTNCellConfigReconciler) handleFinalizer(
 					cmKey := client.ObjectKey{Namespace: cc.Namespace, Name: cc.Status.ConfigMapRef}
 					if err := r.Get(ctx, cmKey, cm); err != nil {
 						if client.IgnoreNotFound(err) != nil {
-							log.Error(err, "Failed to get ConfigMap via configMapRef during best-effort finalization",
-								"configmap", cmKey)
+							log.Error(err, "Failed to get ConfigMap during best-effort finalization", "configmap", cmKey)
+							return true, ctrl.Result{}, err // retry on transient errors
 						}
-					} else {
+					} else if metav1.IsControlledBy(cm, cc) {
 						if err := r.Delete(ctx, cm); client.IgnoreNotFound(err) != nil {
-							log.Error(err, "Failed to delete ConfigMap via configMapRef")
+							log.Error(err, "Failed to delete ConfigMap during best-effort finalization")
+							return true, ctrl.Result{}, err // retry on transient errors
 						}
+						log.Info("Deleted orphaned ConfigMap via configMapRef", "configmap", cmKey)
+					} else {
+						log.Info("ConfigMap from configMapRef not owned by this CR; skipping deletion",
+							"configmap", cmKey)
 					}
 				} else {
 					log.Info("Provider not in registry and no configMapRef; removing finalizer without cleanup",
@@ -348,7 +353,7 @@ func (r *NTNCellConfigReconciler) handleFinalizer(
 			cm := &corev1.ConfigMap{}
 			cmKey := client.ObjectKey{
 				Namespace: cc.Namespace,
-				Name:      prov.ArtifactName(cc.Name),
+				Name:      prov.ConfigMapName(cc.Name),
 			}
 			if err := r.Get(ctx, cmKey, cm); err != nil {
 				if client.IgnoreNotFound(err) != nil {

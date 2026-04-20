@@ -66,6 +66,6 @@ func (m *MockProvider) PushEphemerisUpdate(_ context.Context, _, _ string, updat
 	return m.EphemerisErr
 }
 
-func (m *MockProvider) ArtifactName(crName string) string {
+func (m *MockProvider) ConfigMapName(crName string) string {
 	return "mock-" + crName
 }
