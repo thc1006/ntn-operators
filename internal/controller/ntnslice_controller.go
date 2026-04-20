@@ -30,6 +30,7 @@ import (
 	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	ctrlrt "sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -46,9 +47,10 @@ const sliceRequeueInterval = 30 * time.Second
 // NTNSliceReconciler reconciles a NTNSlice object
 type NTNSliceReconciler struct {
 	client.Client
-	Scheme   *runtime.Scheme
-	Recorder events.EventRecorder
-	Now      func() time.Time
+	Scheme                  *runtime.Scheme
+	Recorder                events.EventRecorder
+	MaxConcurrentReconciles int
+	Now                     func() time.Time
 }
 
 // +kubebuilder:rbac:groups=ntn.operators.dev,resources=ntnslices,verbs=get;list;watch;create;update;patch;delete
@@ -342,6 +344,7 @@ func (r *NTNSliceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			handler.EnqueueRequestsFromMapFunc(r.ephemerisToSlice),
 		).
 		Named("ntnslice").
+		WithOptions(ctrlrt.Options{MaxConcurrentReconciles: r.MaxConcurrentReconciles}).
 		Complete(r)
 }
 

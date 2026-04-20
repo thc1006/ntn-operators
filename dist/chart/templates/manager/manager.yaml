@@ -53,6 +53,9 @@ spec:
         - --metrics-bind-address=0
         {{- end }}
         - --health-probe-bind-address=:8081
+        {{- if gt (int .Values.manager.maxConcurrentReconciles) 1 }}
+        - --max-concurrent-reconciles={{ .Values.manager.maxConcurrentReconciles }}
+        {{- end }}
         {{- range .Values.manager.args }}
         - {{ . }}
         {{- end }}
