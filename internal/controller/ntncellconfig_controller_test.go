@@ -399,7 +399,7 @@ var _ = Describe("NTNCellConfig Controller", func() {
 			// Verify the ConfigMap has OwnerReference pointing to the CR.
 			cm := &corev1.ConfigMap{}
 			cmKey := types.NamespacedName{
-				Name:      "ocudu-ntn-" + resourceName,
+				Name:      realProvider.ArtifactName(resourceName),
 				Namespace: namespace,
 			}
 			Expect(k8sClient.Get(context.Background(), cmKey, cm)).To(Succeed())

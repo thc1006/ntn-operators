@@ -320,8 +320,21 @@ func (r *NTNCellConfigReconciler) handleFinalizer(
 	if cc.DeletionTimestamp != nil {
 		if controllerutil.ContainsFinalizer(cc, finalizerName) {
 			if prov == nil {
-				log.Info("Provider not in registry during deletion; removing finalizer without cleanup",
-					"providerType", cc.Spec.Provider.Type)
+				// Best-effort cleanup using Status.ConfigMapRef when provider is missing.
+				if cc.Status.ConfigMapRef != "" {
+					log.Info("Provider not in registry; attempting cleanup via status.configMapRef",
+						"configMapRef", cc.Status.ConfigMapRef)
+					cm := &corev1.ConfigMap{}
+					cmKey := client.ObjectKey{Namespace: cc.Namespace, Name: cc.Status.ConfigMapRef}
+					if err := r.Get(ctx, cmKey, cm); err == nil {
+						if err := r.Delete(ctx, cm); client.IgnoreNotFound(err) != nil {
+							log.Error(err, "Failed to delete ConfigMap via configMapRef")
+						}
+					}
+				} else {
+					log.Info("Provider not in registry and no configMapRef; removing finalizer without cleanup",
+						"providerType", cc.Spec.Provider.Type)
+				}
 				controllerutil.RemoveFinalizer(cc, finalizerName)
 				return true, ctrl.Result{}, r.Update(ctx, cc)
 			}
