@@ -20,6 +20,9 @@ import (
 	"context"
 	"sync"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+
 	ntnv1alpha1 "github.com/thc1006/ntn-operators/api/v1alpha1"
 )
 
@@ -66,6 +69,12 @@ func (m *MockProvider) PushEphemerisUpdate(_ context.Context, _, _ string, updat
 	return m.EphemerisErr
 }
 
-func (m *MockProvider) ConfigMapName(crName string) string {
-	return "mock-" + crName
+func (m *MockProvider) EnsureOwnership(
+	_ context.Context, _ string, _ metav1.Object, _ *runtime.Scheme,
+) error {
+	return nil
+}
+
+func (m *MockProvider) Cleanup(_ context.Context, _, _ string) error {
+	return nil
 }

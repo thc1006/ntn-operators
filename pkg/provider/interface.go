@@ -19,6 +19,9 @@ package provider
 import (
 	"context"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+
 	ntnv1alpha1 "github.com/thc1006/ntn-operators/api/v1alpha1"
 )
 
@@ -49,12 +52,13 @@ type NTNProvider interface {
 	// PushEphemerisUpdate pushes fresh ephemeris data to the backend.
 	PushEphemerisUpdate(ctx context.Context, crName, namespace string, update EphemerisUpdate) error
 
-	// ConfigMapName returns the name of the ConfigMap managed by this
-	// provider for the given CR name. Used by the controller for
-	// OwnerReference and finalizer cleanup.
-	//
-	// Note: All current and planned providers use ConfigMap as the
-	// artifact type. If a non-ConfigMap provider is added, this method
-	// should be generalized to return a typed artifact reference.
-	ConfigMapName(crName string) string
+	// EnsureOwnership sets ownership metadata (e.g., OwnerReference) on
+	// the provider's managed artifact so it is garbage-collected when
+	// the parent NTNCellConfig CR is deleted.
+	EnsureOwnership(ctx context.Context, crName string, owner metav1.Object, scheme *runtime.Scheme) error
+
+	// Cleanup removes provider-managed artifacts for the given CR name
+	// and namespace. Called by the finalizer during CR deletion.
+	// Returns nil if there is nothing to clean up (artifact not found).
+	Cleanup(ctx context.Context, crName, namespace string) error
 }

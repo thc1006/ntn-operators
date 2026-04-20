@@ -194,8 +194,7 @@ func (r *NTNCellConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			"config": cc.Name, "provider": spec.Provider.Type,
 		}).Inc()
 		cc.Status.AppliedKoffset = 0
-		// Preserve ConfigMapRef for best-effort finalizer cleanup (artifact may exist).
-		cc.Status.ConfigMapRef = prov.ConfigMapName(cc.Name)
+		// Preserve existing ConfigMapRef for best-effort finalizer cleanup.
 		meta.SetStatusCondition(&cc.Status.Conditions, metav1.Condition{
 			Type:               ntnv1alpha1.ConditionConfigApplied,
 			Status:             metav1.ConditionFalse,
@@ -212,22 +211,9 @@ func (r *NTNCellConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{RequeueAfter: time.Minute}, nil
 	}
 
-	// Step 5b: Ensure OwnerReference on ConfigMap for garbage collection.
-	cm := &corev1.ConfigMap{}
-	cmKey := client.ObjectKey{
-		Namespace: cc.Namespace,
-		Name:      prov.ConfigMapName(cc.Name),
-	}
-	if err := r.Get(ctx, cmKey, cm); err != nil {
-		if client.IgnoreNotFound(err) != nil {
-			log.Error(err, "failed to get ConfigMap for OwnerReference", "configmap", cmKey)
-		}
-	} else if !metav1.IsControlledBy(cm, cc) {
-		if err := controllerutil.SetControllerReference(cc, cm, r.Scheme); err != nil {
-			log.Error(err, "failed to set OwnerReference on ConfigMap", "namespace", cm.Namespace, "name", cm.Name)
-		} else if err := r.Update(ctx, cm); err != nil {
-			log.Error(err, "failed to update ConfigMap with OwnerReference", "namespace", cm.Namespace, "name", cm.Name)
-		}
+	// Step 5b: Ensure ownership on provider artifact for garbage collection.
+	if err := prov.EnsureOwnership(ctx, cc.Name, cc, r.Scheme); err != nil {
+		log.Error(err, "failed to ensure ownership on provider artifact")
 	}
 
 	// Step 6: Get applied status from provider.
@@ -353,22 +339,9 @@ func (r *NTNCellConfigReconciler) handleFinalizer(
 				controllerutil.RemoveFinalizer(cc, finalizerName)
 				return true, ctrl.Result{}, r.Update(ctx, cc)
 			}
-			cm := &corev1.ConfigMap{}
-			cmKey := client.ObjectKey{
-				Namespace: cc.Namespace,
-				Name:      prov.ConfigMapName(cc.Name),
-			}
-			if err := r.Get(ctx, cmKey, cm); err != nil {
-				if client.IgnoreNotFound(err) != nil {
-					log.Error(err, "Failed to get ConfigMap during finalization")
-					return true, ctrl.Result{}, err
-				}
-			} else {
-				if err := r.Delete(ctx, cm); client.IgnoreNotFound(err) != nil {
-					log.Error(err, "Failed to delete ConfigMap during finalization")
-					return true, ctrl.Result{}, err
-				}
-				log.Info("Deleted ConfigMap during finalization", "configmap", cmKey)
+			if err := prov.Cleanup(ctx, cc.Name, cc.Namespace); err != nil {
+				log.Error(err, "Failed to cleanup provider artifact during finalization")
+				return true, ctrl.Result{}, err
 			}
 			controllerutil.RemoveFinalizer(cc, finalizerName)
 			if err := r.Update(ctx, cc); err != nil {
