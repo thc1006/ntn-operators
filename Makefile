@@ -58,6 +58,20 @@ fmt: ## Run go fmt against code.
 vet: ## Run go vet against code.
 	go vet ./...
 
+BUNDLE_IMG ?= $(IMAGE_TAG_BASE)-bundle:v$(VERSION)
+
+.PHONY: bundle
+bundle: manifests ## Sync CRDs into OLM bundle manifests.
+	cp config/crd/bases/*.yaml bundle/manifests/
+
+.PHONY: bundle-build
+bundle-build: ## Build the OLM bundle image.
+	$(CONTAINER_TOOL) build -f bundle.Dockerfile -t $(BUNDLE_IMG) .
+
+.PHONY: bundle-push
+bundle-push: ## Push the OLM bundle image.
+	$(CONTAINER_TOOL) push $(BUNDLE_IMG)
+
 .PHONY: bench
 bench: ## Run Go benchmarks with memory allocation stats.
 	go test -bench=. -benchmem -benchtime=3s -run='^$$' ./pkg/...
