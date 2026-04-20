@@ -126,10 +126,9 @@ spec:
                 description: |-
                   ephemerisRef is the name of a SatelliteEphemeris CR in the same namespace.
                   When set, the controller re-reconciles this NTNCellConfig whenever the
-                  referenced SatelliteEphemeris is updated. Future work will consume the
-                  ephemeris data for dynamic NTN parameter updates; currently this field
-                  only triggers reconciliation. The static ephemeris in spec.ntn
-                  (ephemerisECEF or ephemerisOrbital) remains required.
+                  referenced SatelliteEphemeris is updated and invokes runtime ephemeris push
+                  on the provider reconcile path. The static ephemeris in spec.ntn
+                  (ephemerisECEF or ephemerisOrbital) remains required as the source payload.
                 minLength: 1
                 type: string
               ntn:

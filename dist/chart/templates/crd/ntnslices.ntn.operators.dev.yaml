@@ -86,6 +86,16 @@ spec:
                 description: failoverPolicy defines when and how to switch between
                   paths.
                 properties:
+                  hysteresisMargin:
+                    description: |-
+                      hysteresisMargin is a dead-band applied to trigger thresholds
+                      during switchback evaluation, preventing flapping when metrics
+                      oscillate near the threshold. The value uses the same unit as
+                      the trigger (dB for RSRP, ms for latency, percent for packetLoss).
+                      Example: with trigger "rsrp < -120" and hysteresisMargin "10",
+                      failover fires at RSRP < -120, but switchback requires RSRP >= -110.
+                    pattern: ^[0-9]+\.?[0-9]*$
+                    type: string
                   sessionContinuity:
                     default: true
                     description: sessionContinuity preserves active sessions during
