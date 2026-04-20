@@ -1,0 +1,20 @@
+{{- if .Values.webhooks.enable }}
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+    app.kubernetes.io/name: {{ include "ntn-operators.name" . }}
+    helm.sh/chart: {{ .Chart.Name }}-{{ .Chart.Version | replace "+" "_" }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  name: {{ include "ntn-operators.resourceName" (dict "suffix" "webhook-service" "context" $) }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  ports:
+    - port: 443
+      protocol: TCP
+      targetPort: 9443
+  selector:
+    app.kubernetes.io/name: {{ include "ntn-operators.name" . }}
+    control-plane: controller-manager
+{{- end }}
