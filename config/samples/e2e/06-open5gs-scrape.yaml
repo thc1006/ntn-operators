@@ -1,0 +1,28 @@
+---
+# ConfigMap patch snippet for scraping Open5GS UPF metrics from the
+# host. Apply ONLY after reconfiguring /etc/open5gs/upf.yaml to bind
+# 10.37.10.18:9090 (not the default 127.0.0.7:9090, which is loopback
+# and unreachable from pod network). See the runbook §3.
+#
+# To apply: kubectl -n ntn-e2e patch cm prometheus-config --patch-file=this-file
+# Then reload Prometheus: kubectl -n ntn-e2e exec deploy/prometheus -- \
+#   wget -qO- --post-data= http://localhost:9090/-/reload
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-config
+  namespace: ntn-e2e
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 10s
+      evaluation_interval: 30s
+    scrape_configs:
+      - job_name: test-metrics-exporter
+        static_configs:
+          - targets:
+              - test-metrics-exporter.ntn-e2e.svc:9090
+      - job_name: open5gs-upf
+        static_configs:
+          - targets:
+              - 10.37.10.18:9090

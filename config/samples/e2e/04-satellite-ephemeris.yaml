@@ -1,0 +1,15 @@
+---
+# Placeholder SatelliteEphemeris. The spec's URL is not actually fetched
+# during the E2E — the test flow patches status.nextPassWindows manually
+# (see docs/runbooks/e2e-prometheus-metrics.md §5) because CelesTrak /
+# Space-Track round-trips are not the focus of this test.
+apiVersion: ntn.operators.dev/v1alpha1
+kind: SatelliteEphemeris
+metadata:
+  name: oneweb-constellation
+  namespace: default
+spec:
+  source:
+    type: CelesTrak
+    url: https://celestrak.org/NORAD/elements/gp.php?GROUP=oneweb&FORMAT=tle
+    refreshInterval: 4h
