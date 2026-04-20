@@ -194,7 +194,8 @@ func (r *NTNCellConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			"config": cc.Name, "provider": spec.Provider.Type,
 		}).Inc()
 		cc.Status.AppliedKoffset = 0
-		cc.Status.ConfigMapRef = ""
+		// Preserve ConfigMapRef for best-effort finalizer cleanup (artifact may exist).
+		cc.Status.ConfigMapRef = prov.ConfigMapName(cc.Name)
 		meta.SetStatusCondition(&cc.Status.Conditions, metav1.Condition{
 			Type:               ntnv1alpha1.ConditionConfigApplied,
 			Status:             metav1.ConditionFalse,
