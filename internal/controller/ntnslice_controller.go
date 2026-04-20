@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"strconv"
@@ -40,6 +41,7 @@ import (
 	ntnv1alpha1 "github.com/thc1006/ntn-operators/api/v1alpha1"
 	ntnmetrics "github.com/thc1006/ntn-operators/pkg/metrics"
 	"github.com/thc1006/ntn-operators/pkg/slice"
+	slicemetrics "github.com/thc1006/ntn-operators/pkg/slice/metrics"
 )
 
 const sliceRequeueInterval = 30 * time.Second
@@ -51,6 +53,12 @@ type NTNSliceReconciler struct {
 	Recorder                events.EventRecorder
 	MaxConcurrentReconciles int
 	Now                     func() time.Time
+
+	// ReaderProvider chooses the metrics Reader for each NTNSlice based on
+	// spec.metricsSource. If nil, the reconciler falls back to a provider
+	// wired with annotation-only readers so existing development tests
+	// that construct the reconciler directly continue to work.
+	ReaderProvider *slicemetrics.Provider
 }
 
 // +kubebuilder:rbac:groups=ntn.operators.dev,resources=ntnslices,verbs=get;list;watch;create;update;patch;delete
@@ -76,9 +84,36 @@ func (r *NTNSliceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 
 	now := r.now()
 
-	// Step 2: Read simulated metrics from annotations.
-	metrics := r.readMetrics(ns)
-	log.V(2).Info("metrics read", "rsrp", metrics.RSRP, "latencyMs", metrics.LatencyMs, "packetLossPercent", metrics.PacketLossPercent)
+	// Step 2: Read path quality metrics via the configured source.
+	provider := r.ReaderProvider
+	if provider == nil {
+		// Backward-compatible fallback: tests that build a Reconciler
+		// directly without wiring a Provider should still reconcile.
+		provider = slicemetrics.NewProvider(slicemetrics.NewClientPool())
+	}
+	reader, err := provider.For(ns)
+	if err != nil {
+		log.Error(err, "failed to build metrics reader")
+		return r.setMetricsUnknown(ctx, ns, "MetricsReaderError", err.Error())
+	}
+	readResult, err := reader.Read(ctx, ns)
+	if err != nil {
+		reason := "MetricsUnavailable"
+		if !errors.Is(err, slicemetrics.ErrNoMetrics) {
+			reason = "MetricsReaderError"
+		}
+		log.Info("metrics unavailable; holding current path", "reason", reason, "err", err.Error())
+		return r.setMetricsUnknown(ctx, ns, reason, err.Error())
+	}
+	metrics := readResult.Metrics
+	if readResult.Stale {
+		log.Info("metrics source returned stale value", "lastFreshAt", readResult.LastFreshAt)
+		if r.Recorder != nil {
+			r.Recorder.Eventf(ns, nil, "Warning", "MetricsStale", "MetricsStale",
+				"Using stale metrics last observed at %s", readResult.LastFreshAt.Format(time.RFC3339))
+		}
+	}
+	log.V(2).Info("metrics read", "rsrp", metrics.RSRP, "latencyMs", metrics.LatencyMs, "packetLossPercent", metrics.PacketLossPercent, "stale", readResult.Stale)
 
 	// Step 3: Check satellite availability via SatelliteEphemeris.
 	satelliteAvailable := r.checkSatelliteAvailability(ctx, ns, now)
@@ -273,33 +308,23 @@ func (r *NTNSliceReconciler) applyBillingStatus(ns *ntnv1alpha1.NTNSlice, active
 	})
 }
 
-// readMetrics reads simulated metrics from CR annotations.
-// In production, these would come from UPF/Prometheus.
-func (r *NTNSliceReconciler) readMetrics(ns *ntnv1alpha1.NTNSlice) slice.Metrics {
-	m := slice.Metrics{
-		RSRP:              -80, // default: healthy
-		LatencyMs:         20,
-		PacketLossPercent: 0.1,
+// setMetricsUnknown marks FailoverReady=Unknown with the supplied reason,
+// persists the status update, and requeues. Used whenever the metrics
+// source cannot deliver a value: a broken spec or an unreachable
+// Prometheus must hold the slice in its current path rather than let
+// the failover engine decide on invented data.
+func (r *NTNSliceReconciler) setMetricsUnknown(ctx context.Context, ns *ntnv1alpha1.NTNSlice, reason, msg string) (ctrl.Result, error) {
+	meta.SetStatusCondition(&ns.Status.Conditions, metav1.Condition{
+		Type:               ntnv1alpha1.ConditionFailoverReady,
+		Status:             metav1.ConditionUnknown,
+		Reason:             reason,
+		Message:            msg,
+		ObservedGeneration: ns.Generation,
+	})
+	if err := r.Status().Update(ctx, ns); err != nil && !apierrors.IsConflict(err) {
+		return ctrl.Result{}, err
 	}
-	if ns.Annotations == nil {
-		return m
-	}
-	if v, ok := ns.Annotations["ntn.operators.dev/simulated-rsrp"]; ok {
-		if f, err := strconv.ParseFloat(v, 64); err == nil && !math.IsNaN(f) && !math.IsInf(f, 0) {
-			m.RSRP = f
-		}
-	}
-	if v, ok := ns.Annotations["ntn.operators.dev/simulated-latency"]; ok {
-		if f, err := strconv.ParseFloat(v, 64); err == nil && !math.IsNaN(f) && !math.IsInf(f, 0) {
-			m.LatencyMs = f
-		}
-	}
-	if v, ok := ns.Annotations["ntn.operators.dev/simulated-packet-loss"]; ok {
-		if f, err := strconv.ParseFloat(v, 64); err == nil && !math.IsNaN(f) && !math.IsInf(f, 0) {
-			m.PacketLossPercent = f
-		}
-	}
-	return m
+	return ctrl.Result{RequeueAfter: sliceRequeueInterval}, nil
 }
 
 // checkSatelliteAvailability checks if any satellite pass window is currently active.
