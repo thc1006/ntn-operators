@@ -200,7 +200,7 @@ var _ = Describe("NTNCellConfig Controller", func() {
 		})
 	})
 
-	Context("When provider is nil", func() {
+	Context("When provider registry is nil", func() {
 		BeforeEach(func() { createCR() })
 		AfterEach(func() { deleteCR() })
 

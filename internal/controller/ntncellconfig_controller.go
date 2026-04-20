@@ -217,13 +217,15 @@ func (r *NTNCellConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		Namespace: cc.Namespace,
 		Name:      prov.ConfigMapName(cc.Name),
 	}
-	if err := r.Get(ctx, cmKey, cm); err == nil {
-		if !metav1.IsControlledBy(cm, cc) {
-			if err := controllerutil.SetControllerReference(cc, cm, r.Scheme); err != nil {
-				log.Error(err, "failed to set OwnerReference on ConfigMap", "namespace", cm.Namespace, "name", cm.Name)
-			} else if err := r.Update(ctx, cm); err != nil {
-				log.Error(err, "failed to update ConfigMap with OwnerReference", "namespace", cm.Namespace, "name", cm.Name)
-			}
+	if err := r.Get(ctx, cmKey, cm); err != nil {
+		if client.IgnoreNotFound(err) != nil {
+			log.Error(err, "failed to get ConfigMap for OwnerReference", "configmap", cmKey)
+		}
+	} else if !metav1.IsControlledBy(cm, cc) {
+		if err := controllerutil.SetControllerReference(cc, cm, r.Scheme); err != nil {
+			log.Error(err, "failed to set OwnerReference on ConfigMap", "namespace", cm.Namespace, "name", cm.Name)
+		} else if err := r.Update(ctx, cm); err != nil {
+			log.Error(err, "failed to update ConfigMap with OwnerReference", "namespace", cm.Namespace, "name", cm.Name)
 		}
 	}
 
