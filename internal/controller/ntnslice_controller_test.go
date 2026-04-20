@@ -702,6 +702,99 @@ var _ = Describe("NTNSlice Controller", func() {
 		})
 	})
 
+	// --- MetricsSource CEL validation tests (#67) ---
+
+	Context("CEL: MetricsSource type=prometheus requires prometheus block", func() {
+		It("should reject when type=prometheus without prometheus block", func() {
+			spec := baseSpec()
+			spec.MetricsSource = &ntnv1alpha1.MetricsSource{
+				Type: ntnv1alpha1.MetricsSourcePrometheus,
+			}
+			slice := &ntnv1alpha1.NTNSlice{
+				ObjectMeta: metav1.ObjectMeta{Name: "cel-test-prom-missing", Namespace: namespace},
+				Spec:       spec,
+			}
+			err := k8sClient.Create(context.Background(), slice)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("prometheus block"))
+		})
+	})
+
+	Context("CEL: MetricsSource prometheus requires at least one query", func() {
+		It("should reject when prometheus block has all queries empty", func() {
+			spec := baseSpec()
+			spec.MetricsSource = &ntnv1alpha1.MetricsSource{
+				Type: ntnv1alpha1.MetricsSourcePrometheus,
+				Prometheus: &ntnv1alpha1.PrometheusMetricsSource{
+					Endpoint: "http://prom.monitoring:9090",
+					Queries:  ntnv1alpha1.PrometheusQueries{},
+				},
+			}
+			slice := &ntnv1alpha1.NTNSlice{
+				ObjectMeta: metav1.ObjectMeta{Name: "cel-test-prom-empty-queries", Namespace: namespace},
+				Spec:       spec,
+			}
+			err := k8sClient.Create(context.Background(), slice)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("at least one query"))
+		})
+	})
+
+	Context("CEL: MetricsSource prometheus endpoint pattern", func() {
+		It("should reject endpoint without http(s):// scheme", func() {
+			spec := baseSpec()
+			spec.MetricsSource = &ntnv1alpha1.MetricsSource{
+				Type: ntnv1alpha1.MetricsSourcePrometheus,
+				Prometheus: &ntnv1alpha1.PrometheusMetricsSource{
+					Endpoint: "prom.monitoring:9090",
+					Queries:  ntnv1alpha1.PrometheusQueries{RsrpDbm: "sum(up)"},
+				},
+			}
+			slice := &ntnv1alpha1.NTNSlice{
+				ObjectMeta: metav1.ObjectMeta{Name: "cel-test-prom-bad-endpoint", Namespace: namespace},
+				Spec:       spec,
+			}
+			err := k8sClient.Create(context.Background(), slice)
+			Expect(err).To(HaveOccurred())
+		})
+	})
+
+	Context("MetricsSource: explicit annotations accepted", func() {
+		It("should accept type=annotations", func() {
+			spec := baseSpec()
+			spec.MetricsSource = &ntnv1alpha1.MetricsSource{
+				Type: ntnv1alpha1.MetricsSourceAnnotations,
+			}
+			slice := &ntnv1alpha1.NTNSlice{
+				ObjectMeta: metav1.ObjectMeta{Name: "cel-test-annotations-accept", Namespace: namespace},
+				Spec:       spec,
+			}
+			Expect(k8sClient.Create(context.Background(), slice)).To(Succeed())
+			DeferCleanup(func() { _ = k8sClient.Delete(context.Background(), slice) })
+		})
+	})
+
+	Context("MetricsSource: valid prometheus config accepted", func() {
+		It("should accept type=prometheus with endpoint + at least one query", func() {
+			spec := baseSpec()
+			spec.MetricsSource = &ntnv1alpha1.MetricsSource{
+				Type: ntnv1alpha1.MetricsSourcePrometheus,
+				Prometheus: &ntnv1alpha1.PrometheusMetricsSource{
+					Endpoint: "http://prom.monitoring:9090",
+					Queries: ntnv1alpha1.PrometheusQueries{
+						RsrpDbm: "avg(ue_rsrp_dbm)",
+					},
+				},
+			}
+			slice := &ntnv1alpha1.NTNSlice{
+				ObjectMeta: metav1.ObjectMeta{Name: "cel-test-prom-accept", Namespace: namespace},
+				Spec:       spec,
+			}
+			Expect(k8sClient.Create(context.Background(), slice)).To(Succeed())
+			DeferCleanup(func() { _ = k8sClient.Delete(context.Background(), slice) })
+		})
+	})
+
 	Context("SatelliteEphemeris with empty pass windows", func() {
 		BeforeEach(func() { createSlice() })
 		AfterEach(func() { deleteSlice() })
