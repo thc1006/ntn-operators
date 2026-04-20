@@ -19,6 +19,9 @@ package provider
 import (
 	"context"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+
 	ntnv1alpha1 "github.com/thc1006/ntn-operators/api/v1alpha1"
 )
 
@@ -35,19 +38,27 @@ type EphemerisUpdate struct {
 // and ephemeris updates. Ground station lifecycle is handled directly
 // by its respective controller.
 //
-// Implementations:
-//   - OCUDU: generates geo_ntn.yml and writes to a ConfigMap
+// All current providers (OCUDU, future OAI) store configuration in a
+// ConfigMap. If a future provider uses a different artifact type,
+// the interface and controller should be generalized at that time.
 type NTNProvider interface {
 	// ApplyCellConfig applies NTN radio parameters to the backend.
-	// crName is the NTNCellConfig CR name (used to scope resources like ConfigMaps).
+	// crName is the NTNCellConfig CR name (used to scope the provider artifact).
 	ApplyCellConfig(ctx context.Context, crName string, spec *ntnv1alpha1.NTNCellConfigSpec) error
 
-	// GetCellStatus returns the current applied configuration status
-	// for the given CR name and namespace.
+	// GetCellStatus returns the current applied configuration status.
 	GetCellStatus(ctx context.Context, crName, namespace string) (*ntnv1alpha1.NTNCellConfigStatus, error)
 
 	// PushEphemerisUpdate pushes fresh ephemeris data to the backend.
-	// Phase 1 (ConfigMap): regenerates the ephemeris section of the config.
-	// Phase 2 (future): pushes via OCUDU WebSocket handle_ntn_param_update.
 	PushEphemerisUpdate(ctx context.Context, crName, namespace string, update EphemerisUpdate) error
+
+	// EnsureOwnership sets ownership metadata (e.g., OwnerReference) on
+	// the provider's managed artifact so it is garbage-collected when
+	// the parent NTNCellConfig CR is deleted.
+	EnsureOwnership(ctx context.Context, crName string, owner metav1.Object, scheme *runtime.Scheme) error
+
+	// Cleanup removes provider-managed artifacts for the given CR name
+	// and namespace. Called by the finalizer during CR deletion.
+	// Returns nil if there is nothing to clean up (artifact not found).
+	Cleanup(ctx context.Context, crName, namespace string) error
 }

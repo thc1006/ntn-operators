@@ -41,6 +41,7 @@ import (
 	"github.com/thc1006/ntn-operators/internal/controller"
 	"github.com/thc1006/ntn-operators/pkg/ephemeris"
 	"github.com/thc1006/ntn-operators/pkg/netutil"
+	"github.com/thc1006/ntn-operators/pkg/provider"
 	"github.com/thc1006/ntn-operators/pkg/provider/ocudu"
 	// +kubebuilder:scaffold:imports
 )
@@ -216,12 +217,14 @@ func main() {
 		setupLog.Error(err, "Failed to create controller", "controller", "GroundStationLifecycle")
 		os.Exit(1)
 	}
-	ocuduProvider := ocudu.NewProvider(mgr.GetClient())
+	providers := map[string]provider.NTNProvider{
+		"ocudu": ocudu.NewProvider(mgr.GetClient()),
+	}
 	if err := (&controller.NTNCellConfigReconciler{
 		Client:                  mgr.GetClient(),
 		Scheme:                  mgr.GetScheme(),
 		Recorder:                mgr.GetEventRecorder("ntncellconfig-controller"),
-		Provider:                ocuduProvider,
+		Providers:               providers,
 		MaxConcurrentReconciles: maxConcurrentReconciles,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "NTNCellConfig")

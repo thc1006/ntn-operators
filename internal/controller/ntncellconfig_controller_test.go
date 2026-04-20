@@ -87,7 +87,9 @@ var _ = Describe("NTNCellConfig Controller", func() {
 			Client:   k8sClient,
 			Scheme:   k8sClient.Scheme(),
 			Recorder: events.NewFakeRecorder(10),
-			Provider: p,
+			Providers: map[string]provider.NTNProvider{
+				"ocudu": p,
+			},
 		}
 	}
 
@@ -198,12 +200,17 @@ var _ = Describe("NTNCellConfig Controller", func() {
 		})
 	})
 
-	Context("When provider is nil", func() {
+	Context("When provider registry is nil", func() {
 		BeforeEach(func() { createCR() })
 		AfterEach(func() { deleteCR() })
 
 		It("should set ConfigApplied=False with InternalError", func() {
-			reconciler := newReconciler(nil)
+			reconciler := &NTNCellConfigReconciler{
+				Client:    k8sClient,
+				Scheme:    k8sClient.Scheme(),
+				Recorder:  events.NewFakeRecorder(10),
+				Providers: nil, // nil registry
+			}
 
 			_, err := reconcileWithFinalizer(reconciler)
 			Expect(err).NotTo(HaveOccurred())
@@ -382,7 +389,9 @@ var _ = Describe("NTNCellConfig Controller", func() {
 				Client:   k8sClient,
 				Scheme:   k8sClient.Scheme(),
 				Recorder: events.NewFakeRecorder(10),
-				Provider: realProvider,
+				Providers: map[string]provider.NTNProvider{
+					"ocudu": realProvider,
+				},
 			}
 			_, err := reconcileWithFinalizer(reconciler)
 			Expect(err).NotTo(HaveOccurred())
@@ -390,7 +399,7 @@ var _ = Describe("NTNCellConfig Controller", func() {
 			// Verify the ConfigMap has OwnerReference pointing to the CR.
 			cm := &corev1.ConfigMap{}
 			cmKey := types.NamespacedName{
-				Name:      "ocudu-ntn-" + resourceName,
+				Name:      ocudu.ConfigMapNameFor(resourceName),
 				Namespace: namespace,
 			}
 			Expect(k8sClient.Get(context.Background(), cmKey, cm)).To(Succeed())

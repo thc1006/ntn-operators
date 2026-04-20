@@ -27,8 +27,10 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	ntnv1alpha1 "github.com/thc1006/ntn-operators/api/v1alpha1"
 	"github.com/thc1006/ntn-operators/pkg/provider"
@@ -59,6 +61,37 @@ func ConfigMapNameFor(crName string) string {
 // It is stateless — status is derived from the ConfigMap.
 type Provider struct {
 	client client.Client
+}
+
+// EnsureOwnership sets OwnerReference on the provider's ConfigMap.
+func (p *Provider) EnsureOwnership(
+	ctx context.Context, crName string, owner metav1.Object, scheme *runtime.Scheme,
+) error {
+	cm := &corev1.ConfigMap{}
+	key := types.NamespacedName{
+		Name:      ConfigMapNameFor(crName),
+		Namespace: owner.GetNamespace(),
+	}
+	if err := p.client.Get(ctx, key, cm); err != nil {
+		return client.IgnoreNotFound(err)
+	}
+	if !metav1.IsControlledBy(cm, owner) {
+		if err := controllerutil.SetControllerReference(owner, cm, scheme); err != nil {
+			return err
+		}
+		return p.client.Update(ctx, cm)
+	}
+	return nil
+}
+
+// Cleanup deletes the provider's ConfigMap for the given CR.
+func (p *Provider) Cleanup(ctx context.Context, crName, namespace string) error {
+	cm := &corev1.ConfigMap{}
+	key := types.NamespacedName{Name: ConfigMapNameFor(crName), Namespace: namespace}
+	if err := p.client.Get(ctx, key, cm); err != nil {
+		return client.IgnoreNotFound(err)
+	}
+	return client.IgnoreNotFound(p.client.Delete(ctx, cm))
 }
 
 // NewProvider creates an OCUDU Provider with the given K8s client.
