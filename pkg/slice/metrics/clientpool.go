@@ -27,8 +27,12 @@ import (
 // HTTP transport and its underlying connection pool. The pool has no LRU
 // eviction: cluster Prometheus endpoints are few and long-lived, so the
 // cost of unbounded growth is bounded in practice.
+//
+// Lookup uses a double-checked read-then-upgrade pattern so a slow build
+// path (e.g., future TLS certificate loading) does not serialise unrelated
+// endpoints behind a single write lock.
 type ClientPool struct {
-	mu      sync.Mutex
+	mu      sync.RWMutex
 	clients map[string]QueryClient
 }
 
@@ -43,24 +47,31 @@ func (p *ClientPool) Get(endpoint string) (QueryClient, error) {
 	if endpoint == "" {
 		return nil, errors.New("clientpool: empty endpoint")
 	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if c, ok := p.clients[endpoint]; ok {
+	p.mu.RLock()
+	c, ok := p.clients[endpoint]
+	p.mu.RUnlock()
+	if ok {
 		return c, nil
 	}
-	c, err := newPromClient(endpoint)
+	// Cache miss: build outside the lock so concurrent Get calls for other
+	// endpoints do not block. The second check under the write lock absorbs
+	// the race where two callers miss simultaneously.
+	built, err := buildPromClient(endpoint)
 	if err != nil {
 		return nil, fmt.Errorf("clientpool: build client for %q: %w", endpoint, err)
 	}
-	p.clients[endpoint] = c
-	return c, nil
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if existing, ok := p.clients[endpoint]; ok {
+		return existing, nil
+	}
+	p.clients[endpoint] = built
+	return built, nil
 }
 
-// newPromClient constructs a QueryClient wrapping the upstream
-// prometheus/client_golang v1 API. Extracted for testability: tests can
-// swap this package var to inject a fake builder if future cycles require
-// exercising pool behaviour without touching the network stack.
-var newPromClient = func(endpoint string) (QueryClient, error) {
+// buildPromClient constructs a QueryClient wrapping the upstream
+// prometheus/client_golang v1 API.
+func buildPromClient(endpoint string) (QueryClient, error) {
 	api, err := promapi.NewClient(promapi.Config{Address: endpoint})
 	if err != nil {
 		return nil, err

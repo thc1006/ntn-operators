@@ -21,6 +21,7 @@ package metrics
 import (
 	"context"
 	"errors"
+	"time"
 
 	ntnv1alpha1 "github.com/thc1006/ntn-operators/api/v1alpha1"
 	"github.com/thc1006/ntn-operators/pkg/slice"
@@ -31,14 +32,21 @@ import (
 // FailoverReady=Unknown condition rather than treat the slice as healthy.
 var ErrNoMetrics = errors.New("metrics: no value available")
 
-// Result carries measured metrics and whether they are fresh.
+// Result carries measured metrics together with freshness information.
 //
 // Stale=true means the underlying source was unavailable but a previously
 // observed value was returned. Failover logic may still act on a stale
 // value; observability must surface that the source is degraded.
+//
+// LastFreshAt records when the returned values were last observed as fresh
+// by the reader chain. For a fresh return LastFreshAt equals the time of
+// the current read; for a stale return it is the timestamp of the previous
+// successful read. A zero value means the reader does not track freshness
+// (e.g., annotationReader, which has no notion of "out of date").
 type Result struct {
-	Metrics slice.Metrics
-	Stale   bool
+	Metrics     slice.Metrics
+	Stale       bool
+	LastFreshAt time.Time
 }
 
 // Reader produces path quality measurements for a single NTNSlice.

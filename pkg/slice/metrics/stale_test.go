@@ -177,6 +177,39 @@ func TestStaleCache_NilInner_RejectedAtConstruction(t *testing.T) {
 	_ = metrics.NewStaleCache(nil)
 }
 
+func TestStaleCache_LastFreshAt_TracksFreshnessAcrossStaleReturns(t *testing.T) {
+	// Scenario: success -> fail -> fail.
+	// LastFreshAt returned on stale reads must equal the timestamp of the
+	// first success, not the zero value, so callers can age-out stale data.
+	inner := &scriptedReader{script: []scriptStep{
+		{res: metrics.Result{Metrics: slice.Metrics{RSRP: -90}}},
+		{err: metrics.ErrNoMetrics},
+		{err: metrics.ErrNoMetrics},
+	}}
+	c := metrics.NewStaleCache(inner)
+	first, err := c.Read(context.Background(), nsWithUID("u1"))
+	if err != nil {
+		t.Fatalf("first read: %v", err)
+	}
+	if first.LastFreshAt.IsZero() {
+		t.Fatal("fresh read must set LastFreshAt")
+	}
+	freshAt := first.LastFreshAt
+
+	stale1, err := c.Read(context.Background(), nsWithUID("u1"))
+	if err != nil {
+		t.Fatalf("stale read 1: %v", err)
+	}
+	if !stale1.LastFreshAt.Equal(freshAt) {
+		t.Errorf("stale LastFreshAt must equal prior fresh time: got %v want %v", stale1.LastFreshAt, freshAt)
+	}
+
+	stale2, _ := c.Read(context.Background(), nsWithUID("u1"))
+	if !stale2.LastFreshAt.Equal(freshAt) {
+		t.Errorf("LastFreshAt must not drift across successive stale returns, got %v", stale2.LastFreshAt)
+	}
+}
+
 func TestStaleCache_ConcurrentReads_AreSafe(t *testing.T) {
 	// Race detector will flag concurrent map access if the cache lacks
 	// a proper lock. Two goroutines read the same UID repeatedly.

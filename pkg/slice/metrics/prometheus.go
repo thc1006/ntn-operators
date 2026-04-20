@@ -39,6 +39,13 @@ type QueryClient interface {
 // reader produces. An empty string means "not configured for this slice":
 // the reader leaves that field at its default value and does not issue a
 // network call for it.
+//
+// Failure semantics: any non-empty PromQL that returns an unobservable
+// value — a query error, an empty vector, or a NaN/±Inf — causes the whole
+// Read to fail with ErrNoMetrics. This is intentional: failover logic
+// consumes all three metrics together, and mixing a stale latency value
+// with a fresh RSRP value can produce nonsensical decisions. Configure
+// every query you care about; leave the rest empty.
 type Queries struct {
 	RsrpDbm           string
 	LatencyMs         string
@@ -113,6 +120,9 @@ func (r *prometheusReader) Read(ctx context.Context, ns *ntnv1alpha1.NTNSlice) (
 // fetch issues a single instant query and extracts a finite float64.
 // Empty vectors and non-finite values both surface as ErrNoMetrics so the
 // caller sees a uniform "this metric is unobservable" signal.
+//
+// TODO(cycle 7): wrap this call in a duration histogram
+// (ntn_metrics_reader_query_duration_seconds) and an errors counter.
 func (r *prometheusReader) fetch(ctx context.Context, q string) (float64, error) {
 	v, err := r.client.Query(ctx, q, r.now())
 	if err != nil {

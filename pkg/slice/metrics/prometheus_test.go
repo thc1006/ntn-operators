@@ -24,28 +24,22 @@ import (
 	"github.com/thc1006/ntn-operators/pkg/slice/metrics"
 )
 
-// fakeQueryClient is a table-driven QueryClient for unit tests.
-// Each PromQL string is looked up in responses; unmapped queries
-// fall through to fallbackErr.
+// fakeQueryClient is a table-driven QueryClient for unit tests. Each PromQL
+// string is looked up in responses/errors; unmapped queries fail loudly so
+// a mis-matched test reveals the mismatch rather than masking it.
 type fakeQueryClient struct {
-	responses   map[string]model.Value
-	errors      map[string]error
-	fallbackErr error
-	lastCtx     context.Context //nolint:containedctx // used only to assert context propagation in tests
-	calls       []string
+	responses map[string]model.Value
+	errors    map[string]error
+	calls     []string
 }
 
-func (f *fakeQueryClient) Query(ctx context.Context, query string, _ time.Time) (model.Value, error) {
-	f.lastCtx = ctx
+func (f *fakeQueryClient) Query(_ context.Context, query string, _ time.Time) (model.Value, error) {
 	f.calls = append(f.calls, query)
 	if err, ok := f.errors[query]; ok {
 		return nil, err
 	}
 	if v, ok := f.responses[query]; ok {
 		return v, nil
-	}
-	if f.fallbackErr != nil {
-		return nil, f.fallbackErr
 	}
 	return nil, errors.New("fakeQueryClient: no response configured for query: " + query)
 }

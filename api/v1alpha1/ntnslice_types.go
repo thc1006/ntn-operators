@@ -56,7 +56,7 @@ type NTNSliceSpec struct {
 	// metricsSource selects where the failover engine reads path quality
 	// metrics (RSRP, latency, packet loss) from. When omitted, the
 	// controller falls back to annotation-driven simulation for backward
-	// compatibility with pre-#67 development deployments.
+	// compatibility with existing development deployments.
 	// +optional
 	MetricsSource *MetricsSource `json:"metricsSource,omitempty"`
 }
