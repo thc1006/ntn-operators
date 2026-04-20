@@ -84,11 +84,18 @@ func main() {
 	flag.StringVar(&metricsCertKey, "metrics-cert-key", "tls.key", "The name of the metrics server key file.")
 	flag.BoolVar(&enableHTTP2, "enable-http2", false,
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
+	var maxConcurrentReconciles int
+	flag.IntVar(&maxConcurrentReconciles, "max-concurrent-reconciles", 1,
+		"Maximum number of concurrent reconciles per controller.")
 	opts := zap.Options{
 		Development: true,
 	}
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
+
+	if maxConcurrentReconciles < 1 {
+		maxConcurrentReconciles = 1
+	}
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
@@ -189,38 +196,42 @@ func main() {
 		"https://www.space-track.org",
 	)
 	if err := (&controller.SatelliteEphemerisReconciler{
-		Client:            mgr.GetClient(),
-		Scheme:            mgr.GetScheme(),
-		Recorder:          mgr.GetEventRecorder("satelliteephemeris-controller"),
-		Fetcher:           ephemeris.NewCelesTrakFetcher(gpHTTPClient),
-		SpaceTrackFetcher: spaceTrackFetcher,
+		Client:                  mgr.GetClient(),
+		Scheme:                  mgr.GetScheme(),
+		Recorder:                mgr.GetEventRecorder("satelliteephemeris-controller"),
+		Fetcher:                 ephemeris.NewCelesTrakFetcher(gpHTTPClient),
+		SpaceTrackFetcher:       spaceTrackFetcher,
+		MaxConcurrentReconciles: maxConcurrentReconciles,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "SatelliteEphemeris")
 		os.Exit(1)
 	}
 	if err := (&controller.GroundStationLifecycleReconciler{
-		Client:     mgr.GetClient(),
-		Scheme:     mgr.GetScheme(),
-		Recorder:   mgr.GetEventRecorder("groundstationlifecycle-controller"),
-		HTTPClient: netutil.NewSafeHTTPClient(5 * time.Second),
+		Client:                  mgr.GetClient(),
+		Scheme:                  mgr.GetScheme(),
+		Recorder:                mgr.GetEventRecorder("groundstationlifecycle-controller"),
+		HTTPClient:              netutil.NewSafeHTTPClient(5 * time.Second),
+		MaxConcurrentReconciles: maxConcurrentReconciles,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "GroundStationLifecycle")
 		os.Exit(1)
 	}
 	ocuduProvider := ocudu.NewProvider(mgr.GetClient())
 	if err := (&controller.NTNCellConfigReconciler{
-		Client:   mgr.GetClient(),
-		Scheme:   mgr.GetScheme(),
-		Recorder: mgr.GetEventRecorder("ntncellconfig-controller"),
-		Provider: ocuduProvider,
+		Client:                  mgr.GetClient(),
+		Scheme:                  mgr.GetScheme(),
+		Recorder:                mgr.GetEventRecorder("ntncellconfig-controller"),
+		Provider:                ocuduProvider,
+		MaxConcurrentReconciles: maxConcurrentReconciles,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "NTNCellConfig")
 		os.Exit(1)
 	}
 	if err := (&controller.NTNSliceReconciler{
-		Client:   mgr.GetClient(),
-		Scheme:   mgr.GetScheme(),
-		Recorder: mgr.GetEventRecorder("ntnslice-controller"),
+		Client:                  mgr.GetClient(),
+		Scheme:                  mgr.GetScheme(),
+		Recorder:                mgr.GetEventRecorder("ntnslice-controller"),
+		MaxConcurrentReconciles: maxConcurrentReconciles,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "NTNSlice")
 		os.Exit(1)

@@ -30,6 +30,7 @@ import (
 	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	ctrlrt "sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -47,9 +48,10 @@ import (
 // NTNCellConfigReconciler reconciles a NTNCellConfig object
 type NTNCellConfigReconciler struct {
 	client.Client
-	Scheme   *runtime.Scheme
-	Recorder events.EventRecorder
-	Provider provider.NTNProvider
+	Scheme                  *runtime.Scheme
+	Recorder                events.EventRecorder
+	MaxConcurrentReconciles int
+	Provider                provider.NTNProvider
 }
 
 const (
@@ -431,6 +433,7 @@ func (r *NTNCellConfigReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			handler.EnqueueRequestsFromMapFunc(r.ephemerisToNTNCellConfig),
 		).
 		Named("ntncellconfig").
+		WithOptions(ctrlrt.Options{MaxConcurrentReconciles: r.MaxConcurrentReconciles}).
 		Complete(r)
 }
 
