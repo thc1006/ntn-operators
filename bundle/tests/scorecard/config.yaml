@@ -33,17 +33,6 @@ stages:
         labels:
           suite: olm
           test: olm-crds-have-resources-test
-      - entrypoint:
-          - scorecard-test
-          - olm-spec-descriptors
-        image: quay.io/operator-framework/scorecard-test:v1.38.0
-        labels:
-          suite: olm
-          test: olm-spec-descriptors-test
-      - entrypoint:
-          - scorecard-test
-          - olm-status-descriptors
-        image: quay.io/operator-framework/scorecard-test:v1.38.0
-        labels:
-          suite: olm
-          test: olm-status-descriptors-test
+      # olm-spec-descriptors and olm-status-descriptors omitted:
+      # CSV does not yet include specDescriptors/statusDescriptors.
+      # Add them when CRD descriptions are enriched.

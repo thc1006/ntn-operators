@@ -89,7 +89,7 @@ spec:
     - **NTNSlice**: Terrestrial-satellite failover with hysteresis, QoS mapping
 
     ### Prerequisites
-    - Kubernetes 1.30+
+    - Kubernetes 1.29+
     - cert-manager (optional, for webhook TLS)
   displayName: NTN Operators
   icon:
@@ -178,9 +178,9 @@ spec:
                 terminationGracePeriodSeconds: 10
     strategy: deployment
   installModes:
-    - supported: true
+    - supported: false
       type: OwnNamespace
-    - supported: true
+    - supported: false
       type: SingleNamespace
     - supported: false
       type: MultiNamespace
@@ -204,7 +204,7 @@ spec:
     - email: caake2025@gmail.com
       name: thc1006
   maturity: alpha
-  minKubeVersion: "1.30.0"
+  minKubeVersion: "1.29.0"
   provider:
     name: ntn-operators
     url: https://github.com/thc1006/ntn-operators
