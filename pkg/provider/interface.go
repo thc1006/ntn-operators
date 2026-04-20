@@ -35,24 +35,26 @@ type EphemerisUpdate struct {
 // and ephemeris updates. Ground station lifecycle is handled directly
 // by its respective controller.
 //
-// Implementations:
-//   - OCUDU: generates geo_ntn.yml and writes to a ConfigMap
+// All current providers (OCUDU, future OAI) store configuration in a
+// ConfigMap. If a future provider uses a different artifact type,
+// the interface and controller should be generalized at that time.
 type NTNProvider interface {
 	// ApplyCellConfig applies NTN radio parameters to the backend.
-	// crName is the NTNCellConfig CR name (used to scope resources like ConfigMaps).
+	// crName is the NTNCellConfig CR name (used to scope the provider artifact).
 	ApplyCellConfig(ctx context.Context, crName string, spec *ntnv1alpha1.NTNCellConfigSpec) error
 
-	// GetCellStatus returns the current applied configuration status
-	// for the given CR name and namespace.
+	// GetCellStatus returns the current applied configuration status.
 	GetCellStatus(ctx context.Context, crName, namespace string) (*ntnv1alpha1.NTNCellConfigStatus, error)
 
 	// PushEphemerisUpdate pushes fresh ephemeris data to the backend.
-	// Phase 1 (ConfigMap): regenerates the ephemeris section of the config.
-	// Phase 2 (future): pushes via OCUDU WebSocket handle_ntn_param_update.
 	PushEphemerisUpdate(ctx context.Context, crName, namespace string, update EphemerisUpdate) error
 
-	// ConfigMapName returns the name of the ConfigMap managed by this provider
-	// for the given CR name. The controller uses this for OwnerReference
-	// stamping and finalizer cleanup without importing the concrete provider package.
+	// ConfigMapName returns the name of the ConfigMap managed by this
+	// provider for the given CR name. Used by the controller for
+	// OwnerReference and finalizer cleanup.
+	//
+	// Note: All current and planned providers use ConfigMap as the
+	// artifact type. If a non-ConfigMap provider is added, this method
+	// should be generalized to return a typed artifact reference.
 	ConfigMapName(crName string) string
 }
