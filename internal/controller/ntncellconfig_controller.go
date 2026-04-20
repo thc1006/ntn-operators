@@ -145,7 +145,8 @@ func (r *NTNCellConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 
 	// Step 4: Validate provider.
 	if r.Providers == nil {
-		// Preserve ConfigMapRef for best-effort finalizer cleanup.
+		// Clear stale koffset but preserve ConfigMapRef for best-effort finalizer cleanup.
+		cc.Status.AppliedKoffset = 0
 		meta.SetStatusCondition(&cc.Status.Conditions, metav1.Condition{
 			Type:               ntnv1alpha1.ConditionConfigApplied,
 			Status:             metav1.ConditionFalse,
@@ -159,7 +160,8 @@ func (r *NTNCellConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{RequeueAfter: time.Minute}, nil
 	}
 	if prov == nil {
-		// Preserve ConfigMapRef for best-effort finalizer cleanup.
+		// Clear stale koffset but preserve ConfigMapRef for best-effort finalizer cleanup.
+		cc.Status.AppliedKoffset = 0
 		meta.SetStatusCondition(&cc.Status.Conditions, metav1.Condition{
 			Type:               ntnv1alpha1.ConditionConfigApplied,
 			Status:             metav1.ConditionFalse,
