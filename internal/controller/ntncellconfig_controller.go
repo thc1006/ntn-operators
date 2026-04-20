@@ -143,8 +143,7 @@ func (r *NTNCellConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 
 	// Step 4: Validate provider.
 	if r.Providers == nil {
-		cc.Status.AppliedKoffset = 0
-		cc.Status.ConfigMapRef = ""
+		// Preserve ConfigMapRef for best-effort finalizer cleanup.
 		meta.SetStatusCondition(&cc.Status.Conditions, metav1.Condition{
 			Type:               ntnv1alpha1.ConditionConfigApplied,
 			Status:             metav1.ConditionFalse,
@@ -158,8 +157,7 @@ func (r *NTNCellConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{RequeueAfter: time.Minute}, nil
 	}
 	if prov == nil {
-		cc.Status.AppliedKoffset = 0
-		cc.Status.ConfigMapRef = ""
+		// Preserve ConfigMapRef for best-effort finalizer cleanup.
 		meta.SetStatusCondition(&cc.Status.Conditions, metav1.Condition{
 			Type:               ntnv1alpha1.ConditionConfigApplied,
 			Status:             metav1.ConditionFalse,
@@ -326,7 +324,12 @@ func (r *NTNCellConfigReconciler) handleFinalizer(
 						"configMapRef", cc.Status.ConfigMapRef)
 					cm := &corev1.ConfigMap{}
 					cmKey := client.ObjectKey{Namespace: cc.Namespace, Name: cc.Status.ConfigMapRef}
-					if err := r.Get(ctx, cmKey, cm); err == nil {
+					if err := r.Get(ctx, cmKey, cm); err != nil {
+						if client.IgnoreNotFound(err) != nil {
+							log.Error(err, "Failed to get ConfigMap via configMapRef during best-effort finalization",
+								"configmap", cmKey)
+						}
+					} else {
 						if err := r.Delete(ctx, cm); client.IgnoreNotFound(err) != nil {
 							log.Error(err, "Failed to delete ConfigMap via configMapRef")
 						}
