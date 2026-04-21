@@ -23,6 +23,7 @@ import (
 
 	ntnv1alpha1 "github.com/thc1006/ntn-operators/api/v1alpha1"
 	ntnmetrics "github.com/thc1006/ntn-operators/pkg/metrics"
+	"github.com/thc1006/ntn-operators/pkg/netutil"
 )
 
 // Provider maps an NTNSlice CR to a Reader selected from its spec.
@@ -51,6 +52,23 @@ type Provider struct {
 	// a word of memory for no benefit, and a singleton keeps pointer
 	// identity predictable in tests and in the controller's logs.
 	annotationSingleton Reader
+
+	// allowlist gates which Prometheus endpoints each NTNSlice may
+	// reference. Zero value (empty list) is permit-all, preserving the
+	// pre-flag behaviour for single-tenant deployments.
+	allowlist netutil.EndpointAllowlist
+}
+
+// Option configures a Provider. Functional-option pattern keeps
+// NewProvider's positional args stable as new configuration lands.
+type Option func(*Provider)
+
+// WithEndpointAllowlist restricts Prometheus-mode endpoints to the
+// given host allowlist. An empty allowlist keeps the default permit-all
+// behaviour, so WithEndpointAllowlist(netutil.ParseEndpointAllowlist(""))
+// is a safe no-op.
+func WithEndpointAllowlist(a netutil.EndpointAllowlist) Option {
+	return func(p *Provider) { p.allowlist = a }
 }
 
 // readerKey identifies a cached Prometheus-mode reader. The UID alone
@@ -66,16 +84,21 @@ type readerKey struct {
 }
 
 // NewProvider returns an empty Provider. Panics on nil pool — the caller
-// is expected to wire a ClientPool at startup time.
-func NewProvider(pool *ClientPool) *Provider {
+// is expected to wire a ClientPool at startup time. Accepts optional
+// Options for future configuration (e.g., WithEndpointAllowlist).
+func NewProvider(pool *ClientPool, opts ...Option) *Provider {
 	if pool == nil {
 		panic("metrics.NewProvider: nil ClientPool")
 	}
-	return &Provider{
+	p := &Provider{
 		pool:                pool,
 		readers:             map[readerKey]Reader{},
 		annotationSingleton: NewAnnotationReader(),
 	}
+	for _, opt := range opts {
+		opt(p)
+	}
+	return p
 }
 
 // For returns the Reader appropriate for ns according to
@@ -165,6 +188,12 @@ func (p *Provider) Evict(key client.ObjectKey) {
 }
 
 func (p *Provider) buildReader(src *ntnv1alpha1.PrometheusMetricsSource) (Reader, error) {
+	// Endpoint allow-list gate — checked first so a mis-addressed
+	// tenant spec never touches the client pool (avoids caching a
+	// client that the operator is not supposed to use anyway).
+	if err := p.allowlist.Check(src.Endpoint); err != nil {
+		return nil, err
+	}
 	// Defence in depth: CEL at admission already rejects an all-empty
 	// queries block, but a CRD schema downgrade or a direct status-
 	// subresource edit could route such a spec through here. Left

@@ -34,13 +34,12 @@ must not ship as the default behaviour for production users.
 - Background pull / push-gateway mode. Sync query per reconcile is sufficient
   for the current scale target (tens of NTNSlices).
 - RSRQ / SINR metrics.
-- **Endpoint allow-list for SSRF hardening.** `spec.metricsSource.prometheus.endpoint`
-  is a user-supplied URL that the operator issues HTTP POSTs against. In the
-  current deployment model NTNSlice creation is cluster-admin-only RBAC, which
-  bounds the blast radius: an admin can already curl anything the operator pod
-  can reach. Multi-tenant installs should add an admission-time allow-list of
-  endpoint hosts before granting non-admin tenants `create ntnslices`. Filed
-  as a follow-up; not fixed here.
+- **IP-level SSRF hardening.** DNS-resolve-time IP range bans, DNS rebinding
+  mitigations, and redirect-following disablement are the operator Pod
+  NetworkPolicy's job; they are the Kubernetes-native layer for "the
+  operator may only egress to these endpoints" and do not belong in the
+  CR schema. The host-name allow-list shipped in D6 provides
+  tenant-visible guardrails on top.
 
 ## Design decisions
 
@@ -85,6 +84,30 @@ We do not hardcode PromQL. Users provide their own queries for each of
 gNB / UPF exporter dialect (Open5GS exporter labels are not the same as
 a third-party gNB RIC exporter). The trade-off is that a typo in PromQL
 produces an `ErrNoMetrics` at runtime — handled by D1 + admission.
+
+### D6. Optional endpoint allow-list (#93)
+
+The operator ships a `--prometheus-allowed-endpoint-hosts=csv` flag.
+Empty (the default) is permit-all, matching the pre-flag behaviour so
+single-tenant deployments do not break. When non-empty, every
+`spec.metricsSource.prometheus.endpoint` URL is parsed and its
+`Hostname()` is required to exactly match one of the configured hosts.
+
+Implementation in `pkg/netutil.EndpointAllowlist`:
+
+- URL must parse, use `http` or `https`, and not carry userinfo — these
+  catch parser-trick SSRF bypasses (`http://attacker@allowed/`,
+  `javascript://allowed`, etc.) independent of the allow-list content.
+- Host comparison is exact + case-insensitive; prefix or suffix
+  matching is refused because `allowed.svc.attacker.com` would beat
+  a prefix rule on `allowed.svc` without the defender noticing.
+- DNS resolution and IP-range banning are NOT performed — see
+  non-goals. NetworkPolicy is the correct layer for that.
+
+A rejected endpoint surfaces in the reconciler as
+`FailoverReady=Unknown` with `reason=EndpointNotAllowed`, distinct
+from `MetricsReaderError` / `MetricsUnavailable` so `kubectl describe`
+is actionable.
 
 ### D5. RSRP on Open5GS — limitation acknowledged
 

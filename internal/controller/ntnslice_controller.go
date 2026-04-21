@@ -41,11 +41,20 @@ import (
 
 	ntnv1alpha1 "github.com/thc1006/ntn-operators/api/v1alpha1"
 	ntnmetrics "github.com/thc1006/ntn-operators/pkg/metrics"
+	"github.com/thc1006/ntn-operators/pkg/netutil"
 	"github.com/thc1006/ntn-operators/pkg/slice"
 	slicemetrics "github.com/thc1006/ntn-operators/pkg/slice/metrics"
 )
 
 const sliceRequeueInterval = 30 * time.Second
+
+// Reason labels for the FailoverReady=Unknown path. Matched on by
+// kubectl describe and dashboard filters, so keep them stable.
+const (
+	reasonMetricsReaderError = "MetricsReaderError"
+	reasonMetricsUnavailable = "MetricsUnavailable"
+	reasonEndpointNotAllowed = "EndpointNotAllowed"
+)
 
 // NTNSliceReconciler reconciles a NTNSlice object
 type NTNSliceReconciler struct {
@@ -111,14 +120,21 @@ func (r *NTNSliceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	// Step 2: Read path quality metrics via the configured source.
 	reader, err := r.readerProvider().For(ns)
 	if err != nil {
-		log.Error(err, "failed to build metrics reader")
-		return r.setMetricsUnknown(ctx, ns, "MetricsReaderError", err.Error())
+		// Distinguish admin-configured endpoint rejection from other
+		// build errors so kubectl describe surfaces a specific reason
+		// rather than a generic MetricsReaderError.
+		reason := reasonMetricsReaderError
+		if errors.Is(err, netutil.ErrEndpointNotAllowed) {
+			reason = reasonEndpointNotAllowed
+		}
+		log.Error(err, "failed to build metrics reader", "reason", reason)
+		return r.setMetricsUnknown(ctx, ns, reason, err.Error())
 	}
 	readResult, err := reader.Read(ctx, ns)
 	if err != nil {
-		reason := "MetricsUnavailable"
+		reason := reasonMetricsUnavailable
 		if !errors.Is(err, slicemetrics.ErrNoMetrics) {
-			reason = "MetricsReaderError"
+			reason = reasonMetricsReaderError
 		}
 		log.Info("metrics unavailable; holding current path", "reason", reason, "err", err.Error())
 		return r.setMetricsUnknown(ctx, ns, reason, err.Error())
