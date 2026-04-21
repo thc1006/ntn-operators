@@ -208,4 +208,11 @@ spec:
   provider:
     name: ntn-operators
     url: https://github.com/thc1006/ntn-operators
+  # skipRange, not replaces: no v0.1.0 CSV was ever published to an
+  # OperatorHub catalog (the bundle infrastructure landed in PR #91,
+  # after the v0.1.0 tag). An explicit `replaces:` would therefore
+  # point OLM at a CSV it cannot find, failing the install. skipRange
+  # says "this CSV can take over from anything older than itself" and
+  # is safe whether or not an older CSV exists in the catalog.
+  skipRange: "<0.4.0-rc.1"
   version: 0.4.0-rc.1
