@@ -18,6 +18,9 @@ package controller
 
 import (
 	"context"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -699,6 +702,200 @@ var _ = Describe("NTNSlice Controller", func() {
 			err := k8sClient.Create(context.Background(), slice)
 			Expect(err).To(HaveOccurred())
 			Expect(err.Error()).To(ContainSubstring("failover"))
+		})
+	})
+
+	// --- MetricsSource CEL validation tests (#67) ---
+
+	Context("CEL: MetricsSource type=prometheus requires prometheus block", func() {
+		It("should reject when type=prometheus without prometheus block", func() {
+			spec := baseSpec()
+			spec.MetricsSource = &ntnv1alpha1.MetricsSource{
+				Type: ntnv1alpha1.MetricsSourcePrometheus,
+			}
+			slice := &ntnv1alpha1.NTNSlice{
+				ObjectMeta: metav1.ObjectMeta{Name: "cel-test-prom-missing", Namespace: namespace},
+				Spec:       spec,
+			}
+			err := k8sClient.Create(context.Background(), slice)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("prometheus block"))
+		})
+	})
+
+	Context("CEL: MetricsSource prometheus requires at least one query", func() {
+		It("should reject when prometheus block has all queries empty", func() {
+			spec := baseSpec()
+			spec.MetricsSource = &ntnv1alpha1.MetricsSource{
+				Type: ntnv1alpha1.MetricsSourcePrometheus,
+				Prometheus: &ntnv1alpha1.PrometheusMetricsSource{
+					Endpoint: "http://prom.monitoring:9090",
+					Queries:  ntnv1alpha1.PrometheusQueries{},
+				},
+			}
+			slice := &ntnv1alpha1.NTNSlice{
+				ObjectMeta: metav1.ObjectMeta{Name: "cel-test-prom-empty-queries", Namespace: namespace},
+				Spec:       spec,
+			}
+			err := k8sClient.Create(context.Background(), slice)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("at least one query"))
+		})
+	})
+
+	Context("CEL: MetricsSource prometheus endpoint pattern", func() {
+		It("should reject endpoint without http(s):// scheme", func() {
+			spec := baseSpec()
+			spec.MetricsSource = &ntnv1alpha1.MetricsSource{
+				Type: ntnv1alpha1.MetricsSourcePrometheus,
+				Prometheus: &ntnv1alpha1.PrometheusMetricsSource{
+					Endpoint: "prom.monitoring:9090",
+					Queries:  ntnv1alpha1.PrometheusQueries{RsrpDbm: "sum(up)"},
+				},
+			}
+			slice := &ntnv1alpha1.NTNSlice{
+				ObjectMeta: metav1.ObjectMeta{Name: "cel-test-prom-bad-endpoint", Namespace: namespace},
+				Spec:       spec,
+			}
+			err := k8sClient.Create(context.Background(), slice)
+			Expect(err).To(HaveOccurred())
+		})
+	})
+
+	Context("MetricsSource: explicit annotations accepted", func() {
+		It("should accept type=annotations", func() {
+			spec := baseSpec()
+			spec.MetricsSource = &ntnv1alpha1.MetricsSource{
+				Type: ntnv1alpha1.MetricsSourceAnnotations,
+			}
+			slice := &ntnv1alpha1.NTNSlice{
+				ObjectMeta: metav1.ObjectMeta{Name: "cel-test-annotations-accept", Namespace: namespace},
+				Spec:       spec,
+			}
+			Expect(k8sClient.Create(context.Background(), slice)).To(Succeed())
+			DeferCleanup(func() { _ = k8sClient.Delete(context.Background(), slice) })
+		})
+	})
+
+	Context("MetricsSource: valid prometheus config accepted", func() {
+		It("should accept type=prometheus with endpoint + at least one query", func() {
+			spec := baseSpec()
+			spec.MetricsSource = &ntnv1alpha1.MetricsSource{
+				Type: ntnv1alpha1.MetricsSourcePrometheus,
+				Prometheus: &ntnv1alpha1.PrometheusMetricsSource{
+					Endpoint: "http://prom.monitoring:9090",
+					Queries: ntnv1alpha1.PrometheusQueries{
+						RsrpDbm: "avg(ue_rsrp_dbm)",
+					},
+				},
+			}
+			slice := &ntnv1alpha1.NTNSlice{
+				ObjectMeta: metav1.ObjectMeta{Name: "cel-test-prom-accept", Namespace: namespace},
+				Spec:       spec,
+			}
+			Expect(k8sClient.Create(context.Background(), slice)).To(Succeed())
+			DeferCleanup(func() { _ = k8sClient.Delete(context.Background(), slice) })
+		})
+	})
+
+	// --- MetricsSource integration (Prometheus mode) ---
+
+	// promHandler builds an httptest handler that answers the Prometheus
+	// instant-query API with a scalar result for any query in values.
+	// Queries not in values return HTTP 500 so tests exercise the
+	// "metrics unavailable" path intentionally.
+	promHandler := func(values map[string]float64) http.HandlerFunc {
+		return func(w http.ResponseWriter, req *http.Request) {
+			q := req.FormValue("query")
+			v, ok := values[q]
+			if !ok {
+				http.Error(w, "no response configured for "+q, http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprintf(w, `{"status":"success","data":{"resultType":"scalar","result":[0,"%g"]}}`, v)
+		}
+	}
+
+	Context("MetricsSource prometheus: happy path reaches failover engine", func() {
+		It("should drive failover decision from PromQL scalars", func() {
+			server := httptest.NewServer(promHandler(map[string]float64{
+				"rsrp_q":    -150, // below trigger -120
+				"latency_q": 10,
+				"loss_q":    0,
+			}))
+			DeferCleanup(server.Close)
+
+			spec := baseSpec()
+			spec.MetricsSource = &ntnv1alpha1.MetricsSource{
+				Type: ntnv1alpha1.MetricsSourcePrometheus,
+				Prometheus: &ntnv1alpha1.PrometheusMetricsSource{
+					Endpoint: server.URL,
+					Queries: ntnv1alpha1.PrometheusQueries{
+						RsrpDbm:           "rsrp_q",
+						LatencyMs:         "latency_q",
+						PacketLossPercent: "loss_q",
+					},
+				},
+			}
+			slice := &ntnv1alpha1.NTNSlice{
+				ObjectMeta: metav1.ObjectMeta{Name: "prom-happy", Namespace: namespace},
+				Spec:       spec,
+			}
+			Expect(k8sClient.Create(context.Background(), slice)).To(Succeed())
+			DeferCleanup(func() { _ = k8sClient.Delete(context.Background(), slice) })
+
+			_, err := newReconciler().Reconcile(context.Background(), reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: "prom-happy", Namespace: namespace},
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			updated := &ntnv1alpha1.NTNSlice{}
+			Expect(k8sClient.Get(context.Background(), types.NamespacedName{Name: "prom-happy", Namespace: namespace}, updated)).To(Succeed())
+			// RSRP=-150 is below trigger "rsrp < -120"; failover decision
+			// must be reachable (not held on Unknown).
+			cond := meta.FindStatusCondition(updated.Status.Conditions, ntnv1alpha1.ConditionFailoverReady)
+			Expect(cond).NotTo(BeNil())
+			Expect(cond.Status).NotTo(Equal(metav1.ConditionUnknown),
+				"Prometheus happy path must not leave FailoverReady=Unknown")
+		})
+	})
+
+	Context("MetricsSource prometheus: unreachable endpoint holds current path", func() {
+		It("should set FailoverReady=Unknown when Prometheus returns 500 and there is no cached value", func() {
+			// Empty values map -> every query returns 500.
+			server := httptest.NewServer(promHandler(map[string]float64{}))
+			DeferCleanup(server.Close)
+
+			spec := baseSpec()
+			spec.MetricsSource = &ntnv1alpha1.MetricsSource{
+				Type: ntnv1alpha1.MetricsSourcePrometheus,
+				Prometheus: &ntnv1alpha1.PrometheusMetricsSource{
+					Endpoint: server.URL,
+					Queries: ntnv1alpha1.PrometheusQueries{
+						RsrpDbm: "rsrp_q",
+					},
+				},
+			}
+			slice := &ntnv1alpha1.NTNSlice{
+				ObjectMeta: metav1.ObjectMeta{Name: "prom-unknown", Namespace: namespace},
+				Spec:       spec,
+			}
+			Expect(k8sClient.Create(context.Background(), slice)).To(Succeed())
+			DeferCleanup(func() { _ = k8sClient.Delete(context.Background(), slice) })
+
+			_, err := newReconciler().Reconcile(context.Background(), reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: "prom-unknown", Namespace: namespace},
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			updated := &ntnv1alpha1.NTNSlice{}
+			Expect(k8sClient.Get(context.Background(), types.NamespacedName{Name: "prom-unknown", Namespace: namespace}, updated)).To(Succeed())
+			cond := meta.FindStatusCondition(updated.Status.Conditions, ntnv1alpha1.ConditionFailoverReady)
+			Expect(cond).NotTo(BeNil())
+			Expect(cond.Status).To(Equal(metav1.ConditionUnknown))
+			Expect(cond.Reason).To(SatisfyAny(Equal("MetricsReaderError"), Equal("MetricsUnavailable")),
+				"unreachable Prometheus must surface as one of the metrics-failure reasons")
 		})
 	})
 

@@ -52,6 +52,86 @@ type NTNSliceSpec struct {
 	// billing defines CDR generation parameters.
 	// +optional
 	Billing *BillingSpec `json:"billing,omitempty"`
+
+	// metricsSource selects where the failover engine reads path quality
+	// metrics (RSRP, latency, packet loss) from. When omitted, the
+	// controller falls back to annotation-driven simulation for backward
+	// compatibility with existing development deployments.
+	// +optional
+	MetricsSource *MetricsSource `json:"metricsSource,omitempty"`
+}
+
+// MetricsSourceType enumerates supported metric source backends.
+// +kubebuilder:validation:Enum=annotations;prometheus
+type MetricsSourceType string
+
+const (
+	// MetricsSourceAnnotations reads simulated metric values from the
+	// NTNSlice's own annotations (ntn.operators.dev/simulated-*).
+	// Intended for development and tests.
+	MetricsSourceAnnotations MetricsSourceType = "annotations"
+
+	// MetricsSourcePrometheus reads live metric values from a Prometheus
+	// HTTP API. Used in production deployments.
+	MetricsSourcePrometheus MetricsSourceType = "prometheus"
+)
+
+// MetricsSource configures the failover engine's source of path quality
+// measurements. The CEL rule below enforces the implication
+// "type=prometheus → prometheus block set" at admission time.
+// +kubebuilder:validation:XValidation:rule="self.type != 'prometheus' || has(self.prometheus)",message="prometheus block is required when type is 'prometheus'"
+type MetricsSource struct {
+	// type is the backend kind.
+	// +kubebuilder:default=annotations
+	// +optional
+	Type MetricsSourceType `json:"type,omitempty"`
+
+	// prometheus configures the Prometheus HTTP API backend.
+	// Required when type is 'prometheus'.
+	// +optional
+	Prometheus *PrometheusMetricsSource `json:"prometheus,omitempty"`
+}
+
+// PrometheusMetricsSource describes how to query a Prometheus HTTP API for
+// path quality values. Queries are PromQL strings, keeping the operator
+// independent of any specific exporter's label dialect.
+// +kubebuilder:validation:XValidation:rule="size(self.queries.rsrpDbm) > 0 || size(self.queries.latencyMs) > 0 || size(self.queries.packetLossPercent) > 0",message="at least one query must be non-empty"
+type PrometheusMetricsSource struct {
+	// endpoint is the base URL of the Prometheus HTTP API.
+	// +kubebuilder:validation:Pattern=`^https?://`
+	// +kubebuilder:validation:MinLength=1
+	Endpoint string `json:"endpoint"`
+
+	// queryTimeout limits the wall-clock time spent on each individual
+	// PromQL fetch; the controller issues up to three fetches per
+	// reconcile (one per metric), so the upper bound for a Read is
+	// roughly 3x this value. Defaults to 2s when unset.
+	// +kubebuilder:validation:Format=duration
+	// +optional
+	QueryTimeout *metav1.Duration `json:"queryTimeout,omitempty"`
+
+	// queries holds the PromQL expressions for each observable metric.
+	// +required
+	Queries PrometheusQueries `json:"queries"`
+}
+
+// PrometheusQueries carries the PromQL expressions for each of the three
+// path-quality metrics. An empty string for a given field means "not
+// configured for this slice"; the controller uses the default value for
+// that metric instead of issuing a query.
+type PrometheusQueries struct {
+	// rsrpDbm is a PromQL expression returning a scalar in dBm.
+	// +optional
+	RsrpDbm string `json:"rsrpDbm,omitempty"`
+
+	// latencyMs is a PromQL expression returning a scalar in milliseconds.
+	// +optional
+	LatencyMs string `json:"latencyMs,omitempty"`
+
+	// packetLossPercent is a PromQL expression returning a scalar in
+	// percent (0-100).
+	// +optional
+	PacketLossPercent string `json:"packetLossPercent,omitempty"`
 }
 
 // PathSpec defines a network path (terrestrial or satellite).
@@ -199,6 +279,14 @@ const (
 	ConditionQoSApplied    = "QoSApplied"
 	ConditionSecured       = "Secured"
 	ConditionBillingActive = "BillingActive"
+
+	// ConditionMetricsStale reports whether the most recent reconcile
+	// was served from the stale-value cache rather than a fresh
+	// metrics source read. Status=True is set while the source is
+	// degraded and cleared back to False on the first fresh Read.
+	// Pairing the condition with an event emitted only on transition
+	// keeps the event stream quiet during long outages.
+	ConditionMetricsStale = "MetricsStale"
 )
 
 // +kubebuilder:object:root=true

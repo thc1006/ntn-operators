@@ -83,6 +83,16 @@ spec:
                 description: failoverPolicy defines when and how to switch between
                   paths.
                 properties:
+                  hysteresisMargin:
+                    description: |-
+                      hysteresisMargin is a dead-band applied to trigger thresholds
+                      during switchback evaluation, preventing flapping when metrics
+                      oscillate near the threshold. The value uses the same unit as
+                      the trigger (dB for RSRP, ms for latency, percent for packetLoss).
+                      Example: with trigger "rsrp < -120" and hysteresisMargin "10",
+                      failover fires at RSRP < -120, but switchback requires RSRP >= -110.
+                    pattern: ^[0-9]+\.?[0-9]*$
+                    type: string
                   sessionContinuity:
                     default: true
                     description: sessionContinuity preserves active sessions during
@@ -110,6 +120,69 @@ spec:
                 required:
                 - triggers
                 type: object
+              metricsSource:
+                description: |-
+                  metricsSource selects where the failover engine reads path quality
+                  metrics (RSRP, latency, packet loss) from. When omitted, the
+                  controller falls back to annotation-driven simulation for backward
+                  compatibility with existing development deployments.
+                properties:
+                  prometheus:
+                    description: |-
+                      prometheus configures the Prometheus HTTP API backend.
+                      Required when type is 'prometheus'.
+                    properties:
+                      endpoint:
+                        description: endpoint is the base URL of the Prometheus HTTP
+                          API.
+                        minLength: 1
+                        pattern: ^https?://
+                        type: string
+                      queries:
+                        description: queries holds the PromQL expressions for each
+                          observable metric.
+                        properties:
+                          latencyMs:
+                            description: latencyMs is a PromQL expression returning
+                              a scalar in milliseconds.
+                            type: string
+                          packetLossPercent:
+                            description: |-
+                              packetLossPercent is a PromQL expression returning a scalar in
+                              percent (0-100).
+                            type: string
+                          rsrpDbm:
+                            description: rsrpDbm is a PromQL expression returning
+                              a scalar in dBm.
+                            type: string
+                        type: object
+                      queryTimeout:
+                        description: |-
+                          queryTimeout limits the wall-clock time spent on each individual
+                          PromQL fetch; the controller issues up to three fetches per
+                          reconcile (one per metric), so the upper bound for a Read is
+                          roughly 3x this value. Defaults to 2s when unset.
+                        format: duration
+                        type: string
+                    required:
+                    - endpoint
+                    - queries
+                    type: object
+                    x-kubernetes-validations:
+                    - message: at least one query must be non-empty
+                      rule: size(self.queries.rsrpDbm) > 0 || size(self.queries.latencyMs)
+                        > 0 || size(self.queries.packetLossPercent) > 0
+                  type:
+                    default: annotations
+                    description: type is the backend kind.
+                    enum:
+                    - annotations
+                    - prometheus
+                    type: string
+                type: object
+                x-kubernetes-validations:
+                - message: prometheus block is required when type is 'prometheus'
+                  rule: self.type != 'prometheus' || has(self.prometheus)
               qosMapping:
                 description: qosMapping defines QoS parameter mapping between paths.
                 properties:

@@ -44,6 +44,7 @@ import (
 	"github.com/thc1006/ntn-operators/pkg/netutil"
 	"github.com/thc1006/ntn-operators/pkg/provider"
 	"github.com/thc1006/ntn-operators/pkg/provider/ocudu"
+	slicemetrics "github.com/thc1006/ntn-operators/pkg/slice/metrics"
 
 	ntnwebhook "github.com/thc1006/ntn-operators/internal/webhook/v1alpha1"
 	// +kubebuilder:scaffold:imports
@@ -233,11 +234,17 @@ func main() {
 		setupLog.Error(err, "Failed to create controller", "controller", "NTNCellConfig")
 		os.Exit(1)
 	}
+	// Shared across NTNSlice reconciles: one pool of Prometheus clients
+	// keyed by endpoint, and one Provider that picks the right Reader
+	// (annotations | prometheus) based on each NTNSlice spec.
+	metricsPool := slicemetrics.NewClientPool()
+	metricsProvider := slicemetrics.NewProvider(metricsPool)
 	if err := (&controller.NTNSliceReconciler{
 		Client:                  mgr.GetClient(),
 		Scheme:                  mgr.GetScheme(),
 		Recorder:                mgr.GetEventRecorder("ntnslice-controller"),
 		MaxConcurrentReconciles: maxConcurrentReconciles,
+		ReaderProvider:          metricsProvider,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "NTNSlice")
 		os.Exit(1)

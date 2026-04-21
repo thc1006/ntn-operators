@@ -1,0 +1,33 @@
+---
+apiVersion: ntn.operators.dev/v1alpha1
+kind: NTNSlice
+metadata:
+  name: e2e-slice
+  namespace: default
+spec:
+  tenant: acme-corp
+  terrestrialPath:
+    provider: chunghwa-telecom
+    apn: internet
+    priority: primary
+  satellitePath:
+    provider: oneweb
+    priority: failover
+    ephemerisRef: oneweb-constellation
+  failoverPolicy:
+    triggers:
+      - "rsrp < -120"
+      - "latency > 200"
+      - "packetLoss > 5"
+    switchbackDelay: 60s
+    sessionContinuity: true
+    hysteresisMargin: "10"
+  metricsSource:
+    type: prometheus
+    prometheus:
+      endpoint: http://prometheus.ntn-e2e.svc:9090
+      queryTimeout: 2s
+      queries:
+        rsrpDbm: 'ntn_e2e_rsrp_dbm{namespace="default",slice="e2e-slice"}'
+        latencyMs: 'ntn_e2e_latency_ms{namespace="default",slice="e2e-slice"}'
+        packetLossPercent: 'ntn_e2e_packet_loss_percent{namespace="default",slice="e2e-slice"}'

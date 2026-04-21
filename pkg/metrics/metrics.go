@@ -78,6 +78,58 @@ var (
 		},
 		[]string{"ephemeris"},
 	)
+
+	// ReaderQueryDuration measures how long a single PromQL fetch made
+	// through a pkg/slice/metrics Reader takes, split by source
+	// ("prometheus") and outcome ("success" or "error"). A higher-level
+	// Reader.Read call may perform several such fetches; this histogram
+	// is observed once per fetch, not once per Read, so dashboards
+	// should aggregate accordingly. Used to catch slow-path Prometheus
+	// instances before the 2 s per-query timeout starts biting
+	// reconciles.
+	ReaderQueryDuration = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name: "ntn_operators_reader_query_duration_seconds",
+			Help: "Duration of a single PromQL fetch by a metrics reader, in seconds.",
+			// Upper bucket matches the default per-query timeout
+			// (pkg/slice/metrics.defaultPrometheusTimeout = 2s); any
+			// observation landing above it is already in +Inf and an
+			// outlier worth inspecting directly.
+			Buckets: []float64{0.001, 0.005, 0.010, 0.025, 0.050, 0.100, 0.250, 0.500, 1.0, 2.0},
+		},
+		[]string{"source", "outcome"},
+	)
+
+	// ReaderErrorsTotal counts metrics-read failures by reason. Populated
+	// by the Prometheus reader; the annotation reader never errors on
+	// correctly-formed input. Cardinality bound: #sources × #reasons,
+	// currently 1 × 5 = 5 series (query_error, empty_vector,
+	// ambiguous_vector, non_finite, unsupported_type).
+	ReaderErrorsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "ntn_operators_reader_errors_total",
+			Help: "Count of metrics reader errors by source and reason.",
+		},
+		[]string{"source", "reason"},
+	)
+
+	// ReaderStaleUsedTotal counts reconciles served from the stale-value
+	// cache per NTNSlice. A non-zero derivative is the operator's signal
+	// that the underlying source has been degraded long enough to matter.
+	//
+	// Cardinality bound: one series per NTNSlice that has ever been
+	// served stale, keyed by the stable {namespace, name} pair. The
+	// series is explicitly removed via DeletePartialMatch inside
+	// pkg/slice/metrics.Provider.Evict when the reconciler observes
+	// NotFound for a CR, so the in-process series count tracks the
+	// operator's current working set rather than growing monotonically.
+	ReaderStaleUsedTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "ntn_operators_reader_stale_value_used_total",
+			Help: "Count of reconciles per slice in which the reader served a stale cached value.",
+		},
+		[]string{"namespace", "name"},
+	)
 )
 
 func init() {
@@ -88,6 +140,9 @@ func init() {
 		ConfigApplyErrorsTotal,
 		GPFetchDuration,
 		GPSatelliteCount,
+		ReaderQueryDuration,
+		ReaderErrorsTotal,
+		ReaderStaleUsedTotal,
 	)
 	// Note: logging here is intentionally omitted because init() runs
 	// before controller-runtime's logger is configured. Registration

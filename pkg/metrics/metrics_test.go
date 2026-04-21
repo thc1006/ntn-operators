@@ -32,6 +32,9 @@ func TestMetricsRegistered(t *testing.T) {
 	ConfigApplyErrorsTotal.With(prometheus.Labels{"config": "_", "provider": "_"}).Add(0)
 	GPFetchDuration.With(prometheus.Labels{"source_type": "_", "status": "_"}).Observe(0)
 	GPSatelliteCount.With(prometheus.Labels{"ephemeris": "_"}).Set(0)
+	ReaderQueryDuration.With(prometheus.Labels{"source": "_", "outcome": "_"}).Observe(0)
+	ReaderErrorsTotal.With(prometheus.Labels{"source": "_", "reason": "_"}).Add(0)
+	ReaderStaleUsedTotal.With(prometheus.Labels{"namespace": "_", "name": "_"}).Add(0)
 
 	families, err := metrics.Registry.Gather()
 	if err != nil {
@@ -45,6 +48,9 @@ func TestMetricsRegistered(t *testing.T) {
 		"ntn_operators_config_apply_errors_total",
 		"ntn_operators_gp_fetch_duration_seconds",
 		"ntn_operators_gp_satellite_count",
+		"ntn_operators_reader_query_duration_seconds",
+		"ntn_operators_reader_errors_total",
+		"ntn_operators_reader_stale_value_used_total",
 	}
 	gathered := make(map[string]bool)
 	for _, f := range families {
