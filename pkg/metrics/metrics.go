@@ -117,9 +117,11 @@ var (
 	// that the underlying source has been degraded long enough to matter.
 	//
 	// Cardinality bound: one series per NTNSlice that has ever been
-	// served from cache, keyed by the stable {namespace, name} pair;
-	// total series therefore scales with the operator's working set of
-	// slices. Evicted when the reconciler sees NotFound for a CR.
+	// served stale, keyed by the stable {namespace, name} pair. The
+	// series is explicitly removed via DeletePartialMatch inside
+	// pkg/slice/metrics.Provider.Evict when the reconciler observes
+	// NotFound for a CR, so the in-process series count tracks the
+	// operator's current working set rather than growing monotonically.
 	ReaderStaleUsedTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "ntn_metrics_reader_stale_value_used_total",

@@ -184,7 +184,33 @@ func TestProvider_Evict_OnMissingKey_IsNoOp(t *testing.T) {
 	p.Evict(client.ObjectKey{Namespace: "does-not", Name: "exist"})
 }
 
-func TestProvider_Fingerprint_NilAndZeroTimeoutAreEqivalent(t *testing.T) {
+func TestProvider_Fingerprint_PipeInPromQLDoesNotCollide(t *testing.T) {
+	// Regression against the "|"-joined fingerprint encoding, which
+	// silently let two distinct configs hash to the same key when a
+	// PromQL regex matcher happened to contain "|". Same UID so the
+	// cache lookup path is exercised; if fingerprints collide the
+	// second For() returns the first reader unchanged, if they don't
+	// collide the Provider evicts-and-rebuilds and returns a new one.
+	p := metrics.NewProvider(metrics.NewClientPool())
+
+	nsA := prometheusCR("http://prom:9090")
+	nsA.UID = "same-uid"
+	nsA.Spec.MetricsSource.Prometheus.Queries.RsrpDbm = "b|c"
+	nsA.Spec.MetricsSource.Prometheus.Queries.LatencyMs = "d"
+
+	nsB := prometheusCR("http://prom:9090")
+	nsB.UID = "same-uid"
+	nsB.Spec.MetricsSource.Prometheus.Queries.RsrpDbm = "b"
+	nsB.Spec.MetricsSource.Prometheus.Queries.LatencyMs = "c|d"
+
+	a, _ := p.For(nsA)
+	b, _ := p.For(nsB)
+	if a == b {
+		t.Error("fingerprint collision: distinct configs sharing a '|' position reused the same cached reader")
+	}
+}
+
+func TestProvider_Fingerprint_NilAndZeroTimeoutAreEquivalent(t *testing.T) {
 	// A nil QueryTimeout and an explicit 0 QueryTimeout both mean
 	// "fall back to default"; they must produce the same cached reader,
 	// not two entries that rebuild each other on every reconcile.

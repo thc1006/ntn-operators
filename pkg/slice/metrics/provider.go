@@ -11,15 +11,18 @@ You may obtain a copy of the License at
 package metrics
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sync"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	ntnv1alpha1 "github.com/thc1006/ntn-operators/api/v1alpha1"
+	ntnmetrics "github.com/thc1006/ntn-operators/pkg/metrics"
 )
 
 // Provider maps an NTNSlice CR to a Reader selected from its spec.
@@ -142,18 +145,23 @@ func (p *Provider) For(ns *ntnv1alpha1.NTNSlice) (Reader, error) {
 }
 
 // Evict removes every cached reader that matches key.Namespace and
-// key.Name. The reconciler calls this when Get returns NotFound so a
-// deleted NTNSlice does not leave its staleCache behind for the rest
-// of the operator's lifetime. Safe to call with a name that has no
-// cached entry.
+// key.Name, and also drops the {namespace, name}-labelled series from
+// ReaderStaleUsedTotal so a deleted NTNSlice leaves no state behind
+// (neither in-memory cache nor in-process Prometheus series).
+// Called by the reconciler on NotFound. Safe to call with a name
+// that has no cached entry.
 func (p *Provider) Evict(key client.ObjectKey) {
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	for k := range p.readers {
 		if k.namespace == key.Namespace && k.name == key.Name {
 			delete(p.readers, k)
 		}
 	}
+	p.mu.Unlock()
+	ntnmetrics.ReaderStaleUsedTotal.DeletePartialMatch(prometheus.Labels{
+		"namespace": key.Namespace,
+		"name":      key.Name,
+	})
 }
 
 func (p *Provider) buildReader(src *ntnv1alpha1.PrometheusMetricsSource) (Reader, error) {
@@ -175,18 +183,34 @@ func (p *Provider) buildReader(src *ntnv1alpha1.PrometheusMetricsSource) (Reader
 }
 
 // prometheusFingerprint captures the fields whose change should trigger
-// a rebuild of the cached reader. Timeout is canonicalised through
+// a rebuild of the cached reader. JSON-encoded rather than delimiter-
+// joined so that PromQL regex matchers (which commonly contain "|")
+// cannot collide across field boundaries — the earlier "|"-separated
+// encoding let ("rsrp=b|c", "latency=d") and ("rsrp=b", "latency=c|d")
+// fingerprint identically. Timeout is canonicalised through
 // time.Duration so an unset (nil) timeout and an explicit zero-length
-// one fingerprint identically — both mean "fall back to the default"
-// and should not cause a spurious rebuild.
+// one fingerprint identically; both mean "fall back to the default".
 func prometheusFingerprint(p *ntnv1alpha1.PrometheusMetricsSource) string {
 	var timeout time.Duration
 	if p.QueryTimeout != nil {
 		timeout = p.QueryTimeout.Duration
 	}
-	return p.Endpoint + "|" +
-		p.Queries.RsrpDbm + "|" +
-		p.Queries.LatencyMs + "|" +
-		p.Queries.PacketLossPercent + "|" +
-		timeout.String()
+	fp := struct {
+		Endpoint          string        `json:"e"`
+		RsrpDbm           string        `json:"r"`
+		LatencyMs         string        `json:"l"`
+		PacketLossPercent string        `json:"p"`
+		Timeout           time.Duration `json:"t"`
+	}{
+		Endpoint:          p.Endpoint,
+		RsrpDbm:           p.Queries.RsrpDbm,
+		LatencyMs:         p.Queries.LatencyMs,
+		PacketLossPercent: p.Queries.PacketLossPercent,
+		Timeout:           timeout,
+	}
+	// json.Marshal of a plain struct is deterministic: field order is
+	// the Go declaration order. Errors from Marshal on this shape are
+	// impossible, so ignore.
+	b, _ := json.Marshal(fp)
+	return string(b)
 }

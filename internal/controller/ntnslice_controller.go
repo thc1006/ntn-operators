@@ -112,12 +112,34 @@ func (r *NTNSliceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		return r.setMetricsUnknown(ctx, ns, reason, err.Error())
 	}
 	metrics := readResult.Metrics
+	// Track stale-ness as a Condition and emit an Event only on the
+	// transition into stale. A prolonged outage therefore produces one
+	// event, not one per reconcile interval, while dashboards and
+	// admission tooling can still observe the current state via the
+	// MetricsStale condition directly.
+	prevStale := meta.FindStatusCondition(ns.Status.Conditions, ntnv1alpha1.ConditionMetricsStale)
 	if readResult.Stale {
 		log.Info("metrics source returned stale value", "lastFreshAt", readResult.LastFreshAt)
-		if r.Recorder != nil {
+		meta.SetStatusCondition(&ns.Status.Conditions, metav1.Condition{
+			Type:               ntnv1alpha1.ConditionMetricsStale,
+			Status:             metav1.ConditionTrue,
+			Reason:             "StaleValue",
+			Message:            fmt.Sprintf("Using stale metrics last observed at %s", readResult.LastFreshAt.Format(time.RFC3339)),
+			ObservedGeneration: ns.Generation,
+		})
+		transitioned := prevStale == nil || prevStale.Status != metav1.ConditionTrue
+		if r.Recorder != nil && transitioned {
 			r.Recorder.Eventf(ns, nil, "Warning", "MetricsStale", "MetricsStale",
 				"Using stale metrics last observed at %s", readResult.LastFreshAt.Format(time.RFC3339))
 		}
+	} else {
+		meta.SetStatusCondition(&ns.Status.Conditions, metav1.Condition{
+			Type:               ntnv1alpha1.ConditionMetricsStale,
+			Status:             metav1.ConditionFalse,
+			Reason:             "FreshValue",
+			Message:            "Metrics source returned a fresh observation",
+			ObservedGeneration: ns.Generation,
+		})
 	}
 	log.V(2).Info("metrics read", "rsrp", metrics.RSRP, "latencyMs", metrics.LatencyMs, "packetLossPercent", metrics.PacketLossPercent, "stale", readResult.Stale)
 

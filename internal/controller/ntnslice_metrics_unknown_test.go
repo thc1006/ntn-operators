@@ -39,8 +39,9 @@ func makeScheme(t *testing.T) *runtime.Scheme {
 
 func TestSetMetricsUnknown_ConflictIsSwallowed(t *testing.T) {
 	// A conflict on Status().Update() is expected when the resource
-	// version moved; the reconciler must not bubble it up as an error
-	// because controller-runtime will requeue anyway.
+	// version moved; setMetricsUnknown swallows it and returns a
+	// non-zero Result.RequeueAfter to request an explicit requeue,
+	// so the caller never surfaces the conflict as a reconcile error.
 	ns := &ntnv1alpha1.NTNSlice{
 		ObjectMeta: metav1.ObjectMeta{Name: "s", Namespace: "default"},
 	}

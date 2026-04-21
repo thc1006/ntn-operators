@@ -278,6 +278,14 @@ const (
 	ConditionQoSApplied    = "QoSApplied"
 	ConditionSecured       = "Secured"
 	ConditionBillingActive = "BillingActive"
+
+	// ConditionMetricsStale reports whether the most recent reconcile
+	// was served from the stale-value cache rather than a fresh
+	// metrics source read. Status=True is set while the source is
+	// degraded and cleared back to False on the first fresh Read.
+	// Pairing the condition with an event emitted only on transition
+	// keeps the event stream quiet during long outages.
+	ConditionMetricsStale = "MetricsStale"
 )
 
 // +kubebuilder:object:root=true
