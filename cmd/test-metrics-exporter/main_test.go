@@ -20,10 +20,11 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
-// newTestMux builds the same http.ServeMux main() assembles, so we can
-// exercise its routing and health behaviour without spawning a real
-// process. Any future addition of a new route should extend both this
-// helper and the main() equivalent in lockstep.
+// newTestHandler builds the same *Handler configuration main() wires
+// up, so tests can feed it to newMux(...) and exercise the routing +
+// health surface without spawning a real process. Any future change
+// to how main() constructs the Handler should update this helper in
+// lockstep.
 func newTestHandler(t *testing.T) *Handler {
 	t.Helper()
 	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
@@ -76,16 +77,20 @@ func TestBuildSimulator_RejectsNonPositiveDurations(t *testing.T) {
 	// builder exposes the same validation surface so main() can fail
 	// fast with a clear message.
 	cases := []struct {
-		name     string
-		pass     time.Duration
-		gap      time.Duration
-		wantErr  bool
-		errMatch string
+		name        string
+		pass        time.Duration
+		gap         time.Duration
+		wantErr     bool
+		mustMention []string // substrings that must all appear in the error
 	}{
-		{"both positive", time.Second, time.Second, false, ""},
-		{"zero pass", 0, time.Second, true, "pass-duration"},
-		{"zero gap", time.Second, 0, true, "gap-duration"},
-		{"negative pass", -1, time.Second, true, "pass-duration"},
+		{"both positive", time.Second, time.Second, false, nil},
+		{"zero pass", 0, time.Second, true, []string{"pass-duration"}},
+		{"zero gap", time.Second, 0, true, []string{"gap-duration"}},
+		{"negative pass", -1, time.Second, true, []string{"pass-duration"}},
+		{"negative gap", time.Second, -1, true, []string{"gap-duration"}},
+		// When both flags are wrong the admin needs to see both mistakes
+		// in one run, not fix one and re-run to discover the next.
+		{"both non-positive", 0, -1, true, []string{"pass-duration", "gap-duration"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -96,8 +101,10 @@ func TestBuildSimulator_RejectsNonPositiveDurations(t *testing.T) {
 			if !tc.wantErr && err != nil {
 				t.Fatalf("want no error for pass=%v gap=%v, got %v", tc.pass, tc.gap, err)
 			}
-			if tc.wantErr && !strings.Contains(err.Error(), tc.errMatch) {
-				t.Errorf("error %q should mention %q", err, tc.errMatch)
+			for _, want := range tc.mustMention {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error %q should mention %q", err, want)
+				}
 			}
 		})
 	}

@@ -30,6 +30,7 @@ import (
 	"log"
 	"net/http"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -40,12 +41,18 @@ import (
 // anchored at now. Extracted so main() and unit tests see the same
 // guard logic — a zero or negative interval would otherwise silently
 // short-circuit the simulator to degradedMetrics on every scrape.
+// If both flags are bad, both are reported in one error so an admin
+// does not have to re-run the binary to find the second mistake.
 func buildSimulator(pass, gap time.Duration) (Simulator, error) {
+	var problems []string
 	if pass <= 0 {
-		return Simulator{}, fmt.Errorf("pass-duration must be positive, got %s", pass)
+		problems = append(problems, fmt.Sprintf("pass-duration must be positive, got %s", pass))
 	}
 	if gap <= 0 {
-		return Simulator{}, fmt.Errorf("gap-duration must be positive, got %s", gap)
+		problems = append(problems, fmt.Sprintf("gap-duration must be positive, got %s", gap))
+	}
+	if len(problems) > 0 {
+		return Simulator{}, errors.New(strings.Join(problems, "; "))
 	}
 	return Simulator{Start: time.Now(), PassDuration: pass, GapDuration: gap}, nil
 }
