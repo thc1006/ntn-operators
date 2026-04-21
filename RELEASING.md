@@ -40,8 +40,13 @@ Pre-requisites:
   chart version from the tag at publish time; source consistency is
   still required so `helm template` off `main` produces sensible
   output.)
-- The CSV's `spec.replaces` points at the previous **published** CSV
-  so OLM's upgrade graph is continuous.
+- The CSV's upgrade-graph metadata is correct for the catalog state:
+  prefer `spec.replaces: ntn-operators.vX.Y.Z-prev` when the previous
+  CSV was actually published to an OperatorHub catalog; fall back to
+  `spec.skipRange: "<X.Y.Z"` when no prior CSV was published (which
+  was the case for v0.4.0-rc.1 — v0.1.0 predated the bundle
+  infrastructure). Do not set `replaces:` pointing at a CSV that
+  never existed in a catalog — OLM will reject the bundle.
 
 Steps:
 

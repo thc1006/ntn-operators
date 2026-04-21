@@ -35,7 +35,7 @@ is optional with the prior behaviour as its default.
 - Controller benchmarks and `--max-concurrent-reconciles` (#59)
 - Container image scanning (Trivy) + cosign signing + SPDX SBOM (#61, #62)
 - Validating admission webhook for NTNSlice trigger syntax (#70)
-- OLM bundle for OperatorHub publishing (#60; CSV replaces v0.1.0)
+- OLM bundle for OperatorHub publishing (#60; CSV uses `spec.skipRange: "<0.4.0-rc.1"` because v0.1.0 never published a catalog entry)
 
 **Observability**
 - `ntn_operators_reader_query_duration_seconds{source,outcome}` histogram
