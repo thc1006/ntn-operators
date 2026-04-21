@@ -79,6 +79,12 @@ func (r *NTNSliceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	// Step 1: Get the NTNSlice resource.
 	ns := &ntnv1alpha1.NTNSlice{}
 	if err := r.Get(ctx, req.NamespacedName, ns); err != nil {
+		if apierrors.IsNotFound(err) && r.ReaderProvider != nil {
+			// The CR is gone — drop any cached reader so the Provider
+			// does not leak staleCache state for slices that no longer
+			// exist. Safe to call even if no entry was present.
+			r.ReaderProvider.Evict(req.NamespacedName)
+		}
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 

@@ -22,6 +22,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	dto "github.com/prometheus/client_model/go"
 	"github.com/prometheus/common/model"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -32,11 +33,39 @@ import (
 	"github.com/thc1006/ntn-operators/pkg/slice/metrics"
 )
 
+// histogramSampleCount pulls the cumulative observation count off a
+// single Histogram child. testutil.CollectAndCount counts series — not
+// observations — and thus cannot distinguish "this call did emit an
+// observation" from "a previous test already made the series exist".
+func histogramSampleCount(t *testing.T, h prometheus.Observer) uint64 {
+	t.Helper()
+	c, ok := h.(prometheus.Collector)
+	if !ok {
+		t.Fatalf("observer is not a collector: %T", h)
+	}
+	ch := make(chan prometheus.Metric, 1)
+	c.Collect(ch)
+	close(ch)
+	m := <-ch
+	if m == nil {
+		return 0
+	}
+	var pb dto.Metric
+	if err := m.Write(&pb); err != nil {
+		t.Fatalf("metric write: %v", err)
+	}
+	return pb.GetHistogram().GetSampleCount()
+}
+
 func TestPrometheusReader_Observability_QueryDurationObservedOnSuccess(t *testing.T) {
-	// CollectAndCount counts series; a fresh (source, outcome) combination
-	// registers as a new series when first observed, and subsequent calls
-	// keep the same series alive. The assertion is that at least one
-	// series exists after a successful Read completes.
+	// Compare the observation count on the specific {prometheus, success}
+	// series before and after a single Read. The global testutil package
+	// accumulates across the whole package run, so asserting "count > 0"
+	// could pass on residue from earlier tests even if the Read under
+	// test did not observe anything.
+	successLabels := prometheus.Labels{"source": "prometheus", "outcome": "success"}
+	before := histogramSampleCount(t, ntnmetrics.ReaderQueryDuration.With(successLabels))
+
 	client := &fakeQueryClient{
 		responses: map[string]model.Value{
 			"rsrp_query": &model.Scalar{Value: -95},
@@ -47,9 +76,10 @@ func TestPrometheusReader_Observability_QueryDurationObservedOnSuccess(t *testin
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	count := testutil.CollectAndCount(ntnmetrics.ReaderQueryDuration)
-	if count == 0 {
-		t.Error("expected ReaderQueryDuration to have at least one series after a successful Read")
+
+	after := histogramSampleCount(t, ntnmetrics.ReaderQueryDuration.With(successLabels))
+	if after != before+1 {
+		t.Errorf("expected exactly one new observation on {prometheus,success}: before=%d after=%d", before, after)
 	}
 }
 
@@ -62,6 +92,7 @@ func TestPrometheusReader_Observability_ErrorCounterPerReason(t *testing.T) {
 	}{
 		{"query_error", nil, errors.New("boom"), "query_error"},
 		{"empty_vector", model.Vector{}, nil, "empty_vector"},
+		{"ambiguous_vector", model.Vector{&model.Sample{Value: 1}, &model.Sample{Value: 2}}, nil, "ambiguous_vector"},
 		{"non_finite_scalar", &model.Scalar{Value: model.SampleValue(neverFinite())}, nil, "non_finite"},
 		{"unsupported_type", model.Matrix{}, nil, "unsupported_type"},
 	}

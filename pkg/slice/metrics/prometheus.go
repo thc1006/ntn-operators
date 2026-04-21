@@ -30,6 +30,7 @@ const sourceLabelPrometheus = "prometheus"
 const (
 	reasonQueryError      = "query_error"
 	reasonEmptyVector     = "empty_vector"
+	reasonAmbiguousVector = "ambiguous_vector"
 	reasonNonFinite       = "non_finite"
 	reasonUnsupportedType = "unsupported_type"
 )
@@ -64,7 +65,10 @@ type Queries struct {
 	PacketLossPercent string
 }
 
-// PrometheusConfig configures a prometheusReader.
+// PrometheusConfig configures a prometheusReader. Timeout is the hard
+// limit applied to each single PromQL fetch, not the entire Read call;
+// a Read that issues three queries with Timeout=2s therefore has an
+// upper-bound wall-clock cost of ~6s before it returns.
 type PrometheusConfig struct {
 	Queries Queries
 	Timeout time.Duration
@@ -104,9 +108,6 @@ func (r *prometheusReader) Read(ctx context.Context, ns *ntnv1alpha1.NTNSlice) (
 		return Result{}, fmt.Errorf("prometheusReader: %w", err)
 	}
 
-	qctx, cancel := context.WithTimeout(ctx, r.timeout)
-	defer cancel()
-
 	m := defaultMetrics
 	fields := []struct {
 		query string
@@ -120,7 +121,12 @@ func (r *prometheusReader) Read(ctx context.Context, ns *ntnv1alpha1.NTNSlice) (
 		if f.query == "" {
 			continue
 		}
+		// Per-query timeout: r.timeout is the budget for a single PromQL
+		// fetch, not the whole Read. A slow query burning the whole budget
+		// must not starve the other metrics.
+		qctx, cancel := context.WithTimeout(ctx, r.timeout)
 		v, err := r.fetch(qctx, f.query)
+		cancel()
 		if err != nil {
 			return Result{}, err
 		}
@@ -166,9 +172,21 @@ func (r *prometheusReader) fetch(ctx context.Context, q string) (result float64,
 		}
 		return f, nil
 	case model.Vector:
-		if len(value) == 0 {
+		switch len(value) {
+		case 0:
 			reason = reasonEmptyVector
 			return 0, fmt.Errorf("prometheusReader: query %q empty vector: %w", q, ErrNoMetrics)
+		case 1:
+			// fall through to finite check below
+		default:
+			// Multiple samples means the PromQL matched more than one
+			// time series and the "right" one is not obvious. Forcing the
+			// user to reduce it with avg() / max() / a more specific
+			// selector is safer than picking value[0] nondeterministically.
+			reason = reasonAmbiguousVector
+			return 0, fmt.Errorf(
+				"prometheusReader: query %q returned %d samples, expected exactly one: %w",
+				q, len(value), ErrNoMetrics)
 		}
 		f := float64(value[0].Value)
 		if math.IsNaN(f) || math.IsInf(f, 0) {

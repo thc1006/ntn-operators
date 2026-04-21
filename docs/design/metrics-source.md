@@ -139,22 +139,30 @@ self.metricsSource.?type.orValue('annotations') != 'prometheus'
 
 ```
 pkg/slice/metrics/
-  reader.go         Reader interface + aliased Metrics + sentinel errors
-  annotation.go     annotationReader
+  reader.go              Reader interface, Result, sentinel errors
+  annotation.go          annotationReader
   annotation_test.go
-  prometheus.go     prometheusReader + QueryClient interface
+  prometheus.go          prometheusReader + QueryClient interface
   prometheus_test.go
-  stale.go          staleCache wrapper
+  stale.go               staleCache wrapper keyed by UID
   stale_test.go
-  clientpool.go     endpoint → v1.API pool
+  clientpool.go          endpoint → v1.API pool
   clientpool_test.go
-  provider.go       Provider: NTNSlice → Reader
+  provider.go            Provider: NTNSlice → Reader
+  provider_test.go
+  observability_test.go  counter increment assertions
 
-internal/metrics/
-  metricsreader.go  Prometheus counters for observability
+pkg/metrics/
+  metrics.go             adds ReaderQueryDuration, ReaderErrorsTotal,
+                         ReaderStaleUsedTotal alongside existing
+                         controller-wide Prometheus collectors
 
 cmd/test-metrics-exporter/
-  main.go           synthetic RSRP/latency/packet-loss exporter
+  main.go            CLI wrapper + signal handling
+  simulator.go       pass/gap metric synthesis (deterministic)
+  handler.go         promhttp /metrics handler
+  *_test.go          unit tests for all of the above
+  Dockerfile         distroless/static:nonroot image
 ```
 
 ## Controller wiring
@@ -176,18 +184,25 @@ if errors.Is(err, metrics.ErrNoMetrics) {
 
 ## Observability
 
-New counters (in `internal/metrics`):
+New collectors added to `pkg/metrics`, registered with the
+controller-runtime registry alongside the pre-existing operator
+metrics:
 
-- `ntn_metrics_reader_query_duration_seconds{source,outcome}`
-- `ntn_metrics_reader_errors_total{source,reason}`
-- `ntn_metrics_reader_stale_value_used_total{slice}`
+- `ntn_metrics_reader_query_duration_seconds{source,outcome}` —
+  histogram, one observation per PromQL fetch (not per Read)
+- `ntn_metrics_reader_errors_total{source,reason}` — counter, bounded
+  labels (reasons: `query_error`, `empty_vector`, `ambiguous_vector`,
+  `non_finite`, `unsupported_type`)
+- `ntn_metrics_reader_stale_value_used_total{namespace,name}` —
+  counter, one series per NTNSlice that has ever been served stale;
+  evicted when the reconciler observes NotFound for the CR
 
 ## Testing
 
 - Unit: interface-mocked `QueryClient`; no HTTP in unit tests for readers.
 - Envtest (integration): Reconciler against fake API server, with an
   in-process `httptest.Server` acting as Prometheus.
-- E2E (L340): described in `docs/e2e-prometheus.md`.
+- E2E (L340): described in `docs/runbooks/e2e-prometheus-metrics.md`.
 
 ## Migration
 

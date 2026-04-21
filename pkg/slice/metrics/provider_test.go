@@ -16,6 +16,7 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	ntnv1alpha1 "github.com/thc1006/ntn-operators/api/v1alpha1"
 	"github.com/thc1006/ntn-operators/pkg/slice/metrics"
@@ -142,4 +143,60 @@ func TestProvider_NilPool_PanicsAtConstruction(t *testing.T) {
 		}
 	}()
 	_ = metrics.NewProvider(nil)
+}
+
+func TestProvider_PrometheusMode_EmptyUID_IsRejected(t *testing.T) {
+	// Two unsaved slices with UID="" must not share cache state. The
+	// Provider defends by refusing empty-UID CRs up front in Prometheus
+	// mode — staleCache itself also rejects them, but it is clearer to
+	// fail at the entry point than to let a half-valid Reader be cached.
+	p := metrics.NewProvider(metrics.NewClientPool())
+	ns := prometheusCR("http://prom:9090")
+	ns.UID = ""
+	_, err := p.For(ns)
+	if err == nil {
+		t.Fatal("expected error for prometheus mode with empty UID")
+	}
+}
+
+func TestProvider_Evict_RemovesCachedReader(t *testing.T) {
+	// After Evict the Provider must not return the previously-cached
+	// reader; the next For() call rebuilds, giving a fresh staleCache.
+	p := metrics.NewProvider(metrics.NewClientPool())
+	ns := prometheusCR("http://prom:9090")
+	first, err := p.For(ns)
+	if err != nil {
+		t.Fatalf("first For(): %v", err)
+	}
+	p.Evict(client.ObjectKey{Namespace: ns.Namespace, Name: ns.Name})
+	second, err := p.For(ns)
+	if err != nil {
+		t.Fatalf("second For(): %v", err)
+	}
+	if first == second {
+		t.Error("Evict did not drop the cached reader: same reader returned after eviction")
+	}
+}
+
+func TestProvider_Evict_OnMissingKey_IsNoOp(t *testing.T) {
+	p := metrics.NewProvider(metrics.NewClientPool())
+	// Should simply not panic.
+	p.Evict(client.ObjectKey{Namespace: "does-not", Name: "exist"})
+}
+
+func TestProvider_Fingerprint_NilAndZeroTimeoutAreEqivalent(t *testing.T) {
+	// A nil QueryTimeout and an explicit 0 QueryTimeout both mean
+	// "fall back to default"; they must produce the same cached reader,
+	// not two entries that rebuild each other on every reconcile.
+	p := metrics.NewProvider(metrics.NewClientPool())
+	nsA := prometheusCR("http://prom:9090")
+	nsA.Spec.MetricsSource.Prometheus.QueryTimeout = nil
+	nsB := prometheusCR("http://prom:9090")
+	zero := metav1.Duration{Duration: 0}
+	nsB.Spec.MetricsSource.Prometheus.QueryTimeout = &zero
+	a, _ := p.For(nsA)
+	b, _ := p.For(nsB)
+	if a != b {
+		t.Error("nil QueryTimeout and QueryTimeout=0s must cache as the same reader")
+	}
 }

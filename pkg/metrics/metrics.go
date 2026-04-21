@@ -79,15 +79,19 @@ var (
 		[]string{"ephemeris"},
 	)
 
-	// ReaderQueryDuration measures how long a single call through a
-	// pkg/slice/metrics Reader takes, split by source ("prometheus") and
-	// outcome ("success" or "error"). Used to catch slow-path Prometheus
-	// instances before the 2 s timeout starts biting reconciles.
+	// ReaderQueryDuration measures how long a single PromQL fetch made
+	// through a pkg/slice/metrics Reader takes, split by source
+	// ("prometheus") and outcome ("success" or "error"). A higher-level
+	// Reader.Read call may perform several such fetches; this histogram
+	// is observed once per fetch, not once per Read, so dashboards
+	// should aggregate accordingly. Used to catch slow-path Prometheus
+	// instances before the 2 s per-query timeout starts biting
+	// reconciles.
 	ReaderQueryDuration = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Name: "ntn_metrics_reader_query_duration_seconds",
-			Help: "Duration of a metrics reader query in seconds.",
-			// Upper bucket matches the default Prometheus query timeout
+			Help: "Duration of a single PromQL fetch by a metrics reader, in seconds.",
+			// Upper bucket matches the default per-query timeout
 			// (pkg/slice/metrics.defaultPrometheusTimeout = 2s); any
 			// observation landing above it is already in +Inf and an
 			// outlier worth inspecting directly.
@@ -111,10 +115,15 @@ var (
 	// ReaderStaleUsedTotal counts reconciles served from the stale-value
 	// cache per NTNSlice. A non-zero derivative is the operator's signal
 	// that the underlying source has been degraded long enough to matter.
+	//
+	// Cardinality bound: one series per NTNSlice that has ever been
+	// served from cache, keyed by the stable {namespace, name} pair;
+	// total series therefore scales with the operator's working set of
+	// slices. Evicted when the reconciler sees NotFound for a CR.
 	ReaderStaleUsedTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "ntn_metrics_reader_stale_value_used_total",
-			Help: "Count of reconciles in which the metrics reader served a stale cached value.",
+			Help: "Count of reconciles per slice in which the reader served a stale cached value.",
 		},
 		[]string{"namespace", "name"},
 	)

@@ -102,8 +102,10 @@ type PrometheusMetricsSource struct {
 	// +kubebuilder:validation:MinLength=1
 	Endpoint string `json:"endpoint"`
 
-	// queryTimeout limits the wall-clock time spent on a single query.
-	// Defaults to 2s inside the controller when unset.
+	// queryTimeout limits the wall-clock time spent on each individual
+	// PromQL fetch; the controller issues up to three fetches per
+	// reconcile (one per metric), so the upper bound for a Read is
+	// roughly 3x this value. Defaults to 2s when unset.
 	// +optional
 	QueryTimeout *metav1.Duration `json:"queryTimeout,omitempty"`
 

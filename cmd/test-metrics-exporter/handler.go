@@ -35,7 +35,13 @@ type Handler struct {
 // NewHandler constructs a Handler registered on reg.
 // namespace and slice populate the {namespace, slice} label pair so
 // the NTNSlice PromQL looks like avg(ntn_e2e_rsrp_dbm{slice="X"}).
+// nowFn may be nil: the handler defaults to time.Now, which is what
+// every non-test caller wants. Passing an explicit clock is reserved
+// for deterministic tests.
 func NewHandler(reg *prometheus.Registry, sim Simulator, namespace, slice string, nowFn func() time.Time) *Handler {
+	if nowFn == nil {
+		nowFn = time.Now
+	}
 	labels := prometheus.Labels{"namespace": namespace, "slice": slice}
 	h := &Handler{
 		sim: sim,
