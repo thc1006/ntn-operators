@@ -33,10 +33,10 @@ jobs:
         uses: ko-build/setup-ko@d006021bd0c28d1ce33a07e7943d48b079944c8d # v0.9
 
       - name: Install cosign
-        uses: sigstore/cosign-installer@3454372be43b8aaf1a781145e41e40d45c4a91e0 # v3.8.2
+        uses: sigstore/cosign-installer@3454372f43399081ed03b604cb2d021dabca52bb # v3.8.2
 
       - name: Install syft
-        uses: anchore/sbom-action/download-syft@f325610c9f50a54015d37c8d16cb3b0e3c8f0c08 # v0.18.0
+        uses: anchore/sbom-action/download-syft@f325610c9f50a54015d37c8d16cb3b0e2c8f4de0 # v0.18.0
 
       - name: Login to GHCR
         uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
@@ -133,7 +133,7 @@ jobs:
           helm push ntn-operators-${{ steps.version.outputs.VERSION }}.tgz oci://${{ env.REGISTRY }}/${{ github.repository_owner }}
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@c95fe17002a23e40138e5b0a4023b830a3e108c4 # v3.0.0
+        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3.0.0
         with:
           generate_release_notes: true
           # Any SemVer tag with a pre-release identifier (the "-xxx"
