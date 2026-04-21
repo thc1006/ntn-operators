@@ -56,14 +56,22 @@ must not ship as the default behaviour for production users.
 need it most. Stale values keep the last-known position until fresh data is
 available; the condition makes the degraded observability visible.
 
-### D2. Sync query with short timeout, not async poller
+### D2. Sync queries with short per-query timeout, not async poller
 
-Per reconcile we issue one query with a 2 s hard timeout (configurable).
-This trades latency for simplicity: no goroutine lifecycle, no cache
-invalidation rules, one place for the timeout. At the current controller
-throughput (≪ 1 QPS per slice) the 2 s worst case is acceptable. If Prometheus
-scale becomes a concern, a background poller is a local change inside the
-`prometheusReader` without disturbing callers.
+Per reconcile we issue up to three synchronous PromQL queries — one each
+for `rsrpDbm`, `latencyMs`, and `packetLossPercent` — with a 2 s hard
+timeout per query (configurable via `spec.metricsSource.prometheus.queryTimeout`).
+Each fetch gets a freshly derived `context.WithTimeout` so one slow
+query cannot starve the others. Upper-bound wall-time per Read is
+therefore roughly `3 × timeout`.
+
+This trades latency for simplicity: no goroutine lifecycle, no background
+cache invalidation rules, timeout handling stays local to each fetch.
+At the current controller throughput (≪ 1 QPS per slice) the ~6 s worst
+case is acceptable. If Prometheus scale becomes a concern, folding the
+three queries into one PromQL vector or moving to a background poller
+remains a local change inside the `prometheusReader` without disturbing
+callers.
 
 ### D3. Endpoint-keyed client pool
 

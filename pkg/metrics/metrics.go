@@ -103,7 +103,8 @@ var (
 	// ReaderErrorsTotal counts metrics-read failures by reason. Populated
 	// by the Prometheus reader; the annotation reader never errors on
 	// correctly-formed input. Cardinality bound: #sources × #reasons,
-	// currently 1 × 4 = 4 series.
+	// currently 1 × 5 = 5 series (query_error, empty_vector,
+	// ambiguous_vector, non_finite, unsupported_type).
 	ReaderErrorsTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "ntn_metrics_reader_errors_total",

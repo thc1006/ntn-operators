@@ -337,7 +337,10 @@ func (r *NTNSliceReconciler) applyBillingStatus(ns *ntnv1alpha1.NTNSlice, active
 }
 
 // setMetricsUnknown marks FailoverReady=Unknown with the supplied reason,
-// persists the status update, and requeues. Used whenever the metrics
+// also resets MetricsStale=Unknown because "we could not read metrics"
+// means neither fresh nor stale was served this reconcile and leaving
+// MetricsStale=True from the previous reconcile would be a lie, then
+// persists the status update and requeues. Used whenever the metrics
 // source cannot deliver a value: a broken spec or an unreachable
 // Prometheus must hold the slice in its current path rather than let
 // the failover engine decide on invented data.
@@ -347,6 +350,13 @@ func (r *NTNSliceReconciler) setMetricsUnknown(ctx context.Context, ns *ntnv1alp
 		Status:             metav1.ConditionUnknown,
 		Reason:             reason,
 		Message:            msg,
+		ObservedGeneration: ns.Generation,
+	})
+	meta.SetStatusCondition(&ns.Status.Conditions, metav1.Condition{
+		Type:               ntnv1alpha1.ConditionMetricsStale,
+		Status:             metav1.ConditionUnknown,
+		Reason:             reason,
+		Message:            "Metric freshness unknown: " + msg,
 		ObservedGeneration: ns.Generation,
 	})
 	if err := r.Status().Update(ctx, ns); err != nil && !apierrors.IsConflict(err) {

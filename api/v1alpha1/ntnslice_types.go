@@ -106,6 +106,7 @@ type PrometheusMetricsSource struct {
 	// PromQL fetch; the controller issues up to three fetches per
 	// reconcile (one per metric), so the upper bound for a Read is
 	// roughly 3x this value. Defaults to 2s when unset.
+	// +kubebuilder:validation:Format=duration
 	// +optional
 	QueryTimeout *metav1.Duration `json:"queryTimeout,omitempty"`
 

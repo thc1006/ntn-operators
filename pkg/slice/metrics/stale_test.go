@@ -177,6 +177,35 @@ func TestStaleCache_NilInner_RejectedAtConstruction(t *testing.T) {
 	_ = metrics.NewStaleCache(nil)
 }
 
+func TestStaleCache_ParentContextCanceled_PropagatesInsteadOfServingStale(t *testing.T) {
+	// If the parent context is canceled (controller shutdown, manager
+	// deadline, explicit caller cancel), the caller is abandoning the
+	// reconcile. Returning a stale value with err=nil would let them
+	// keep running against a dead context. The staleCache must propagate
+	// ctx.Err() instead, even when it has a cached value it *could* have
+	// served.
+	inner := &scriptedReader{script: []scriptStep{
+		{res: metrics.Result{Metrics: slice.Metrics{RSRP: -90}}}, // first call: success (populates cache)
+		{err: metrics.ErrNoMetrics},                              // second call: inner reports failure
+	}}
+	c := metrics.NewStaleCache(inner)
+	ns := nsWithUID("u-ctx")
+
+	if _, err := c.Read(context.Background(), ns); err != nil {
+		t.Fatalf("first fresh read failed: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // kill the parent before the second Read returns
+	_, err := c.Read(ctx, ns)
+	if err == nil {
+		t.Fatal("staleCache must not swallow a dead parent ctx by returning a cached value")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("expected wrapped context.Canceled, got %v", err)
+	}
+}
+
 func TestStaleCache_LastFreshAt_TracksFreshnessAcrossStaleReturns(t *testing.T) {
 	// Scenario: success -> fail -> fail.
 	// LastFreshAt returned on stale reads must equal the timestamp of the

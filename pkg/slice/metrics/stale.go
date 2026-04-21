@@ -73,6 +73,15 @@ func (c *staleCache) Read(ctx context.Context, ns *ntnv1alpha1.NTNSlice) (Result
 		res.LastFreshAt = freshAt
 		return res, nil
 	}
+	// If the *parent* context is already done the caller is abandoning
+	// this reconcile (shutdown, manager-level deadline, explicit cancel).
+	// Returning a stale value with Stale=true would keep downstream logic
+	// running against a corpse. Propagate instead. A per-fetch timeout
+	// firing inside the inner reader does not affect the parent ctx, so
+	// the fall-to-cache path still applies to normal slow-Prometheus.
+	if cerr := ctx.Err(); cerr != nil {
+		return Result{}, fmt.Errorf("staleCache: %w", cerr)
+	}
 	c.mu.Lock()
 	cached, ok := c.cache[ns.UID]
 	c.mu.Unlock()

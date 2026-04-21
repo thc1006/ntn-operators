@@ -165,6 +165,7 @@ spec:
                           PromQL fetch; the controller issues up to three fetches per
                           reconcile (one per metric), so the upper bound for a Read is
                           roughly 3x this value. Defaults to 2s when unset.
+                        format: duration
                         type: string
                     required:
                     - endpoint
