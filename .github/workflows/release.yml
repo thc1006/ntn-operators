@@ -136,6 +136,10 @@ jobs:
         uses: softprops/action-gh-release@c95fe17002a23e40138e5b0a4023b830a3e108c4 # v3.0.0
         with:
           generate_release_notes: true
+          # Mark every -rc / -beta / -alpha / -preview tag as a
+          # pre-release so it does not show up as "Latest" on the
+          # repository page and npm/Helm consumers can opt out.
+          prerelease: ${{ contains(github.ref_name, '-rc') || contains(github.ref_name, '-beta') || contains(github.ref_name, '-alpha') || contains(github.ref_name, '-preview') }}
           files: |
             ntn-operators-${{ steps.version.outputs.VERSION }}.tgz
             sbom.spdx.json
