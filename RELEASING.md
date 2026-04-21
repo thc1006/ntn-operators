@@ -70,8 +70,9 @@ Steps:
    git tag -a vX.Y.Z -m "vX.Y.Z"
    git push origin vX.Y.Z
    ```
-7. Mark the RC GitHub Release as pre-release (should be automatic
-   because of the `-rc` suffix).
+7. The GitHub Release is auto-flagged as pre-release whenever the
+   tag carries any pre-release identifier (the `-rc` / `-beta` /
+   similar suffix), so nothing further is required on the UI.
 
 ## Breaking changes
 

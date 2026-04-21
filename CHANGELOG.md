@@ -89,10 +89,17 @@ is optional with the prior behaviour as its default.
 - **New operator flag** `--prometheus-allowed-endpoint-hosts` defaults to
   empty (permit-all) — existing deployments that did not set it before
   continue to work without change.
-- **OLM upgrade** path is explicit: CSV `ntn-operators.v0.4.0-rc.1`
-  declares `replaces: ntn-operators.v0.1.0`; the channel graph skips
-  directly from 0.1.0 → 0.4.0-rc.1. No intermediate CSVs are published
-  because v0.2 / v0.3 were never cut as standalone tags.
+- **OLM upgrade** path uses `spec.skipRange: "<0.4.0-rc.1"`, not an
+  explicit `replaces:`, because the OLM bundle infrastructure
+  landed in PR #91 (after the v0.1.0 tag) so no published
+  `ntn-operators.v0.1.0` CSV exists to replace. skipRange lets this
+  CSV take over from any earlier-installed bundle if one is ever
+  cataloged, without requiring v0.1.0 to exist.
+- **External `NTNProvider` implementers** must add three methods
+  (`EnsureOwnership`, `Cleanup`, `PushEphemerisUpdate`) to satisfy
+  the interface (#20, #72). In practice nobody does — only
+  `pkg/provider/ocudu` implements it — but the break is real for
+  anyone who built a downstream provider against v0.1.0.
 
 ### Known deferrals
 
