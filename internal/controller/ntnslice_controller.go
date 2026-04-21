@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"math"
 	"strconv"
+	"sync"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -55,10 +56,27 @@ type NTNSliceReconciler struct {
 	Now                     func() time.Time
 
 	// ReaderProvider chooses the metrics Reader for each NTNSlice based on
-	// spec.metricsSource. If nil, the reconciler falls back to a provider
-	// wired with annotation-only readers so existing development tests
-	// that construct the reconciler directly continue to work.
+	// spec.metricsSource. If nil, the reconciler lazily builds a default
+	// Provider on first use so existing development tests that construct
+	// the reconciler directly continue to work without rebuilding pool +
+	// provider on every Reconcile call.
 	ReaderProvider *slicemetrics.Provider
+
+	defaultProviderOnce sync.Once
+	defaultProvider     *slicemetrics.Provider
+}
+
+// readerProvider returns the configured Provider, or a lazily-initialised
+// default one so the reconciler never churns a fresh pool per Reconcile.
+// Safe for concurrent callers via sync.Once.
+func (r *NTNSliceReconciler) readerProvider() *slicemetrics.Provider {
+	if r.ReaderProvider != nil {
+		return r.ReaderProvider
+	}
+	r.defaultProviderOnce.Do(func() {
+		r.defaultProvider = slicemetrics.NewProvider(slicemetrics.NewClientPool())
+	})
+	return r.defaultProvider
 }
 
 // +kubebuilder:rbac:groups=ntn.operators.dev,resources=ntnslices,verbs=get;list;watch;create;update;patch;delete
@@ -91,13 +109,7 @@ func (r *NTNSliceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	now := r.now()
 
 	// Step 2: Read path quality metrics via the configured source.
-	provider := r.ReaderProvider
-	if provider == nil {
-		// Backward-compatible fallback: tests that build a Reconciler
-		// directly without wiring a Provider should still reconcile.
-		provider = slicemetrics.NewProvider(slicemetrics.NewClientPool())
-	}
-	reader, err := provider.For(ns)
+	reader, err := r.readerProvider().For(ns)
 	if err != nil {
 		log.Error(err, "failed to build metrics reader")
 		return r.setMetricsUnknown(ctx, ns, "MetricsReaderError", err.Error())

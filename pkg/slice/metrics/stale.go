@@ -86,7 +86,13 @@ func (c *staleCache) Read(ctx context.Context, ns *ntnv1alpha1.NTNSlice) (Result
 	cached, ok := c.cache[ns.UID]
 	c.mu.Unlock()
 	if !ok {
-		return Result{}, fmt.Errorf("staleCache: no fresh or cached value: %w", err)
+		// Preserve the underlying error text for debuggability, but also
+		// wrap ErrNoMetrics so callers doing errors.Is(err, ErrNoMetrics)
+		// see the Reader-level contract "no usable value, fresh or stale"
+		// satisfied uniformly — otherwise a network-level error here
+		// would evade the MetricsUnavailable path in the controller and
+		// get treated as MetricsReaderError instead.
+		return Result{}, fmt.Errorf("staleCache: no fresh or cached value: %w: %w", ErrNoMetrics, err)
 	}
 	ntnmetrics.ReaderStaleUsedTotal.With(prometheus.Labels{
 		"namespace": ns.Namespace, "name": ns.Name,

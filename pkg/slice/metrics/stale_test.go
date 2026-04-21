@@ -100,8 +100,16 @@ func TestStaleCache_ErrorWithEmptyCache_PropagatesError(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error when underlying fails and cache is empty")
 	}
+	// The underlying error must remain retrievable for debugging...
 	if !errors.Is(err, sentinel) {
 		t.Fatalf("want wrapped sentinel, got %v", err)
+	}
+	// ...and the Reader contract says "no usable value, fresh or stale"
+	// must also be expressible as ErrNoMetrics so callers can take the
+	// MetricsUnavailable branch uniformly regardless of which inner
+	// failure class got us here.
+	if !errors.Is(err, metrics.ErrNoMetrics) {
+		t.Fatalf("empty-cache path must also wrap ErrNoMetrics, got %v", err)
 	}
 }
 
