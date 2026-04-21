@@ -33,6 +33,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	ntnv1alpha1 "github.com/thc1006/ntn-operators/api/v1alpha1"
+	"github.com/thc1006/ntn-operators/pkg/netutil"
+	slicemetrics "github.com/thc1006/ntn-operators/pkg/slice/metrics"
 )
 
 var _ = Describe("NTNSlice Controller", func() {
@@ -896,6 +898,46 @@ var _ = Describe("NTNSlice Controller", func() {
 			Expect(cond.Status).To(Equal(metav1.ConditionUnknown))
 			Expect(cond.Reason).To(SatisfyAny(Equal("MetricsReaderError"), Equal("MetricsUnavailable")),
 				"unreachable Prometheus must surface as one of the metrics-failure reasons")
+		})
+	})
+
+	Context("MetricsSource prometheus: endpoint allow-list rejects non-listed host", func() {
+		It("should set FailoverReady=Unknown with reason=EndpointNotAllowed when admin allow-list denies the host", func() {
+			allow := netutil.ParseEndpointAllowlist("allowed.prom.example.com")
+			provider := slicemetrics.NewProvider(slicemetrics.NewClientPool(),
+				slicemetrics.WithEndpointAllowlist(allow))
+
+			spec := baseSpec()
+			spec.MetricsSource = &ntnv1alpha1.MetricsSource{
+				Type: ntnv1alpha1.MetricsSourcePrometheus,
+				Prometheus: &ntnv1alpha1.PrometheusMetricsSource{
+					Endpoint: "http://denied.prom.example.com:9090",
+					Queries:  ntnv1alpha1.PrometheusQueries{RsrpDbm: "up"},
+				},
+			}
+			slice := &ntnv1alpha1.NTNSlice{
+				ObjectMeta: metav1.ObjectMeta{Name: "allowlist-denied", Namespace: namespace},
+				Spec:       spec,
+			}
+			Expect(k8sClient.Create(context.Background(), slice)).To(Succeed())
+			DeferCleanup(func() { _ = k8sClient.Delete(context.Background(), slice) })
+
+			rec := newReconciler()
+			rec.ReaderProvider = provider
+			_, err := rec.Reconcile(context.Background(), reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: "allowlist-denied", Namespace: namespace},
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			updated := &ntnv1alpha1.NTNSlice{}
+			Expect(k8sClient.Get(context.Background(), types.NamespacedName{Name: "allowlist-denied", Namespace: namespace}, updated)).To(Succeed())
+			cond := meta.FindStatusCondition(updated.Status.Conditions, ntnv1alpha1.ConditionFailoverReady)
+			Expect(cond).NotTo(BeNil())
+			Expect(cond.Status).To(Equal(metav1.ConditionUnknown))
+			Expect(cond.Reason).To(Equal("EndpointNotAllowed"),
+				"allow-list rejection must surface its own reason, not a generic one")
+			Expect(cond.Message).To(ContainSubstring("denied.prom.example.com"),
+				"reason message should name the offending host so kubectl describe is actionable")
 		})
 	})
 

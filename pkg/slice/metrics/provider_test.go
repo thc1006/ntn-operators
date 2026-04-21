@@ -12,6 +12,7 @@ package metrics_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -19,6 +20,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	ntnv1alpha1 "github.com/thc1006/ntn-operators/api/v1alpha1"
+	"github.com/thc1006/ntn-operators/pkg/netutil"
 	"github.com/thc1006/ntn-operators/pkg/slice/metrics"
 )
 
@@ -143,6 +145,40 @@ func TestProvider_NilPool_PanicsAtConstruction(t *testing.T) {
 		}
 	}()
 	_ = metrics.NewProvider(nil)
+}
+
+func TestProvider_WithAllowlist_AcceptsListedHost(t *testing.T) {
+	allow := netutil.ParseEndpointAllowlist("prom.example.com")
+	p := metrics.NewProvider(metrics.NewClientPool(), metrics.WithEndpointAllowlist(allow))
+	ns := prometheusCR("http://prom.example.com:9090")
+	if _, err := p.For(ns); err != nil {
+		t.Fatalf("allowlisted host must be accepted, got %v", err)
+	}
+}
+
+func TestProvider_WithAllowlist_RejectsUnlistedHost(t *testing.T) {
+	allow := netutil.ParseEndpointAllowlist("prom.example.com")
+	p := metrics.NewProvider(metrics.NewClientPool(), metrics.WithEndpointAllowlist(allow))
+	ns := prometheusCR("http://evil.attacker.com:9090")
+	_, err := p.For(ns)
+	if err == nil {
+		t.Fatal("unlisted host must be rejected")
+	}
+	if !errors.Is(err, netutil.ErrEndpointNotAllowed) {
+		t.Errorf("want wrapped ErrEndpointNotAllowed, got %v", err)
+	}
+}
+
+func TestProvider_ZeroValueAllowlist_IsPermitAll(t *testing.T) {
+	// Default constructor with no options gets a zero-value allowlist,
+	// which keeps the pre-flag permit-all behaviour for single-tenant
+	// deployments — nothing breaks for admins who don't care about
+	// endpoint restriction.
+	p := metrics.NewProvider(metrics.NewClientPool())
+	ns := prometheusCR("http://some.random.host:9090")
+	if _, err := p.For(ns); err != nil {
+		t.Fatalf("zero-value allowlist must be permit-all, got %v", err)
+	}
 }
 
 func TestProvider_PrometheusMode_EmptyUID_IsRejected(t *testing.T) {

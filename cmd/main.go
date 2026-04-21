@@ -92,6 +92,12 @@ func main() {
 	var maxConcurrentReconciles int
 	flag.IntVar(&maxConcurrentReconciles, "max-concurrent-reconciles", 1,
 		"Maximum number of concurrent reconciles per controller.")
+	var prometheusAllowedHosts string
+	flag.StringVar(&prometheusAllowedHosts, "prometheus-allowed-endpoint-hosts", "",
+		"Comma-separated list of hostnames that NTNSlice.spec.metricsSource.prometheus.endpoint "+
+			"is allowed to target. Empty (default) is permit-all, which matches the pre-flag "+
+			"behaviour for single-tenant deployments. Set this in multi-tenant clusters so a "+
+			"tenant cannot aim the operator at arbitrary cluster-internal services.")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -238,7 +244,8 @@ func main() {
 	// keyed by endpoint, and one Provider that picks the right Reader
 	// (annotations | prometheus) based on each NTNSlice spec.
 	metricsPool := slicemetrics.NewClientPool()
-	metricsProvider := slicemetrics.NewProvider(metricsPool)
+	metricsProvider := slicemetrics.NewProvider(metricsPool,
+		slicemetrics.WithEndpointAllowlist(netutil.ParseEndpointAllowlist(prometheusAllowedHosts)))
 	if err := (&controller.NTNSliceReconciler{
 		Client:                  mgr.GetClient(),
 		Scheme:                  mgr.GetScheme(),
