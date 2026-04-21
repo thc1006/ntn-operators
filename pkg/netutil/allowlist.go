@@ -54,10 +54,15 @@ type EndpointAllowlist struct {
 // entries and surrounding whitespace are ignored. Hostnames are
 // normalised to lower case for DNS-equivalent matching.
 //
-// The parser is intentionally minimal: it does not accept schemes,
-// paths, ports, or glob patterns. Admins who need multiple forms
-// (short name vs FQDN) list each one explicitly; this is more typing
-// but has no ambiguity.
+// The parser is intentionally minimal: it does not validate token
+// structure beyond trimming whitespace and lowercasing. Entries are
+// treated literally, so an admin who accidentally writes
+// "https://prom.example.com" or "prom.example.com:9090" will store
+// that whole string as the key and Check will never match a real
+// Hostname against it — the NTNSlice will be rejected with
+// EndpointNotAllowed until the flag is fixed. Admins should provide
+// bare hostnames only; if multiple forms are needed (short name vs
+// FQDN), list each one explicitly.
 func ParseEndpointAllowlist(csv string) EndpointAllowlist {
 	if csv == "" {
 		return EndpointAllowlist{}

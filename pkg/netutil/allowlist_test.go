@@ -74,7 +74,7 @@ func TestEndpointAllowlist_SchemeRestricted(t *testing.T) {
 		"ftp://prom.monitoring.svc",
 	} {
 		if err := a.Check(url); err == nil {
-			t.Errorf("scheme %q must be rejected even with empty allowlist", url)
+			t.Errorf("URL %q must be rejected even with empty allowlist", url)
 		}
 	}
 }
@@ -137,11 +137,10 @@ func TestEndpointAllowlist_HostMatchIsCaseInsensitive(t *testing.T) {
 }
 
 func TestEndpointAllowlist_WhitespaceAndEmptyEntries_AreIgnored(t *testing.T) {
-	// ",prom.example.com,  ,https://other.com," should parse to one
-	// useful entry and silently drop the blanks. The stray "https://"
-	// prefix on the second entry is kept as-is — the parser is not
-	// trying to be smart about user mistakes, it only normalises
-	// whitespace + case.
+	// "  ,prom.example.com,   ,  " should parse to one useful entry
+	// and silently drop the blank slots between the commas. The parser
+	// only normalises whitespace and case; it is not smart about
+	// further user mistakes (see the godoc for why).
 	a := netutil.ParseEndpointAllowlist("  ,prom.example.com,   ,  ")
 	if err := a.Check("http://prom.example.com"); err != nil {
 		t.Errorf("valid entry rejected: %v", err)
