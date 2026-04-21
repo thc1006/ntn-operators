@@ -5,6 +5,8 @@
 
 Kubernetes-native management framework for Non-Terrestrial Networks (NTN). Declaratively manage satellite constellations, ground stations, NTN cell configurations, and terrestrial-satellite failover — all through standard Kubernetes CRDs.
 
+> **Latest release:** [v0.4.0-rc.1](https://github.com/thc1006/ntn-operators/releases/tag/v0.4.0-rc.1) — Prometheus metrics integration, OLM bundle, signal hysteresis, cosign/SBOM supply chain. See [CHANGELOG.md](CHANGELOG.md) for the v0.2 → v0.3 → v0.4 additions.
+
 ## Custom Resource Definitions
 
 | CRD | Short Name | Description |
@@ -57,13 +59,13 @@ graph TB
 
 **Failover engine**: NTNSlice evaluates trigger conditions (RSRP, latency, packet loss) and manages terrestrial-satellite path switching with configurable switchback delay. QoS, security, and billing parameters are tracked per active path.
 
-**Validation**: CRD-level CEL validation rules enforce constraints (lat/lon range, SpaceTrack requires credentials, path priority consistency, ECEF non-zero) without webhook infrastructure.
+**Validation**: 12 CEL `XValidation` rules cover most constraints at admission (lat/lon range, path priority consistency, MetricsSource shape, ECEF non-zero, credentials when SpaceTrack); a lightweight validating webhook handles cross-field rules CEL cannot express, e.g., `FailoverPolicy.triggers` syntax.
 
 ## Quick Start
 
 ### Prerequisites
 
-- Go 1.25+
+- Go 1.26+
 - Kubernetes 1.29+ (for CEL validation)
 - kubectl
 - Helm v3.16+ (optional, for Helm-based install)
@@ -227,6 +229,9 @@ The operator exports custom metrics at `:8443/metrics`:
 | `ntn_operators_config_apply_errors_total` | Counter | Cell config apply failures |
 | `ntn_operators_gp_fetch_duration_seconds` | Histogram | GP data fetch duration |
 | `ntn_operators_gp_satellite_count` | Gauge | Satellites from latest fetch |
+| `ntn_operators_reader_query_duration_seconds` | Histogram | Per-query metrics reader latency, by source + outcome |
+| `ntn_operators_reader_errors_total` | Counter | Metrics-reader failures, by source + reason |
+| `ntn_operators_reader_stale_value_used_total` | Counter | Reconciles served from the stale cache, per slice |
 
 ## SpaceTrack Integration
 
@@ -291,13 +296,13 @@ hack/                   # Demo and setup scripts
 docs/                   # API reference (auto-generated)
 ```
 
-## Known Limitations (v0.1)
+## Known Limitations
 
-- **Metrics source**: Failover trigger metrics are read from CR annotations (`ntn.operators.dev/simulated-*`). Production UPF/Prometheus integration is planned for v0.2.
-- **Antenna health**: `AntennaReady` condition is simulated as True when the node exists. Real hardware integration requires vendor-specific agents.
-- **Session continuity**: The `sessionContinuity` field is tracked but not enforced at the data plane level.
-- **Providers**: Only OCUDU is implemented. Additional providers may be added in future releases.
+- **Antenna health**: `AntennaReady` is still simulated as True when the node exists; real hardware agents are tracked for v1.0 ([#68](https://github.com/thc1006/ntn-operators/issues/68)).
+- **Session continuity**: The `sessionContinuity` spec field is tracked but not yet enforced at the data plane — paused ([#69](https://github.com/thc1006/ntn-operators/issues/69)).
+- **Providers**: Only OCUDU is implemented; OAI gNB support is tracked for v1.0 ([#65](https://github.com/thc1006/ntn-operators/issues/65)).
 - **Firmware updates**: The controller monitors node annotations for firmware versions but does not directly trigger OTA. An external agent on the node manages the actual update.
+- **Metrics source**: `spec.metricsSource=annotations` is still the default for backward compatibility. Production deployments should set `spec.metricsSource.type=prometheus` (see CHANGELOG for the pluggable reader layer shipped in #67).
 
 ## Grafana Dashboard
 
