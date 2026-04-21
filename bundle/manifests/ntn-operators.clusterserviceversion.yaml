@@ -47,11 +47,11 @@ metadata:
       ]
     categories: Networking
     capabilities: Full Lifecycle
-    containerImage: ghcr.io/thc1006/ntn-operators:v0.1.0
+    containerImage: ghcr.io/thc1006/ntn-operators:v0.4.0-rc.1
     repository: https://github.com/thc1006/ntn-operators
     createdAt: "2026-04-15T00:00:00Z"
     support: thc1006
-  name: ntn-operators.v0.1.0
+  name: ntn-operators.v0.4.0-rc.1
   namespace: placeholder
 spec:
   apiservicedefinitions: {}
@@ -138,7 +138,7 @@ spec:
               spec:
                 containers:
                   - name: manager
-                    image: ghcr.io/thc1006/ntn-operators:v0.1.0
+                    image: ghcr.io/thc1006/ntn-operators:v0.4.0-rc.1
                     args:
                       - --leader-elect
                       - --health-probe-bind-address=:8081
@@ -208,4 +208,11 @@ spec:
   provider:
     name: ntn-operators
     url: https://github.com/thc1006/ntn-operators
-  version: 0.1.0
+  # skipRange, not replaces: no v0.1.0 CSV was ever published to an
+  # OperatorHub catalog (the bundle infrastructure landed in PR #91,
+  # after the v0.1.0 tag). An explicit `replaces:` would therefore
+  # point OLM at a CSV it cannot find, failing the install. skipRange
+  # says "this CSV can take over from anything older than itself" and
+  # is safe whether or not an older CSV exists in the catalog.
+  skipRange: "<0.4.0-rc.1"
+  version: 0.4.0-rc.1

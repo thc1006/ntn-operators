@@ -136,6 +136,12 @@ jobs:
         uses: softprops/action-gh-release@c95fe17002a23e40138e5b0a4023b830a3e108c4 # v3.0.0
         with:
           generate_release_notes: true
+          # Any SemVer tag with a pre-release identifier (the "-xxx"
+          # suffix) is flagged as a pre-release, so it does not show up
+          # as "Latest" on the Releases page and Helm OCI consumers can
+          # skip it via version constraints. Matches -rc / -beta /
+          # -alpha / -dev / -snapshot / etc. in one expression.
+          prerelease: ${{ contains(github.ref_name, '-') }}
           files: |
             ntn-operators-${{ steps.version.outputs.VERSION }}.tgz
             sbom.spdx.json
