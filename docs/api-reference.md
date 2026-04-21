@@ -295,7 +295,8 @@ firmware defines OTA update configuration.
         <td><b>maintenanceWindow</b></td>
         <td>string</td>
         <td>
-          maintenanceWindow is the time window for updates (e.g., "02:00-04:00 UTC").<br/>
+          maintenanceWindow is the time window for updates.
+Format: "HH:MM-HH:MM UTC" (e.g., "02:00-04:00 UTC").<br/>
         </td>
         <td>false</td>
       </tr></tbody>
@@ -492,7 +493,7 @@ with respect to the current state of the instance.<br/>
 
 
 NTNCellConfig manages NTN-specific radio parameters for a gNB cell,
-delegating configuration to the specified NTN backend provider (OCUDU, OAI, Aalyria).
+delegating configuration to the specified NTN backend provider.
 
 <table>
     <thead>
@@ -560,7 +561,7 @@ NTNCellConfigSpec defines the desired NTN cell configuration.
         <td>
           ntn contains NTN-specific radio parameters per 3GPP TS 38.213 / OCUDU geo_ntn.yml.<br/>
           <br/>
-            <i>Validations</i>:<li>self.ephemerisECEF.posX != 0 || self.ephemerisECEF.posY != 0 || self.ephemerisECEF.posZ != 0: ephemerisECEF position must not be all zeros</li>
+            <i>Validations</i>:<li>has(self.ephemerisECEF) || has(self.ephemerisOrbital): exactly one of ephemerisECEF or ephemerisOrbital must be set</li><li>!(has(self.ephemerisECEF) && has(self.ephemerisOrbital)): ephemerisECEF and ephemerisOrbital are mutually exclusive</li><li>!has(self.ephemerisECEF) || self.ephemerisECEF.posX != 0 || self.ephemerisECEF.posY != 0 || self.ephemerisECEF.posZ != 0: ephemerisECEF position must not be all zeros</li>
         </td>
         <td>true</td>
       </tr><tr>
@@ -575,6 +576,17 @@ NTNCellConfigSpec defines the desired NTN cell configuration.
         <td>object</td>
         <td>
           cellOverrides allows fine-tuning PUCCH, PDSCH, PRACH, and RRC parameters.<br/>
+        </td>
+        <td>false</td>
+      </tr><tr>
+        <td><b>ephemerisRef</b></td>
+        <td>string</td>
+        <td>
+          ephemerisRef is the name of a SatelliteEphemeris CR in the same namespace.
+When set, the controller re-reconciles this NTNCellConfig whenever the
+referenced SatelliteEphemeris is updated and invokes runtime ephemeris push
+on the provider reconcile path. The static ephemeris in spec.ntn
+(ephemerisECEF or ephemerisOrbital) remains required as the source payload.<br/>
         </td>
         <td>false</td>
       </tr></tbody>
@@ -598,13 +610,6 @@ ntn contains NTN-specific radio parameters per 3GPP TS 38.213 / OCUDU geo_ntn.ym
         </tr>
     </thead>
     <tbody><tr>
-        <td><b><a href="#ntncellconfigspecntnephemerisecef">ephemerisECEF</a></b></td>
-        <td>object</td>
-        <td>
-          ephemerisECEF defines the satellite position and velocity in ECEF coordinates.<br/>
-        </td>
-        <td>true</td>
-      </tr><tr>
         <td><b>cellSpecificKoffset</b></td>
         <td>integer</td>
         <td>
@@ -613,6 +618,79 @@ ntn contains NTN-specific radio parameters per 3GPP TS 38.213 / OCUDU geo_ntn.ym
             <i>Default</i>: 150<br/>
             <i>Minimum</i>: 0<br/>
             <i>Maximum</i>: 1023<br/>
+        </td>
+        <td>false</td>
+      </tr><tr>
+        <td><b>distanceThreshold</b></td>
+        <td>integer</td>
+        <td>
+          distanceThreshold sets the distance threshold for cell
+selection in metres.<br/>
+          <br/>
+            <i>Minimum</i>: 0<br/>
+        </td>
+        <td>false</td>
+      </tr><tr>
+        <td><b><a href="#ntncellconfigspecntnephemerisecef">ephemerisECEF</a></b></td>
+        <td>object</td>
+        <td>
+          ephemerisECEF defines the satellite position and velocity in ECEF coordinates.
+Mutually exclusive with ephemerisOrbital.<br/>
+        </td>
+        <td>false</td>
+      </tr><tr>
+        <td><b><a href="#ntncellconfigspecntnephemerisorbital">ephemerisOrbital</a></b></td>
+        <td>object</td>
+        <td>
+          ephemerisOrbital defines the satellite orbit using Keplerian elements.
+Mutually exclusive with ephemerisECEF. Preferred for LEO satellites
+where source data is in OMM/TLE form (CelesTrak, SpaceTrack).<br/>
+        </td>
+        <td>false</td>
+      </tr><tr>
+        <td><b><a href="#ntncellconfigspecntnepochtime">epochTime</a></b></td>
+        <td>object</td>
+        <td>
+          epochTime defines the SFN/subframe reference for NTN timing alignment.<br/>
+        </td>
+        <td>false</td>
+      </tr><tr>
+        <td><b><a href="#ntncellconfigspecntnfeederlinkinfo">feederLinkInfo</a></b></td>
+        <td>object</td>
+        <td>
+          feederLinkInfo provides feeder link parameters for Doppler compensation.<br/>
+        </td>
+        <td>false</td>
+      </tr><tr>
+        <td><b><a href="#ntncellconfigspecntnmovingreflocation">movingRefLocation</a></b></td>
+        <td>object</td>
+        <td>
+          movingRefLocation defines the Earth-moving reference location for LEO NTN cells.
+3GPP Release 18 SIB19 field. Used by UEs for timing/Doppler estimation.<br/>
+        </td>
+        <td>false</td>
+      </tr><tr>
+        <td><b><a href="#ntncellconfigspecntnneighborcellsindex">neighborCells</a></b></td>
+        <td>[]object</td>
+        <td>
+          neighborCells lists neighbor NTN cells for measurement/handover.
+OCUDU YAML renders as "ncells:" for compatibility.<br/>
+        </td>
+        <td>false</td>
+      </tr><tr>
+        <td><b><a href="#ntncellconfigspecntnntngatewaylocation">ntnGatewayLocation</a></b></td>
+        <td>object</td>
+        <td>
+          ntnGatewayLocation specifies the NTN gateway (ground station) coordinates.<br/>
+        </td>
+        <td>false</td>
+      </tr><tr>
+        <td><b>ntnUlSyncValidityDur</b></td>
+        <td>integer</td>
+        <td>
+          ntnUlSyncValidityDur sets the UL synchronization validity duration in seconds.<br/>
+          <br/>
+            <i>Enum</i>: 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 120, 180, 240, 900<br/>
         </td>
         <td>false</td>
       </tr><tr>
@@ -626,6 +704,42 @@ ntn contains NTN-specific radio parameters per 3GPP TS 38.213 / OCUDU geo_ntn.ym
         </td>
         <td>false</td>
       </tr><tr>
+        <td><b><a href="#ntncellconfigspecntnpolarization">polarization</a></b></td>
+        <td>object</td>
+        <td>
+          polarization specifies the antenna polarization for downlink and uplink.
+Per 3GPP TS 38.331 SIB19, ntn-PolarizationDL-r17 and ntn-PolarizationUL-r17
+are independent IEs. OCUDU collapses them under a single `polarization:` map
+with `dl:` / `ul:` sub-keys, matching this CRD layout.<br/>
+          <br/>
+            <i>Validations</i>:<li>has(self.dl) || has(self.ul): at least one of dl or ul must be set</li>
+        </td>
+        <td>false</td>
+      </tr><tr>
+        <td><b><a href="#ntncellconfigspecntnreferencelocation">referenceLocation</a></b></td>
+        <td>object</td>
+        <td>
+          referenceLocation defines the NTN cell reference location.<br/>
+        </td>
+        <td>false</td>
+      </tr><tr>
+        <td><b><a href="#ntncellconfigspecntnsatswitchwithresync">satSwitchWithResync</a></b></td>
+        <td>object</td>
+        <td>
+          satSwitchWithResync provides satellite switch handover hints to UEs during
+satellite-to-satellite transitions. 3GPP Release 18 SIB19 field.<br/>
+        </td>
+        <td>false</td>
+      </tr><tr>
+        <td><b>tService</b></td>
+        <td>integer</td>
+        <td>
+          tService sets the expected NTN service duration in seconds.<br/>
+          <br/>
+            <i>Minimum</i>: 1<br/>
+        </td>
+        <td>false</td>
+      </tr><tr>
         <td><b>taCommon</b></td>
         <td>integer</td>
         <td>
@@ -634,6 +748,21 @@ ntn contains NTN-specific radio parameters per 3GPP TS 38.213 / OCUDU geo_ntn.ym
             <i>Default</i>: 0<br/>
             <i>Minimum</i>: 0<br/>
             <i>Maximum</i>: 6.6485757e+07<br/>
+        </td>
+        <td>false</td>
+      </tr><tr>
+        <td><b><a href="#ntncellconfigspecntntainfo">taInfo</a></b></td>
+        <td>object</td>
+        <td>
+          taInfo provides extended Timing Advance parameters per 3GPP TS 38.213.
+When set, taInfo.taCommon takes precedence over the top-level taCommon field.<br/>
+        </td>
+        <td>false</td>
+      </tr><tr>
+        <td><b>taReport</b></td>
+        <td>boolean</td>
+        <td>
+          taReport enables UE TA reporting.<br/>
         </td>
         <td>false</td>
       </tr></tbody>
@@ -646,6 +775,7 @@ ntn contains NTN-specific radio parameters per 3GPP TS 38.213 / OCUDU geo_ntn.ym
 
 
 ephemerisECEF defines the satellite position and velocity in ECEF coordinates.
+Mutually exclusive with ephemerisOrbital.
 
 <table>
     <thead>
@@ -717,6 +847,475 @@ ephemerisECEF defines the satellite position and velocity in ECEF coordinates.
 </table>
 
 
+### NTNCellConfig.spec.ntn.ephemerisOrbital
+<sup><sup>[↩ Parent](#ntncellconfigspecntn)</sup></sup>
+
+
+
+ephemerisOrbital defines the satellite orbit using Keplerian elements.
+Mutually exclusive with ephemerisECEF. Preferred for LEO satellites
+where source data is in OMM/TLE form (CelesTrak, SpaceTrack).
+
+<table>
+    <thead>
+        <tr>
+            <th>Name</th>
+            <th>Type</th>
+            <th>Description</th>
+            <th>Required</th>
+        </tr>
+    </thead>
+    <tbody><tr>
+        <td><b>argOfPeriapsis</b></td>
+        <td>integer</td>
+        <td>
+          argOfPeriapsis is the argument of periapsis in 1e-4 degrees (0-3600000).<br/>
+          <br/>
+            <i>Minimum</i>: 0<br/>
+            <i>Maximum</i>: 3.6e+06<br/>
+        </td>
+        <td>true</td>
+      </tr><tr>
+        <td><b>eccentricity</b></td>
+        <td>integer</td>
+        <td>
+          eccentricity is the orbital eccentricity scaled by 1e6 (0-999999 for e < 1.0).<br/>
+          <br/>
+            <i>Minimum</i>: 0<br/>
+            <i>Maximum</i>: 999999<br/>
+        </td>
+        <td>true</td>
+      </tr><tr>
+        <td><b>inclination</b></td>
+        <td>integer</td>
+        <td>
+          inclination is the orbital inclination in 1e-4 degrees (0-1800000 = 0°-180°).<br/>
+          <br/>
+            <i>Minimum</i>: 0<br/>
+            <i>Maximum</i>: 1.8e+06<br/>
+        </td>
+        <td>true</td>
+      </tr><tr>
+        <td><b>meanAnomaly</b></td>
+        <td>integer</td>
+        <td>
+          meanAnomaly is the mean anomaly in 1e-4 degrees (0-3600000).<br/>
+          <br/>
+            <i>Minimum</i>: 0<br/>
+            <i>Maximum</i>: 3.6e+06<br/>
+        </td>
+        <td>true</td>
+      </tr><tr>
+        <td><b>rightAscension</b></td>
+        <td>integer</td>
+        <td>
+          rightAscension is the right ascension of the ascending node in 1e-4 degrees (0-3600000).<br/>
+          <br/>
+            <i>Minimum</i>: 0<br/>
+            <i>Maximum</i>: 3.6e+06<br/>
+        </td>
+        <td>true</td>
+      </tr><tr>
+        <td><b>semiMajorAxis</b></td>
+        <td>integer</td>
+        <td>
+          semiMajorAxis is the semi-major axis in metres.<br/>
+          <br/>
+            <i>Minimum</i>: 6.37e+06<br/>
+        </td>
+        <td>true</td>
+      </tr></tbody>
+</table>
+
+
+### NTNCellConfig.spec.ntn.epochTime
+<sup><sup>[↩ Parent](#ntncellconfigspecntn)</sup></sup>
+
+
+
+epochTime defines the SFN/subframe reference for NTN timing alignment.
+
+<table>
+    <thead>
+        <tr>
+            <th>Name</th>
+            <th>Type</th>
+            <th>Description</th>
+            <th>Required</th>
+        </tr>
+    </thead>
+    <tbody><tr>
+        <td><b>sfn</b></td>
+        <td>integer</td>
+        <td>
+          sfn is the System Frame Number (0-1023).<br/>
+          <br/>
+            <i>Minimum</i>: 0<br/>
+            <i>Maximum</i>: 1023<br/>
+        </td>
+        <td>true</td>
+      </tr><tr>
+        <td><b>subframeNumber</b></td>
+        <td>integer</td>
+        <td>
+          subframeNumber is the subframe within the SFN (0-9).<br/>
+          <br/>
+            <i>Minimum</i>: 0<br/>
+            <i>Maximum</i>: 9<br/>
+        </td>
+        <td>true</td>
+      </tr></tbody>
+</table>
+
+
+### NTNCellConfig.spec.ntn.feederLinkInfo
+<sup><sup>[↩ Parent](#ntncellconfigspecntn)</sup></sup>
+
+
+
+feederLinkInfo provides feeder link parameters for Doppler compensation.
+
+<table>
+    <thead>
+        <tr>
+            <th>Name</th>
+            <th>Type</th>
+            <th>Description</th>
+            <th>Required</th>
+        </tr>
+    </thead>
+    <tbody><tr>
+        <td><b>dlFreqHz</b></td>
+        <td>integer</td>
+        <td>
+          dlFreqHz is the downlink frequency in Hz. Required when feederLinkInfo is set.<br/>
+          <br/>
+            <i>Format</i>: int64<br/>
+            <i>Minimum</i>: 1<br/>
+        </td>
+        <td>true</td>
+      </tr><tr>
+        <td><b>enableDopplerCompensation</b></td>
+        <td>boolean</td>
+        <td>
+          enableDopplerCompensation enables feeder link Doppler compensation.<br/>
+        </td>
+        <td>true</td>
+      </tr><tr>
+        <td><b>ulFreqHz</b></td>
+        <td>integer</td>
+        <td>
+          ulFreqHz is the uplink frequency in Hz. Required when feederLinkInfo is set.<br/>
+          <br/>
+            <i>Format</i>: int64<br/>
+            <i>Minimum</i>: 1<br/>
+        </td>
+        <td>true</td>
+      </tr></tbody>
+</table>
+
+
+### NTNCellConfig.spec.ntn.movingRefLocation
+<sup><sup>[↩ Parent](#ntncellconfigspecntn)</sup></sup>
+
+
+
+movingRefLocation defines the Earth-moving reference location for LEO NTN cells.
+3GPP Release 18 SIB19 field. Used by UEs for timing/Doppler estimation.
+
+<table>
+    <thead>
+        <tr>
+            <th>Name</th>
+            <th>Type</th>
+            <th>Description</th>
+            <th>Required</th>
+        </tr>
+    </thead>
+    <tbody><tr>
+        <td><b>latitude</b></td>
+        <td>integer</td>
+        <td>
+          latitude in 1e-4 degrees (-900000 to 900000 = -90° to 90°).<br/>
+          <br/>
+            <i>Minimum</i>: -900000<br/>
+            <i>Maximum</i>: 900000<br/>
+        </td>
+        <td>true</td>
+      </tr><tr>
+        <td><b>longitude</b></td>
+        <td>integer</td>
+        <td>
+          longitude in 1e-4 degrees (-1800000 to 1800000 = -180° to 180°).<br/>
+          <br/>
+            <i>Minimum</i>: -1.8e+06<br/>
+            <i>Maximum</i>: 1.8e+06<br/>
+        </td>
+        <td>true</td>
+      </tr></tbody>
+</table>
+
+
+### NTNCellConfig.spec.ntn.neighborCells[index]
+<sup><sup>[↩ Parent](#ntncellconfigspecntn)</sup></sup>
+
+
+
+NTNNeighborCell describes a neighbor NTN cell.
+
+<table>
+    <thead>
+        <tr>
+            <th>Name</th>
+            <th>Type</th>
+            <th>Description</th>
+            <th>Required</th>
+        </tr>
+    </thead>
+    <tbody><tr>
+        <td><b>physicalCellID</b></td>
+        <td>integer</td>
+        <td>
+          physicalCellID of the neighbor (0-1007).<br/>
+          <br/>
+            <i>Minimum</i>: 0<br/>
+            <i>Maximum</i>: 1007<br/>
+        </td>
+        <td>true</td>
+      </tr><tr>
+        <td><b>frequency</b></td>
+        <td>integer</td>
+        <td>
+          frequency is the neighbor cell's ARFCN (NR-ARFCN, always >= 1).<br/>
+          <br/>
+            <i>Minimum</i>: 1<br/>
+        </td>
+        <td>false</td>
+      </tr></tbody>
+</table>
+
+
+### NTNCellConfig.spec.ntn.ntnGatewayLocation
+<sup><sup>[↩ Parent](#ntncellconfigspecntn)</sup></sup>
+
+
+
+ntnGatewayLocation specifies the NTN gateway (ground station) coordinates.
+
+<table>
+    <thead>
+        <tr>
+            <th>Name</th>
+            <th>Type</th>
+            <th>Description</th>
+            <th>Required</th>
+        </tr>
+    </thead>
+    <tbody><tr>
+        <td><b>altitude</b></td>
+        <td>integer</td>
+        <td>
+          altitude in metres above sea level. Required when ntnGatewayLocation is set.<br/>
+        </td>
+        <td>true</td>
+      </tr><tr>
+        <td><b>latitude</b></td>
+        <td>integer</td>
+        <td>
+          latitude in 1e-4 degrees (-900000 to 900000).<br/>
+          <br/>
+            <i>Minimum</i>: -900000<br/>
+            <i>Maximum</i>: 900000<br/>
+        </td>
+        <td>true</td>
+      </tr><tr>
+        <td><b>longitude</b></td>
+        <td>integer</td>
+        <td>
+          longitude in 1e-4 degrees (-1800000 to 1800000).<br/>
+          <br/>
+            <i>Minimum</i>: -1.8e+06<br/>
+            <i>Maximum</i>: 1.8e+06<br/>
+        </td>
+        <td>true</td>
+      </tr></tbody>
+</table>
+
+
+### NTNCellConfig.spec.ntn.polarization
+<sup><sup>[↩ Parent](#ntncellconfigspecntn)</sup></sup>
+
+
+
+polarization specifies the antenna polarization for downlink and uplink.
+Per 3GPP TS 38.331 SIB19, ntn-PolarizationDL-r17 and ntn-PolarizationUL-r17
+are independent IEs. OCUDU collapses them under a single `polarization:` map
+with `dl:` / `ul:` sub-keys, matching this CRD layout.
+
+<table>
+    <thead>
+        <tr>
+            <th>Name</th>
+            <th>Type</th>
+            <th>Description</th>
+            <th>Required</th>
+        </tr>
+    </thead>
+    <tbody><tr>
+        <td><b>dl</b></td>
+        <td>enum</td>
+        <td>
+          dl is the downlink polarization broadcast in SIB19 ntn-PolarizationDL-r17.<br/>
+          <br/>
+            <i>Enum</i>: rhcp, lhcp, linear<br/>
+        </td>
+        <td>false</td>
+      </tr><tr>
+        <td><b>ul</b></td>
+        <td>enum</td>
+        <td>
+          ul is the uplink polarization broadcast in SIB19 ntn-PolarizationUL-r17.<br/>
+          <br/>
+            <i>Enum</i>: rhcp, lhcp, linear<br/>
+        </td>
+        <td>false</td>
+      </tr></tbody>
+</table>
+
+
+### NTNCellConfig.spec.ntn.referenceLocation
+<sup><sup>[↩ Parent](#ntncellconfigspecntn)</sup></sup>
+
+
+
+referenceLocation defines the NTN cell reference location.
+
+<table>
+    <thead>
+        <tr>
+            <th>Name</th>
+            <th>Type</th>
+            <th>Description</th>
+            <th>Required</th>
+        </tr>
+    </thead>
+    <tbody><tr>
+        <td><b>latitude</b></td>
+        <td>integer</td>
+        <td>
+          latitude in 1e-4 degrees (-900000 to 900000).<br/>
+          <br/>
+            <i>Minimum</i>: -900000<br/>
+            <i>Maximum</i>: 900000<br/>
+        </td>
+        <td>true</td>
+      </tr><tr>
+        <td><b>longitude</b></td>
+        <td>integer</td>
+        <td>
+          longitude in 1e-4 degrees (-1800000 to 1800000).<br/>
+          <br/>
+            <i>Minimum</i>: -1.8e+06<br/>
+            <i>Maximum</i>: 1.8e+06<br/>
+        </td>
+        <td>true</td>
+      </tr></tbody>
+</table>
+
+
+### NTNCellConfig.spec.ntn.satSwitchWithResync
+<sup><sup>[↩ Parent](#ntncellconfigspecntn)</sup></sup>
+
+
+
+satSwitchWithResync provides satellite switch handover hints to UEs during
+satellite-to-satellite transitions. 3GPP Release 18 SIB19 field.
+
+<table>
+    <thead>
+        <tr>
+            <th>Name</th>
+            <th>Type</th>
+            <th>Description</th>
+            <th>Required</th>
+        </tr>
+    </thead>
+    <tbody><tr>
+        <td><b>t304</b></td>
+        <td>integer</td>
+        <td>
+          t304 is the handover timer value in milliseconds per 3GPP TS 38.331.<br/>
+          <br/>
+            <i>Enum</i>: 50, 100, 150, 200, 500, 1000, 2000, 10000<br/>
+        </td>
+        <td>true</td>
+      </tr><tr>
+        <td><b>targetPCI</b></td>
+        <td>integer</td>
+        <td>
+          targetPCI is the Physical Cell Identity of the target cell after switch (0-1007).<br/>
+          <br/>
+            <i>Minimum</i>: 0<br/>
+            <i>Maximum</i>: 1007<br/>
+        </td>
+        <td>true</td>
+      </tr></tbody>
+</table>
+
+
+### NTNCellConfig.spec.ntn.taInfo
+<sup><sup>[↩ Parent](#ntncellconfigspecntn)</sup></sup>
+
+
+
+taInfo provides extended Timing Advance parameters per 3GPP TS 38.213.
+When set, taInfo.taCommon takes precedence over the top-level taCommon field.
+
+<table>
+    <thead>
+        <tr>
+            <th>Name</th>
+            <th>Type</th>
+            <th>Description</th>
+            <th>Required</th>
+        </tr>
+    </thead>
+    <tbody><tr>
+        <td><b>taCommon</b></td>
+        <td>integer</td>
+        <td>
+          taCommon is the common Timing Advance value (0-66485757). Required when
+taInfo is set — explicitly provide 0 for GEO satellites.<br/>
+          <br/>
+            <i>Minimum</i>: 0<br/>
+            <i>Maximum</i>: 6.6485757e+07<br/>
+        </td>
+        <td>true</td>
+      </tr><tr>
+        <td><b>taCommonDrift</b></td>
+        <td>integer</td>
+        <td>
+          taCommonDrift is the TA drift rate.<br/>
+        </td>
+        <td>false</td>
+      </tr><tr>
+        <td><b>taCommonDriftVariant</b></td>
+        <td>integer</td>
+        <td>
+          taCommonDriftVariant is the TA drift rate variant.<br/>
+        </td>
+        <td>false</td>
+      </tr><tr>
+        <td><b>taCommonOffset</b></td>
+        <td>integer</td>
+        <td>
+          taCommonOffset is an additional TA offset.<br/>
+        </td>
+        <td>false</td>
+      </tr></tbody>
+</table>
+
+
 ### NTNCellConfig.spec.provider
 <sup><sup>[↩ Parent](#ntncellconfigspec)</sup></sup>
 
@@ -737,9 +1336,9 @@ provider specifies which NTN backend to configure.
         <td><b>type</b></td>
         <td>enum</td>
         <td>
-          type is the provider type.<br/>
+          type is the provider type. Currently only "ocudu" is supported.<br/>
           <br/>
-            <i>Enum</i>: ocudu, oai, aalyria<br/>
+            <i>Enum</i>: ocudu<br/>
         </td>
         <td>true</td>
       </tr><tr>
@@ -801,6 +1400,71 @@ cellOverrides allows fine-tuning PUCCH, PDSCH, PRACH, and RRC parameters.
           rrcGuardTimeMs sets the RRC procedure guard time in ms.<br/>
           <br/>
             <i>Default</i>: 12800<br/>
+        </td>
+        <td>false</td>
+      </tr><tr>
+        <td><b><a href="#ntncellconfigspeccelloverridessibschedule">sibSchedule</a></b></td>
+        <td>object</td>
+        <td>
+          sibSchedule tunes SIB19 broadcast scheduling. Any unset sub-field
+falls back to the defaults (siWindowLength=5, siPeriod=16,
+siWindowPosition=1). Tune when PDCCH capacity is tight or when
+SIB19 broadcast cadence needs to track short ntn-UlSyncValidityDur.<br/>
+        </td>
+        <td>false</td>
+      </tr></tbody>
+</table>
+
+
+### NTNCellConfig.spec.cellOverrides.sibSchedule
+<sup><sup>[↩ Parent](#ntncellconfigspeccelloverrides)</sup></sup>
+
+
+
+sibSchedule tunes SIB19 broadcast scheduling. Any unset sub-field
+falls back to the defaults (siWindowLength=5, siPeriod=16,
+siWindowPosition=1). Tune when PDCCH capacity is tight or when
+SIB19 broadcast cadence needs to track short ntn-UlSyncValidityDur.
+
+<table>
+    <thead>
+        <tr>
+            <th>Name</th>
+            <th>Type</th>
+            <th>Description</th>
+            <th>Required</th>
+        </tr>
+    </thead>
+    <tbody><tr>
+        <td><b>siPeriod</b></td>
+        <td>integer</td>
+        <td>
+          siPeriod is the SIB19 broadcast period in radio frames.
+Shorter periods keep UEs' NTN assistance fresh but cost air time.<br/>
+          <br/>
+            <i>Enum</i>: 8, 16, 32, 64, 128, 256, 512<br/>
+        </td>
+        <td>false</td>
+      </tr><tr>
+        <td><b>siWindowLength</b></td>
+        <td>integer</td>
+        <td>
+          siWindowLength is the SI window length in slots. OCUDU accepts
+the standard set; picking a larger value increases PDCCH pressure.<br/>
+          <br/>
+            <i>Enum</i>: 5, 10, 20, 40, 80, 160, 320, 640, 1280<br/>
+        </td>
+        <td>false</td>
+      </tr><tr>
+        <td><b>siWindowPosition</b></td>
+        <td>integer</td>
+        <td>
+          siWindowPosition is the slot offset within the SI period. Adjust
+to avoid collision with SIB1/SIB2 scheduling windows. Pointer so 0
+(the first slot) can be distinguished from unset.<br/>
+          <br/>
+            <i>Minimum</i>: 0<br/>
+            <i>Maximum</i>: 79<br/>
         </td>
         <td>false</td>
       </tr></tbody>
@@ -1035,6 +1699,18 @@ with terrestrial-satellite failover policy.
         </td>
         <td>false</td>
       </tr><tr>
+        <td><b><a href="#ntnslicespecmetricssource">metricsSource</a></b></td>
+        <td>object</td>
+        <td>
+          metricsSource selects where the failover engine reads path quality
+metrics (RSRP, latency, packet loss) from. When omitted, the
+controller falls back to annotation-driven simulation for backward
+compatibility with existing development deployments.<br/>
+          <br/>
+            <i>Validations</i>:<li>self.type != 'prometheus' || has(self.prometheus): prometheus block is required when type is 'prometheus'</li>
+        </td>
+        <td>false</td>
+      </tr><tr>
         <td><b><a href="#ntnslicespecqosmapping">qosMapping</a></b></td>
         <td>object</td>
         <td>
@@ -1074,9 +1750,22 @@ failoverPolicy defines when and how to switch between paths.
         <td>
           triggers defines conditions that initiate failover (OR logic).
 Format: "metric operator value" (e.g., "rsrp < -120").
-Validated at runtime by the failover engine (pkg/slice.ParseTrigger).<br/>
+Validated at runtime by the failover engine (pkg/slice.ParseTrigger).
+Order is intentionally not significant; set merge semantics are desired.<br/>
         </td>
         <td>true</td>
+      </tr><tr>
+        <td><b>hysteresisMargin</b></td>
+        <td>string</td>
+        <td>
+          hysteresisMargin is a dead-band applied to trigger thresholds
+during switchback evaluation, preventing flapping when metrics
+oscillate near the threshold. The value uses the same unit as
+the trigger (dB for RSRP, ms for latency, percent for packetLoss).
+Example: with trigger "rsrp < -120" and hysteresisMargin "10",
+failover fires at RSRP < -120, but switchback requires RSRP >= -110.<br/>
+        </td>
+        <td>false</td>
       </tr><tr>
         <td><b>sessionContinuity</b></td>
         <td>boolean</td>
@@ -1093,6 +1782,7 @@ Validated at runtime by the failover engine (pkg/slice.ParseTrigger).<br/>
           switchbackDelay is how long to wait after terrestrial recovers
 before switching back (prevents flapping).<br/>
           <br/>
+            <i>Format</i>: duration<br/>
             <i>Default</i>: 60s<br/>
         </td>
         <td>false</td>
@@ -1232,6 +1922,138 @@ billing defines CDR generation parameters.
 </table>
 
 
+### NTNSlice.spec.metricsSource
+<sup><sup>[↩ Parent](#ntnslicespec)</sup></sup>
+
+
+
+metricsSource selects where the failover engine reads path quality
+metrics (RSRP, latency, packet loss) from. When omitted, the
+controller falls back to annotation-driven simulation for backward
+compatibility with existing development deployments.
+
+<table>
+    <thead>
+        <tr>
+            <th>Name</th>
+            <th>Type</th>
+            <th>Description</th>
+            <th>Required</th>
+        </tr>
+    </thead>
+    <tbody><tr>
+        <td><b><a href="#ntnslicespecmetricssourceprometheus">prometheus</a></b></td>
+        <td>object</td>
+        <td>
+          prometheus configures the Prometheus HTTP API backend.
+Required when type is 'prometheus'.<br/>
+          <br/>
+            <i>Validations</i>:<li>size(self.queries.rsrpDbm) > 0 || size(self.queries.latencyMs) > 0 || size(self.queries.packetLossPercent) > 0: at least one query must be non-empty</li>
+        </td>
+        <td>false</td>
+      </tr><tr>
+        <td><b>type</b></td>
+        <td>enum</td>
+        <td>
+          type is the backend kind.<br/>
+          <br/>
+            <i>Enum</i>: annotations, prometheus<br/>
+            <i>Default</i>: annotations<br/>
+        </td>
+        <td>false</td>
+      </tr></tbody>
+</table>
+
+
+### NTNSlice.spec.metricsSource.prometheus
+<sup><sup>[↩ Parent](#ntnslicespecmetricssource)</sup></sup>
+
+
+
+prometheus configures the Prometheus HTTP API backend.
+Required when type is 'prometheus'.
+
+<table>
+    <thead>
+        <tr>
+            <th>Name</th>
+            <th>Type</th>
+            <th>Description</th>
+            <th>Required</th>
+        </tr>
+    </thead>
+    <tbody><tr>
+        <td><b>endpoint</b></td>
+        <td>string</td>
+        <td>
+          endpoint is the base URL of the Prometheus HTTP API.<br/>
+        </td>
+        <td>true</td>
+      </tr><tr>
+        <td><b><a href="#ntnslicespecmetricssourceprometheusqueries">queries</a></b></td>
+        <td>object</td>
+        <td>
+          queries holds the PromQL expressions for each observable metric.<br/>
+        </td>
+        <td>true</td>
+      </tr><tr>
+        <td><b>queryTimeout</b></td>
+        <td>string</td>
+        <td>
+          queryTimeout limits the wall-clock time spent on each individual
+PromQL fetch; the controller issues up to three fetches per
+reconcile (one per metric), so the upper bound for a Read is
+roughly 3x this value. Defaults to 2s when unset.<br/>
+          <br/>
+            <i>Format</i>: duration<br/>
+        </td>
+        <td>false</td>
+      </tr></tbody>
+</table>
+
+
+### NTNSlice.spec.metricsSource.prometheus.queries
+<sup><sup>[↩ Parent](#ntnslicespecmetricssourceprometheus)</sup></sup>
+
+
+
+queries holds the PromQL expressions for each observable metric.
+
+<table>
+    <thead>
+        <tr>
+            <th>Name</th>
+            <th>Type</th>
+            <th>Description</th>
+            <th>Required</th>
+        </tr>
+    </thead>
+    <tbody><tr>
+        <td><b>latencyMs</b></td>
+        <td>string</td>
+        <td>
+          latencyMs is a PromQL expression returning a scalar in milliseconds.<br/>
+        </td>
+        <td>false</td>
+      </tr><tr>
+        <td><b>packetLossPercent</b></td>
+        <td>string</td>
+        <td>
+          packetLossPercent is a PromQL expression returning a scalar in
+percent (0-100).<br/>
+        </td>
+        <td>false</td>
+      </tr><tr>
+        <td><b>rsrpDbm</b></td>
+        <td>string</td>
+        <td>
+          rsrpDbm is a PromQL expression returning a scalar in dBm.<br/>
+        </td>
+        <td>false</td>
+      </tr></tbody>
+</table>
+
+
 ### NTNSlice.spec.qosMapping
 <sup><sup>[↩ Parent](#ntnslicespec)</sup></sup>
 
@@ -1255,6 +2077,7 @@ qosMapping defines QoS parameter mapping between paths.
           maxLatencyBudget is the maximum acceptable latency including
 satellite propagation delay.<br/>
           <br/>
+            <i>Format</i>: duration<br/>
             <i>Default</i>: 150ms<br/>
         </td>
         <td>false</td>
@@ -1600,6 +2423,7 @@ source defines where to fetch GP (General Perturbations) data.
           refreshInterval is how often to re-fetch GP data.
 CelesTrak updates every 2 hours; setting this below 2h wastes bandwidth.<br/>
           <br/>
+            <i>Format</i>: duration<br/>
             <i>Default</i>: 4h<br/>
         </td>
         <td>true</td>
