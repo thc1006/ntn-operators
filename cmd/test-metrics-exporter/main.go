@@ -26,14 +26,49 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"log"
 	"net/http"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 )
+
+// buildSimulator validates positive durations and returns a Simulator
+// anchored at now. Extracted so main() and unit tests see the same
+// guard logic — a zero or negative interval would otherwise silently
+// short-circuit the simulator to degradedMetrics on every scrape.
+// If both flags are bad, both are reported in one error so an admin
+// does not have to re-run the binary to find the second mistake.
+func buildSimulator(pass, gap time.Duration) (Simulator, error) {
+	var problems []string
+	if pass <= 0 {
+		problems = append(problems, fmt.Sprintf("pass-duration must be positive, got %s", pass))
+	}
+	if gap <= 0 {
+		problems = append(problems, fmt.Sprintf("gap-duration must be positive, got %s", gap))
+	}
+	if len(problems) > 0 {
+		return Simulator{}, errors.New(strings.Join(problems, "; "))
+	}
+	return Simulator{Start: time.Now(), PassDuration: pass, GapDuration: gap}, nil
+}
+
+// newMux assembles the public HTTP surface of the exporter: /metrics
+// serves the Prometheus handler, /healthz is a minimal liveness probe.
+// Lifted out of main() so tests can exercise the routing table without
+// spawning a real listener.
+func newMux(handler *Handler) *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", handler)
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	return mux
+}
 
 func main() {
 	var (
@@ -45,26 +80,15 @@ func main() {
 	)
 	flag.Parse()
 
-	if *passDuration <= 0 || *gapDuration <= 0 {
-		log.Fatalf("pass-duration and gap-duration must both be positive; got pass=%s gap=%s", *passDuration, *gapDuration)
-	}
-
-	sim := Simulator{
-		Start:        time.Now(),
-		PassDuration: *passDuration,
-		GapDuration:  *gapDuration,
+	sim, err := buildSimulator(*passDuration, *gapDuration)
+	if err != nil {
+		log.Fatalf("invalid flag: %v", err)
 	}
 	handler := NewHandler(prometheus.NewRegistry(), sim, *namespace, *slice, time.Now)
 
-	mux := http.NewServeMux()
-	mux.Handle("/metrics", handler)
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	})
-
 	srv := &http.Server{
 		Addr:              *listen,
-		Handler:           mux,
+		Handler:           newMux(handler),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
