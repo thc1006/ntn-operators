@@ -2,7 +2,7 @@
 # instead of the annotation-based simulation default.
 #
 # See docs/design/metrics-source.md for the design and
-# docs/runbooks/e2e-prometheus-metrics.md for the L340 walkthrough.
+# docs/runbooks/e2e-prometheus-metrics.md for a runnable walkthrough.
 #
 # Prerequisites:
 #   - A reachable Prometheus (in-cluster Service or external URL).

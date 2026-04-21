@@ -59,7 +59,7 @@ graph TB
 
 **Failover engine**: NTNSlice evaluates trigger conditions (RSRP, latency, packet loss) and manages terrestrial-satellite path switching with configurable switchback delay. QoS, security, and billing parameters are tracked per active path.
 
-**Validation**: 12 CEL `XValidation` rules cover most constraints at admission (lat/lon range, path priority consistency, MetricsSource shape, ECEF non-zero, credentials when SpaceTrack); a lightweight validating webhook handles cross-field rules CEL cannot express, e.g., `FailoverPolicy.triggers` syntax.
+**Validation**: CEL `XValidation` rules cover most constraints at admission (lat/lon range, path priority consistency, MetricsSource shape, ECEF non-zero, credentials when SpaceTrack). When the optional validating webhook is enabled (`webhooks.enable=true` in the Helm chart; off by default), it additionally enforces cross-field rules CEL cannot express — notably `FailoverPolicy.triggers` syntax. With the webhook disabled, invalid trigger syntax is caught at runtime by the failover engine instead.
 
 ## Quick Start
 
@@ -302,7 +302,7 @@ docs/                   # API reference (auto-generated)
 - **Session continuity**: The `sessionContinuity` spec field is tracked but not yet enforced at the data plane — paused ([#69](https://github.com/thc1006/ntn-operators/issues/69)).
 - **Providers**: Only OCUDU is implemented; OAI gNB support is tracked for v1.0 ([#65](https://github.com/thc1006/ntn-operators/issues/65)).
 - **Firmware updates**: The controller monitors node annotations for firmware versions but does not directly trigger OTA. An external agent on the node manages the actual update.
-- **Metrics source**: `spec.metricsSource=annotations` is still the default for backward compatibility. Production deployments should set `spec.metricsSource.type=prometheus` (see CHANGELOG for the pluggable reader layer shipped in #67).
+- **Metrics source**: `spec.metricsSource.type=annotations` (or omitting the `metricsSource` block entirely) is the default for backward compatibility. Production deployments should set `spec.metricsSource.type=prometheus` — see `config/samples/ntn_v1alpha1_ntnslice_prometheus.yaml` for a copy-pasteable example and the CHANGELOG for the pluggable reader layer shipped in #67.
 
 ## Grafana Dashboard
 
