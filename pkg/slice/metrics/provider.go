@@ -165,6 +165,15 @@ func (p *Provider) Evict(key client.ObjectKey) {
 }
 
 func (p *Provider) buildReader(src *ntnv1alpha1.PrometheusMetricsSource) (Reader, error) {
+	// Defence in depth: CEL at admission already rejects an all-empty
+	// queries block, but a CRD schema downgrade or a direct status-
+	// subresource edit could route such a spec through here. Left
+	// unchecked, prometheusReader would hand back defaultMetrics on
+	// every Read — the exact "healthy defaults on failure" behaviour
+	// D1 exists to prevent. Refuse at runtime.
+	if src.Queries.RsrpDbm == "" && src.Queries.LatencyMs == "" && src.Queries.PacketLossPercent == "" {
+		return nil, errors.New("provider: prometheus mode requires at least one non-empty query")
+	}
 	qclient, err := p.pool.Get(src.Endpoint)
 	if err != nil {
 		return nil, err

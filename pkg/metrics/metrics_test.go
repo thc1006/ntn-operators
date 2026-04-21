@@ -48,9 +48,9 @@ func TestMetricsRegistered(t *testing.T) {
 		"ntn_operators_config_apply_errors_total",
 		"ntn_operators_gp_fetch_duration_seconds",
 		"ntn_operators_gp_satellite_count",
-		"ntn_metrics_reader_query_duration_seconds",
-		"ntn_metrics_reader_errors_total",
-		"ntn_metrics_reader_stale_value_used_total",
+		"ntn_operators_reader_query_duration_seconds",
+		"ntn_operators_reader_errors_total",
+		"ntn_operators_reader_stale_value_used_total",
 	}
 	gathered := make(map[string]bool)
 	for _, f := range families {

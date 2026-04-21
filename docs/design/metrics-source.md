@@ -196,12 +196,12 @@ New collectors added to `pkg/metrics`, registered with the
 controller-runtime registry alongside the pre-existing operator
 metrics:
 
-- `ntn_metrics_reader_query_duration_seconds{source,outcome}` —
+- `ntn_operators_reader_query_duration_seconds{source,outcome}` —
   histogram, one observation per PromQL fetch (not per Read)
-- `ntn_metrics_reader_errors_total{source,reason}` — counter, bounded
+- `ntn_operators_reader_errors_total{source,reason}` — counter, bounded
   labels (reasons: `query_error`, `empty_vector`, `ambiguous_vector`,
   `non_finite`, `unsupported_type`)
-- `ntn_metrics_reader_stale_value_used_total{namespace,name}` —
+- `ntn_operators_reader_stale_value_used_total{namespace,name}` —
   counter, one series per NTNSlice that has ever been served stale;
   evicted when the reconciler observes NotFound for the CR
 

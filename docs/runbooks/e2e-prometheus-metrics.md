@@ -199,13 +199,13 @@ kubectl get events --field-selector involvedObject.name=e2e-slice --watch
 
 ## 8. Observe the operator's own Prometheus metrics
 
-The operator exports `ntn_metrics_reader_*` and
+The operator exports `ntn_operators_reader_*` and
 `ntn_operators_failover_total` on `:8443/metrics` (or whatever you
 configured). For a quick read without TLS, use
 `--metrics-secure=false --metrics-bind-address=:8080` at startup:
 
 ```bash
-curl -s localhost:8080/metrics | grep ntn_metrics_reader
+curl -s localhost:8080/metrics | grep ntn_operators_reader
 ```
 
 ## 9. Teardown

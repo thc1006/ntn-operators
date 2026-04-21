@@ -89,7 +89,7 @@ var (
 	// reconciles.
 	ReaderQueryDuration = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
-			Name: "ntn_metrics_reader_query_duration_seconds",
+			Name: "ntn_operators_reader_query_duration_seconds",
 			Help: "Duration of a single PromQL fetch by a metrics reader, in seconds.",
 			// Upper bucket matches the default per-query timeout
 			// (pkg/slice/metrics.defaultPrometheusTimeout = 2s); any
@@ -107,7 +107,7 @@ var (
 	// ambiguous_vector, non_finite, unsupported_type).
 	ReaderErrorsTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
-			Name: "ntn_metrics_reader_errors_total",
+			Name: "ntn_operators_reader_errors_total",
 			Help: "Count of metrics reader errors by source and reason.",
 		},
 		[]string{"source", "reason"},
@@ -125,7 +125,7 @@ var (
 	// operator's current working set rather than growing monotonically.
 	ReaderStaleUsedTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
-			Name: "ntn_metrics_reader_stale_value_used_total",
+			Name: "ntn_operators_reader_stale_value_used_total",
 			Help: "Count of reconciles per slice in which the reader served a stale cached value.",
 		},
 		[]string{"namespace", "name"},
