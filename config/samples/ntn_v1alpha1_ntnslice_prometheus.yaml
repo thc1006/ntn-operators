@@ -1,0 +1,58 @@
+# NTNSlice that reads failover metrics from a real Prometheus instance
+# instead of the annotation-based simulation default.
+#
+# See docs/design/metrics-source.md for the design and
+# docs/runbooks/e2e-prometheus-metrics.md for the L340 walkthrough.
+#
+# Prerequisites:
+#   - A reachable Prometheus (in-cluster Service or external URL).
+#   - PromQL expressions that return a single scalar per metric. Queries
+#     returning multiple samples are rejected (ambiguous_vector) to keep
+#     failover decisions deterministic.
+apiVersion: ntn.operators.dev/v1alpha1
+kind: NTNSlice
+metadata:
+  name: enterprise-prometheus-slice
+spec:
+  tenant: acme-corp
+  terrestrialPath:
+    provider: chunghwa-telecom
+    apn: internet
+    priority: primary
+  satellitePath:
+    provider: oneweb
+    priority: failover
+    ephemerisRef: oneweb-constellation
+  failoverPolicy:
+    triggers:
+      - "rsrp < -120"
+      - "latency > 200"
+      - "packetLoss > 5"
+    switchbackDelay: 60s
+    sessionContinuity: true
+    hysteresisMargin: "10"
+  metricsSource:
+    # Default is "annotations" (backward compatible).
+    # "prometheus" activates the pluggable reader chain shipped in #67.
+    type: prometheus
+    prometheus:
+      # Any http(s) URL. For multi-tenant clusters, restrict the set of
+      # reachable hosts via the operator flag
+      #   --prometheus-allowed-endpoint-hosts=prom.monitoring.svc,prom.example.com
+      endpoint: http://prometheus.monitoring.svc:9090
+      # Upper bound on ONE PromQL fetch (not the whole Read). The reader
+      # issues up to three fetches per reconcile, so the Read's worst
+      # case is roughly 3x this value. Default when unset is 2s.
+      queryTimeout: 2s
+      queries:
+        # Leave any query empty ("") to fall back to the default for
+        # that metric; at least one must be non-empty (CEL-enforced).
+        rsrpDbm: 'avg(ue_rsrp_dbm{slice="enterprise-prometheus-slice"})'
+        latencyMs: 'histogram_quantile(0.95, sum(rate(upf_n3_rtt_seconds_bucket{slice="enterprise-prometheus-slice"}[1m])) by (le)) * 1000'
+        packetLossPercent: '100 * sum(rate(upf_packet_drop_total{slice="enterprise-prometheus-slice"}[1m])) / sum(rate(upf_packet_total{slice="enterprise-prometheus-slice"}[1m]))'
+  qosMapping:
+    terrestrial5QI: 9
+    satelliteQCI: best-effort
+  security:
+    encryptionLevel: AES-256
+    authOnHandover: re-authenticate
