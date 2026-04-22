@@ -74,18 +74,22 @@ var _ = Describe("Manager", Ordered, func() {
 		_, err = utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred(), "Failed to deploy the controller-manager")
 
-		// Patch the manager Deployment args so the SSRF-safe HTTP client
-		// lets the operator reach the in-cluster CelesTrak mock. The flag
-		// is appended with a strategic-merge patch on the container's
-		// args array — NO-OP for anything except the SatelliteEphemeris
-		// GP fetcher, which is the only call site that consults this
-		// allowlist today. See #105 for the full motivation.
+		// Patch the manager Deployment so the SSRF-safe HTTP client lets
+		// the operator reach the in-cluster CelesTrak mock. Uses a JSON
+		// patch `add` with the `/-` array-append token so we don't clobber
+		// args injected by kustomize (e.g. `--metrics-bind-address=:8443`
+		// from config/default/manager_metrics_patch.yaml, which later
+		// metrics assertions depend on). See #105.
 		By("patching the manager to allow the celestrak-mock hostname")
-		patch := fmt.Sprintf(`{"spec":{"template":{"spec":{"containers":[{"name":"manager","args":[`+
-			`"--leader-elect","--health-probe-bind-address=:8081",`+
-			`"--ephemeris-allowed-private-hosts=%s"]}]}}}}`, celestrakMockHost)
+		patchOps := []map[string]string{{
+			"op":    "add",
+			"path":  "/spec/template/spec/containers/0/args/-",
+			"value": fmt.Sprintf("--ephemeris-allowed-private-hosts=%s", celestrakMockHost),
+		}}
+		patchBytes, err := json.Marshal(patchOps)
+		Expect(err).NotTo(HaveOccurred(), "Failed to build JSON patch for manager args")
 		cmd = exec.Command("kubectl", "patch", "deployment", "ntn-operators-controller-manager",
-			"-n", namespace, "--type=strategic", "-p", patch)
+			"-n", namespace, "--type=json", "-p", string(patchBytes))
 		_, err = utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred(), "Failed to patch manager with --ephemeris-allowed-private-hosts")
 

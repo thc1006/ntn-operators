@@ -85,17 +85,21 @@ type safeClientOpts struct {
 type Option func(*safeClientOpts)
 
 // WithPrivateHostAllowlist exempts the listed hostnames from the
-// private-IP block. Exact, case-insensitive match on the Host header
-// of the outgoing request; does NOT affect the base SSRF rules for
-// hosts outside the list. Production deployments should leave this
-// empty; admins opt in only for trusted internal mirrors.
+// private-IP block. Exact, case-insensitive match on the dial target
+// hostname (for the initial dial) and the redirect target's URL
+// hostname (for CheckRedirect) — NOT the HTTP Host header, which
+// `net/http` allows to diverge from the URL host. Does NOT affect
+// the base SSRF rules for hosts outside the list. Production
+// deployments should leave this empty; admins opt in only for
+// trusted internal mirrors.
 //
 // Threat model: an attacker who controls a URL in a user-facing CR
 // can still only hit hosts the admin has pre-approved. The allowlist
 // is consulted after hostname extraction (so `http://attacker@mirror/`
 // still fails — userinfo is already rejected upstream by Check) and
-// applies to BOTH the initial dial and any redirect follow-up, so an
-// attacker cannot smuggle an internal IP through a 302.
+// applies to BOTH the initial dial target hostname and any redirect
+// follow-up request URL hostname, so an attacker cannot smuggle an
+// internal IP through a 302.
 func WithPrivateHostAllowlist(allow EndpointAllowlist) Option {
 	return func(o *safeClientOpts) {
 		o.privateHostAllowlist = allow
