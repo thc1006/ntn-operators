@@ -79,6 +79,24 @@ func ParseEndpointAllowlist(csv string) EndpointAllowlist {
 	return EndpointAllowlist{hosts: hosts}
 }
 
+// ContainsHost reports whether a bare hostname is in the allowlist.
+// It lowercases the input for DNS-equivalent matching (allowlist hosts
+// are stored lowercased by ParseEndpointAllowlist). Unlike Check, this
+// method does no URL parsing and is intended for the transport-level
+// dialer which has already split host:port and needs to decide
+// whether to bypass an IP-range check for a specific hostname.
+//
+// Returns false for the empty allowlist — callers must decide whether
+// empty means "permit all" (the Check semantic for user-supplied URLs)
+// or "permit nothing" (the dialer semantic: empty list = no private
+// hosts are whitelisted, default SSRF rule applies).
+func (a EndpointAllowlist) ContainsHost(host string) bool {
+	if len(a.hosts) == 0 {
+		return false
+	}
+	return slices.Contains(a.hosts, strings.ToLower(host))
+}
+
 // Check validates raw and returns nil if the URL is acceptable, or an
 // error wrapping ErrEndpointNotAllowed with a reason suitable for
 // logging and kubectl describe.

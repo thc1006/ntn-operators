@@ -70,15 +70,50 @@ func IsPrivateIP(ip net.IP) bool {
 // ErrPrivateIP is returned when a dial attempts to connect to a private IP.
 var ErrPrivateIP = fmt.Errorf("connection to private/reserved IP address is blocked")
 
+// safeClientOpts holds optional configuration for NewSafeHTTPClient.
+// See the Option functions below for the supported knobs.
+type safeClientOpts struct {
+	// privateHostAllowlist lists hostnames whose resolved private/
+	// reserved IPs should NOT be blocked. Intended for corporate mirror
+	// deployments (e.g. `celestrak.internal.corp.com`) and E2E test
+	// setups that route fetches through an in-cluster mock Service.
+	// The default (empty) preserves the strict SSRF posture.
+	privateHostAllowlist EndpointAllowlist
+}
+
+// Option configures NewSafeHTTPClient behaviour.
+type Option func(*safeClientOpts)
+
+// WithPrivateHostAllowlist exempts the listed hostnames from the
+// private-IP block. Exact, case-insensitive match on the Host header
+// of the outgoing request; does NOT affect the base SSRF rules for
+// hosts outside the list. Production deployments should leave this
+// empty; admins opt in only for trusted internal mirrors.
+//
+// Threat model: an attacker who controls a URL in a user-facing CR
+// can still only hit hosts the admin has pre-approved. The allowlist
+// is consulted after hostname extraction (so `http://attacker@mirror/`
+// still fails — userinfo is already rejected upstream by Check) and
+// applies to BOTH the initial dial and any redirect follow-up, so an
+// attacker cannot smuggle an internal IP through a 302.
+func WithPrivateHostAllowlist(allow EndpointAllowlist) Option {
+	return func(o *safeClientOpts) {
+		o.privateHostAllowlist = allow
+	}
+}
+
 // safeDialContext creates a DialContext function that validates resolved IPs
-// against private/reserved ranges before connecting.
-func safeDialContext(dialer *net.Dialer) func(ctx context.Context, network, addr string) (net.Conn, error) {
+// against private/reserved ranges before connecting. Hosts in privateAllowed
+// bypass the private-IP check (but every other rule — DNS resolvability,
+// non-empty address set — still applies).
+func safeDialContext(dialer *net.Dialer, privateAllowed EndpointAllowlist) func(ctx context.Context, network, addr string) (net.Conn, error) {
 	return func(ctx context.Context, network, addr string) (net.Conn, error) {
 		log := logr.FromContextOrDiscard(ctx)
 		host, port, err := net.SplitHostPort(addr)
 		if err != nil {
 			return nil, fmt.Errorf("invalid address %q: %w", addr, err)
 		}
+		hostAllowed := privateAllowed.ContainsHost(host)
 
 		// Resolve DNS to get actual IP addresses.
 		ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
@@ -88,13 +123,20 @@ func safeDialContext(dialer *net.Dialer) func(ctx context.Context, network, addr
 		if len(ips) == 0 {
 			return nil, fmt.Errorf("DNS resolution for %q returned no addresses", host)
 		}
-		log.V(2).Info("resolved outbound host", "host", host, "ipCount", len(ips))
+		log.V(2).Info("resolved outbound host", "host", host, "ipCount", len(ips), "hostAllowed", hostAllowed)
 
-		// Validate ALL resolved IPs before connecting.
-		for _, ipAddr := range ips {
-			if IsPrivateIP(ipAddr.IP) {
-				log.V(1).Info("blocked outbound dial to private/reserved IP", "host", host, "ip", ipAddr.IP.String())
-				return nil, fmt.Errorf("%w: %s resolves to %s", ErrPrivateIP, host, ipAddr.IP)
+		// Validate ALL resolved IPs before connecting. Hosts in the
+		// private-host allowlist bypass this check — intended for
+		// trusted internal mirrors and E2E mock servers. Note that a
+		// public hostname that resolves to a private IP via DNS
+		// rebinding is still blocked unless the admin explicitly
+		// allow-listed it.
+		if !hostAllowed {
+			for _, ipAddr := range ips {
+				if IsPrivateIP(ipAddr.IP) {
+					log.V(1).Info("blocked outbound dial to private/reserved IP", "host", host, "ip", ipAddr.IP.String())
+					return nil, fmt.Errorf("%w: %s resolves to %s", ErrPrivateIP, host, ipAddr.IP)
+				}
 			}
 		}
 
@@ -115,24 +157,38 @@ func safeDialContext(dialer *net.Dialer) func(ctx context.Context, network, addr
 // NewSafeHTTPClient creates an HTTP client that rejects connections to
 // private/reserved IP addresses at the TCP dial level, preventing SSRF
 // even against DNS rebinding attacks.
-func NewSafeHTTPClient(timeout time.Duration) *http.Client {
+//
+// Optional functional knobs (e.g. WithPrivateHostAllowlist) let admins
+// exempt specific trusted hostnames; the default is strict-block.
+func NewSafeHTTPClient(timeout time.Duration, opts ...Option) *http.Client {
+	cfg := safeClientOpts{}
+	for _, opt := range opts {
+		opt(&cfg)
+	}
 	dialer := &net.Dialer{Timeout: 5 * time.Second}
 
 	// Clone DefaultTransport to preserve proxy, connection pooling, and TLS settings.
 	transport := http.DefaultTransport.(*http.Transport).Clone()
-	transport.DialContext = safeDialContext(dialer)
+	transport.DialContext = safeDialContext(dialer, cfg.privateHostAllowlist)
 
 	return &http.Client{
 		Timeout:   timeout,
 		Transport: transport,
-		// Validate redirect targets against private IP ranges (defense in depth).
+		// Validate redirect targets against private IP ranges (defense in
+		// depth). The same allowlist applies here so an internal mirror
+		// that 302s to another internal host (within the allowlist) still
+		// works; a public host that 302s to a private IP outside the
+		// allowlist is still blocked.
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			log := logr.FromContextOrDiscard(req.Context())
 			if len(via) >= 3 {
 				return fmt.Errorf("too many redirects")
 			}
-			// Resolve the redirect target and reject private IPs.
 			host := req.URL.Hostname()
+			if cfg.privateHostAllowlist.ContainsHost(host) {
+				log.V(2).Info("redirect target in private-host allowlist", "host", host)
+				return nil
+			}
 			ips, err := net.DefaultResolver.LookupIPAddr(req.Context(), host)
 			if err != nil {
 				return fmt.Errorf("cannot resolve redirect target %q: %w", host, err)

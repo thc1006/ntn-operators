@@ -73,6 +73,27 @@ var _ = Describe("Manager", Ordered, func() {
 		cmd = exec.Command("make", "deploy", fmt.Sprintf("IMG=%s", managerImage))
 		_, err = utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred(), "Failed to deploy the controller-manager")
+
+		// Patch the manager Deployment args so the SSRF-safe HTTP client
+		// lets the operator reach the in-cluster CelesTrak mock. The flag
+		// is appended with a strategic-merge patch on the container's
+		// args array — NO-OP for anything except the SatelliteEphemeris
+		// GP fetcher, which is the only call site that consults this
+		// allowlist today. See #105 for the full motivation.
+		By("patching the manager to allow the celestrak-mock hostname")
+		patch := fmt.Sprintf(`{"spec":{"template":{"spec":{"containers":[{"name":"manager","args":[`+
+			`"--leader-elect","--health-probe-bind-address=:8081",`+
+			`"--ephemeris-allowed-private-hosts=%s"]}]}}}}`, celestrakMockHost)
+		cmd = exec.Command("kubectl", "patch", "deployment", "ntn-operators-controller-manager",
+			"-n", namespace, "--type=strategic", "-p", patch)
+		_, err = utils.Run(cmd)
+		Expect(err).NotTo(HaveOccurred(), "Failed to patch manager with --ephemeris-allowed-private-hosts")
+
+		By("waiting for the patched manager to roll out")
+		cmd = exec.Command("kubectl", "rollout", "status", "--timeout=60s",
+			"deployment/ntn-operators-controller-manager", "-n", namespace)
+		_, err = utils.Run(cmd)
+		Expect(err).NotTo(HaveOccurred(), "Manager rollout after patch did not complete")
 	})
 
 	// After all tests have been executed, clean up by undeploying the controller, uninstalling CRDs,
@@ -294,7 +315,7 @@ var _ = Describe("Manager", Ordered, func() {
 
 			By("creating a SatelliteEphemeris resource")
 			cmd = exec.Command("kubectl", "apply", "-n", testNS, "-f",
-				filepath.Join("config", "samples", "ntn_v1alpha1_satelliteephemeris.yaml"))
+				filepath.Join("test", "e2e", "fixtures", "satelliteephemeris-e2e.yaml"))
 			_, err = utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred())
 			DeferCleanup(func() {
@@ -431,7 +452,7 @@ var _ = Describe("Manager", Ordered, func() {
 
 			By("creating a SatelliteEphemeris resource")
 			cmd = exec.Command("kubectl", "apply", "-n", testNS, "-f",
-				filepath.Join("config", "samples", "ntn_v1alpha1_satelliteephemeris.yaml"))
+				filepath.Join("test", "e2e", "fixtures", "satelliteephemeris-e2e.yaml"))
 			_, err = utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred())
 			DeferCleanup(func() {

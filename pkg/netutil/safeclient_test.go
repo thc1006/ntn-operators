@@ -159,7 +159,7 @@ func TestNewSafeHTTPClient_ContextCancelled(t *testing.T) {
 }
 
 func TestSafeDialContext_BlocksPrivateIP(t *testing.T) {
-	dial := safeDialContext(&net.Dialer{Timeout: 2 * time.Second})
+	dial := safeDialContext(&net.Dialer{Timeout: 2 * time.Second}, EndpointAllowlist{})
 	// 127.0.0.1 is private — should be blocked.
 	_, err := dial(context.Background(), "tcp", "127.0.0.1:80")
 	if err == nil {
@@ -168,7 +168,7 @@ func TestSafeDialContext_BlocksPrivateIP(t *testing.T) {
 }
 
 func TestSafeDialContext_InvalidAddress(t *testing.T) {
-	dial := safeDialContext(&net.Dialer{Timeout: 2 * time.Second})
+	dial := safeDialContext(&net.Dialer{Timeout: 2 * time.Second}, EndpointAllowlist{})
 	_, err := dial(context.Background(), "tcp", "no-port")
 	if err == nil {
 		t.Fatal("expected error for invalid address (no port)")
@@ -177,7 +177,7 @@ func TestSafeDialContext_InvalidAddress(t *testing.T) {
 
 func TestSafeDialContext_AllIPsFail(t *testing.T) {
 	// Connect to a public IP on a port that won't respond (fast timeout).
-	dial := safeDialContext(&net.Dialer{Timeout: 100 * time.Millisecond})
+	dial := safeDialContext(&net.Dialer{Timeout: 100 * time.Millisecond}, EndpointAllowlist{})
 	_, err := dial(context.Background(), "tcp", "8.8.8.8:1") // port 1 won't respond
 	if err == nil {
 		t.Fatal("expected error when all IPs fail to connect")
@@ -188,7 +188,7 @@ func TestSafeDialContext_AllIPsFail(t *testing.T) {
 }
 
 func TestSafeDialContext_DNSFailure(t *testing.T) {
-	dial := safeDialContext(&net.Dialer{Timeout: 2 * time.Second})
+	dial := safeDialContext(&net.Dialer{Timeout: 2 * time.Second}, EndpointAllowlist{})
 	_, err := dial(context.Background(), "tcp", "this-domain-does-not-exist-xyz123.invalid:80")
 	if err == nil {
 		t.Fatal("expected error for DNS failure")
@@ -201,6 +201,149 @@ func TestErrPrivateIP_IsSentinel(t *testing.T) {
 	if !errors.Is(wrapped, ErrPrivateIP) {
 		t.Error("errors.Is should match wrapped ErrPrivateIP")
 	}
+}
+
+// TestNewSafeHTTPClient_PrivateHostAllowlist verifies that a host listed
+// in the private-host allowlist bypasses the IP-range block, while hosts
+// not on the list remain blocked. Mirrors the E2E use case where the
+// operator fetches from an in-cluster mock Service (ClusterIP in 10.x).
+func TestNewSafeHTTPClient_PrivateHostAllowlist(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprint(w, "ok")
+	}))
+	defer server.Close()
+	// server.URL looks like http://127.0.0.1:<port>/. The host is
+	// "127.0.0.1" (literal IP); we exercise the allowlist path by
+	// listing it.
+	parsed, _ := parseHostPort(server.URL)
+
+	t.Run("allowed host bypasses private-IP check", func(t *testing.T) {
+		allow := ParseEndpointAllowlist(parsed)
+		client := NewSafeHTTPClient(5*time.Second, WithPrivateHostAllowlist(allow))
+		resp, err := client.Get(server.URL)
+		if err != nil {
+			t.Fatalf("expected allowlist to permit %q, got: %v", parsed, err)
+		}
+		_ = resp.Body.Close()
+	})
+
+	t.Run("host not in allowlist still blocked", func(t *testing.T) {
+		allow := ParseEndpointAllowlist("some-other-host.example")
+		client := NewSafeHTTPClient(5*time.Second, WithPrivateHostAllowlist(allow))
+		_, err := client.Get(server.URL)
+		if err == nil {
+			t.Fatalf("expected private-IP block when host not in allowlist")
+		}
+	})
+
+	t.Run("empty allowlist = strict default", func(t *testing.T) {
+		client := NewSafeHTTPClient(5 * time.Second)
+		_, err := client.Get(server.URL)
+		if err == nil {
+			t.Fatal("expected private-IP block with empty allowlist")
+		}
+	})
+
+	t.Run("allowlist is case-insensitive", func(t *testing.T) {
+		allow := ParseEndpointAllowlist("LOCALHOST")
+		client := NewSafeHTTPClient(5*time.Second, WithPrivateHostAllowlist(allow))
+		// Swap 127.0.0.1 for "localhost" in the URL.
+		urlWithName := "http://localhost:" + parseHostPortOrPanic(server.URL, true)
+		resp, err := client.Get(urlWithName)
+		if err != nil {
+			t.Fatalf("case-insensitive match should permit localhost, got: %v", err)
+		}
+		_ = resp.Body.Close()
+	})
+}
+
+// TestSafeDialContext_AllowlistBypass directly exercises the dialer's
+// allowlist path without needing an HTTP round-trip.
+func TestSafeDialContext_AllowlistBypass(t *testing.T) {
+	// Spin up a listener on 127.0.0.1 so the dial can actually succeed
+	// when permitted.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer func() { _ = ln.Close() }()
+	_, port, _ := net.SplitHostPort(ln.Addr().String())
+
+	allow := ParseEndpointAllowlist("localhost")
+	dial := safeDialContext(&net.Dialer{Timeout: 2 * time.Second}, allow)
+	conn, err := dial(context.Background(), "tcp", "localhost:"+port)
+	if err != nil {
+		t.Fatalf("expected allowed localhost dial to succeed, got: %v", err)
+	}
+	_ = conn.Close()
+}
+
+// TestNewSafeHTTPClient_RedirectAllowlist — a redirect to a private host
+// that IS in the allowlist must be permitted; outside the list must be
+// blocked. Prevents an attacker from smuggling an internal IP through
+// a 302 when the initial host is also internal-allowed.
+func TestNewSafeHTTPClient_RedirectAllowlist(t *testing.T) {
+	allow := ParseEndpointAllowlist("localhost")
+	client := NewSafeHTTPClient(5*time.Second, WithPrivateHostAllowlist(allow))
+
+	t.Run("redirect to allowed host permitted", func(t *testing.T) {
+		req, _ := http.NewRequest("GET", "http://localhost/redirected", nil)
+		if err := client.CheckRedirect(req, []*http.Request{{}}); err != nil {
+			t.Fatalf("expected redirect to allowed host, got: %v", err)
+		}
+	})
+
+	t.Run("redirect to private host NOT in allowlist blocked", func(t *testing.T) {
+		req, _ := http.NewRequest("GET", "http://127.0.0.1/redirected", nil)
+		if err := client.CheckRedirect(req, []*http.Request{{}}); err == nil {
+			t.Fatal("expected redirect to non-allowlisted private host to be blocked")
+		}
+	})
+}
+
+// parseHostPort extracts the host portion of a URL like
+// "http://127.0.0.1:38491/" → "127.0.0.1".
+func parseHostPort(raw string) (string, error) {
+	// Simple parse: strip scheme + trailing path.
+	s := raw
+	if i := indexStr(s, "://"); i >= 0 {
+		s = s[i+3:]
+	}
+	if i := indexStr(s, "/"); i >= 0 {
+		s = s[:i]
+	}
+	host, _, err := net.SplitHostPort(s)
+	if err != nil {
+		return s, err
+	}
+	return host, nil
+}
+
+func parseHostPortOrPanic(raw string, wantPort bool) string {
+	s := raw
+	if i := indexStr(s, "://"); i >= 0 {
+		s = s[i+3:]
+	}
+	if i := indexStr(s, "/"); i >= 0 {
+		s = s[:i]
+	}
+	_, port, err := net.SplitHostPort(s)
+	if err != nil {
+		panic(err)
+	}
+	if wantPort {
+		return port
+	}
+	return s
+}
+
+func indexStr(s, sub string) int {
+	for i := 0; i+len(sub) <= len(s); i++ {
+		if s[i:i+len(sub)] == sub {
+			return i
+		}
+	}
+	return -1
 }
 
 func containsStr(s, sub string) bool {

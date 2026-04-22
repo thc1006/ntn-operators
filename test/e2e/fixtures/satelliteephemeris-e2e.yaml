@@ -1,0 +1,26 @@
+# E2E-only SatelliteEphemeris: points at the in-cluster celestrak-mock
+# Service instead of real celestrak.org. Used by test/e2e/e2e_test.go
+# to remove network flake from the E2E job.
+#
+# The operator must be launched with
+#   --ephemeris-allowed-private-hosts=celestrak-mock.default.svc.cluster.local
+# or this fetch will be blocked by the SSRF-safe HTTP client (the mock's
+# ClusterIP lives in 10.x private range).
+apiVersion: ntn.operators.dev/v1alpha1
+kind: SatelliteEphemeris
+metadata:
+  name: oneweb-constellation
+  namespace: default
+spec:
+  source:
+    type: CelesTrak
+    url: http://celestrak-mock.default.svc.cluster.local/gp.json
+    refreshInterval: 4h
+  satellites:
+    constellation: oneweb
+  passPrediction:
+    groundStations:
+      - gs-taipei-01
+      - gs-hsinchu-01
+    minElevation: "10"
+    horizon: 24h
