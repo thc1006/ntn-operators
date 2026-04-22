@@ -8,7 +8,18 @@ on:
       - 'pkg/**'
       - 'api/**'
       - 'cmd/**'
-      - 'config/**'
+      # config/** narrowed to subdirectories that actually affect
+      # controller behaviour. Skips config/samples/ (sample CRs) and
+      # config/grafana/ (dashboard JSON) which have zero impact on the
+      # reconciler — they used to trigger e2e on doc-only PRs and
+      # collide with CelesTrak network flake. If config/webhook/ or
+      # other controller-affecting subdirs land later, add them here.
+      - 'config/crd/**'
+      - 'config/default/**'
+      - 'config/manager/**'
+      - 'config/network-policy/**'
+      - 'config/prometheus/**'
+      - 'config/rbac/**'
       - 'test/**'
       - 'hack/**'
       - 'go.mod'
@@ -21,7 +32,12 @@ on:
       - 'pkg/**'
       - 'api/**'
       - 'cmd/**'
-      - 'config/**'
+      - 'config/crd/**'
+      - 'config/default/**'
+      - 'config/manager/**'
+      - 'config/network-policy/**'
+      - 'config/prometheus/**'
+      - 'config/rbac/**'
       - 'test/**'
       - 'hack/**'
       - 'go.mod'
