@@ -43,6 +43,15 @@ CHECKED=0
 API_CHECKS=0
 TOKEN="${GH_TOKEN:-${GITHUB_TOKEN:-}}"
 
+# If a token is present we intend to hit the GitHub API. Fail fast with
+# a clear message if `gh` is missing rather than letting every SHA check
+# fall through and mis-attribute the failure to "does not resolve".
+if [ -n "${TOKEN}" ] && ! command -v gh >/dev/null 2>&1; then
+  echo "::error::A GH_TOKEN / GITHUB_TOKEN is set but the 'gh' CLI is not available on PATH." >&2
+  echo "::error::Install https://cli.github.com/ or unset the token to fall back to offline-only checks." >&2
+  exit 2
+fi
+
 # Collect all `uses: ...` lines across *.yml (one per line). Matches both
 # block-style (`    uses: foo@sha`) and one-line step form
 # (`  - uses: foo@sha`). The `|| true` is required because `grep` returns
@@ -63,10 +72,18 @@ while IFS= read -r raw; do
   if [ -z "${USES}" ]; then
     continue
   fi
-  case "${USES}" in
-    \"*\") USES="${USES#\"}"; USES="${USES%\"}" ;;
-    \'*\') USES="${USES#\'}"; USES="${USES%\'}" ;;
-  esac
+  # Strip matched surrounding double or single quotes without relying on
+  # escaped-quote glob patterns (which some shells / reviewers find
+  # ambiguous). Using DQ/SQ variables makes the intent unambiguous.
+  DQ='"'
+  SQ="'"
+  if [ "${USES#${DQ}}" != "${USES}" ] && [ "${USES%${DQ}}" != "${USES}" ]; then
+    USES="${USES#${DQ}}"
+    USES="${USES%${DQ}}"
+  elif [ "${USES#${SQ}}" != "${USES}" ] && [ "${USES%${SQ}}" != "${USES}" ]; then
+    USES="${USES#${SQ}}"
+    USES="${USES%${SQ}}"
+  fi
 
   # Skip local and docker actions.
   case "${USES}" in
