@@ -82,15 +82,18 @@ var _ = AfterSuite(func() {
 // gets the --ephemeris-allowed-private-hosts flag in its BeforeAll so
 // its SSRF-safe client can dial the Service's private IP.
 //
-// See test/e2e/fixtures/{oneweb-gp.json,celestrak-mock.yaml,satelliteephemeris-e2e.yaml}.
+// See pkg/ephemeris/testdata/oneweb-gp.json (the fixture) and
+// test/e2e/fixtures/{celestrak-mock.yaml,satelliteephemeris-e2e.yaml}.
 func setupCelestrakMock() {
-	By("creating celestrak-mock ConfigMap from test/e2e/fixtures/oneweb-gp.json")
-	// Server-side-apply style: regenerate ConfigMap manifest from the fixture
-	// file at test-runtime so the single source of truth is the checked-in
-	// JSON (no risk of drift with an inlined YAML copy).
+	By("creating celestrak-mock ConfigMap from pkg/ephemeris/testdata/oneweb-gp.json")
+	// Server-side-apply style: regenerate ConfigMap manifest from the
+	// fixture file at test-runtime. This is the SAME file that
+	// pkg/ephemeris's unit tests embed via
+	// `//go:embed testdata/oneweb-gp.json`, so fetcher behaviour is
+	// validated against identical bytes at both the unit and E2E layers.
 	cmd := exec.Command("kubectl", "create", "configmap", "celestrak-mock-fixture",
 		"-n", "default",
-		"--from-file=gp.json=test/e2e/fixtures/oneweb-gp.json",
+		"--from-file=gp.json=pkg/ephemeris/testdata/oneweb-gp.json",
 		"--dry-run=client", "-o", "yaml")
 	cfgMapYAML, err := utils.Run(cmd)
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to build ConfigMap manifest")

@@ -18,6 +18,7 @@ package ephemeris
 
 import (
 	"context"
+	_ "embed"
 	"errors"
 	"fmt"
 	"net/http"
@@ -28,72 +29,21 @@ import (
 	"time"
 )
 
-// validOMMJSON is a minimal valid CelesTrak OMM JSON array with 3 satellites.
-const validOMMJSON = `[
-  {
-    "OBJECT_NAME": "ONEWEB-0012",
-    "OBJECT_ID": "2019-010A",
-    "EPOCH": "2026-04-15T22:27:22.252608",
-    "MEAN_MOTION": 13.1659366,
-    "ECCENTRICITY": 0.00021061,
-    "INCLINATION": 87.9064,
-    "RA_OF_ASC_NODE": 241.1509,
-    "ARG_OF_PERICENTER": 110.8263,
-    "MEAN_ANOMALY": 249.3093,
-    "EPHEMERIS_TYPE": 0,
-    "CLASSIFICATION_TYPE": "U",
-    "NORAD_CAT_ID": 44057,
-    "ELEMENT_SET_NO": 999,
-    "REV_AT_EPOCH": 34337,
-    "BSTAR": -0.00034023158,
-    "MEAN_MOTION_DOT": -1.17e-6,
-    "MEAN_MOTION_DDOT": 0
-  },
-  {
-    "OBJECT_NAME": "ONEWEB-0008",
-    "OBJECT_ID": "2019-010B",
-    "EPOCH": "2026-04-15T20:10:00.000000",
-    "MEAN_MOTION": 13.1660000,
-    "ECCENTRICITY": 0.00020000,
-    "INCLINATION": 87.9100,
-    "RA_OF_ASC_NODE": 241.2000,
-    "ARG_OF_PERICENTER": 111.0000,
-    "MEAN_ANOMALY": 250.0000,
-    "EPHEMERIS_TYPE": 0,
-    "CLASSIFICATION_TYPE": "U",
-    "NORAD_CAT_ID": 44058,
-    "ELEMENT_SET_NO": 999,
-    "REV_AT_EPOCH": 34330,
-    "BSTAR": -0.00030000,
-    "MEAN_MOTION_DOT": -1.0e-6,
-    "MEAN_MOTION_DDOT": 0
-  },
-  {
-    "OBJECT_NAME": "ONEWEB-0010",
-    "OBJECT_ID": "2019-010C",
-    "EPOCH": "2026-04-15T21:00:00.000000",
-    "MEAN_MOTION": 13.1655000,
-    "ECCENTRICITY": 0.00022000,
-    "INCLINATION": 87.9000,
-    "RA_OF_ASC_NODE": 241.1000,
-    "ARG_OF_PERICENTER": 110.5000,
-    "MEAN_ANOMALY": 248.0000,
-    "EPHEMERIS_TYPE": 0,
-    "CLASSIFICATION_TYPE": "U",
-    "NORAD_CAT_ID": 44059,
-    "ELEMENT_SET_NO": 999,
-    "REV_AT_EPOCH": 34335,
-    "BSTAR": -0.00032000,
-    "MEAN_MOTION_DOT": -1.1e-6,
-    "MEAN_MOTION_DDOT": 0
-  }
-]`
+// validOMMJSON is a minimal valid CelesTrak OMM JSON array with 3
+// satellites, embedded from pkg/ephemeris/testdata/oneweb-gp.json.
+// The same file is also mounted into the E2E mock server (see
+// test/e2e/e2e_suite_test.go setupCelestrakMock) so this fetcher's
+// unit tests and the E2E reconciler test share a single source of
+// truth — update the JSON once and both layers stay consistent.
+//
+//go:embed testdata/oneweb-gp.json
+var validOMMJSON []byte
 
 func TestFetch_Success(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("ETag", `"v1"`)
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(validOMMJSON))
+		_, _ = w.Write(validOMMJSON)
 	}))
 	t.Cleanup(server.Close)
 
@@ -132,7 +82,7 @@ func TestFetch_ETagCaching_304(t *testing.T) {
 		}
 		w.Header().Set("ETag", `"v1"`)
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(validOMMJSON))
+		_, _ = w.Write(validOMMJSON)
 	}))
 	t.Cleanup(server.Close)
 
@@ -173,7 +123,7 @@ func TestFetch_ETagCaching_NewData(t *testing.T) {
 		}
 		w.Header().Set("ETag", currentETag)
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(validOMMJSON))
+		_, _ = w.Write(validOMMJSON)
 	}))
 	t.Cleanup(server.Close)
 
@@ -266,7 +216,7 @@ func TestFetch_ContextCancelled(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(5 * time.Second) // slow response
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(validOMMJSON))
+		_, _ = w.Write(validOMMJSON)
 	}))
 	t.Cleanup(server.Close)
 
@@ -284,7 +234,7 @@ func TestFetch_ConcurrentAccess(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("ETag", `"concurrent"`)
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(validOMMJSON))
+		_, _ = w.Write(validOMMJSON)
 	}))
 	t.Cleanup(server.Close)
 
