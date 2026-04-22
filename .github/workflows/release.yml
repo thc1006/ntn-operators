@@ -4,6 +4,18 @@ on:
   push:
     tags:
       - 'v*'
+  # Manual dispatch lets us validate the build/scan pipeline without
+  # cutting a real tag. Default is dry_run=true (no image push, no
+  # Helm push, no GitHub Release). After v0.4.0-rc.1 needed four
+  # publish-time fixes (action SHAs, then Trivy CVEs), having a way
+  # to dry-run the full pipeline pre-tag is worth the small surface.
+  # Real releases still come from tag pushes.
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Skip pushing image, chart, and GitHub Release.'
+        type: boolean
+        default: true
 
 permissions:
   contents: write
@@ -39,15 +51,34 @@ jobs:
         uses: anchore/sbom-action/download-syft@f325610c9f50a54015d37c8d16cb3b0e2c8f4de0 # v0.18.0
 
       - name: Login to GHCR
+        # Skip on dispatch dry-run: nothing will be pushed.
+        # Truth table: push event → publish; dispatch dry_run=true → skip;
+        # dispatch dry_run=false → publish (with synthetic version below).
+        if: github.event_name == 'push' || inputs.dry_run == false
         uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Get version from tag
+      - name: Resolve version
         id: version
-        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            # Synthetic version for dispatch builds. The image push is
+            # gated below on dry_run=false, so this only ever lands in
+            # the registry on an explicit override — and never clobbers
+            # a real tag thanks to the SHA suffix.
+            VERSION="0.0.0-dispatch-${GITHUB_SHA::7}"
+            TAG="v${VERSION}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+            VERSION="${TAG#v}"
+          fi
+          echo "VERSION=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "TAG=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "Resolved version=${VERSION} tag=${TAG}"
 
       # --- Scan before publish: build locally, scan, then push ---
 
@@ -76,13 +107,22 @@ jobs:
       # gate; for full coverage, per-platform scanning would be needed.
 
       - name: Push multi-arch image to GHCR
+        if: github.event_name == 'push' || inputs.dry_run == false
         id: ko-push
         env:
           KO_DOCKER_REPO: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
         run: |
+          set -euo pipefail
+          # `latest` is reserved for tag pushes — dispatch builds use the
+          # synthetic SHA-suffixed tag only, never `latest`.
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAGS="${{ steps.version.outputs.TAG }}"
+          else
+            TAGS="${{ steps.version.outputs.TAG }},latest"
+          fi
           IMAGE_REF=$(ko build ./cmd/ \
             --platform=linux/amd64,linux/arm64 \
-            --tags=${{ github.ref_name }},latest \
+            --tags="${TAGS}" \
             --bare)
           echo "IMAGE_REF=${IMAGE_REF}" >> "$GITHUB_OUTPUT"
           echo "Image ref: ${IMAGE_REF}"
@@ -90,16 +130,19 @@ jobs:
       # --- Supply chain attestation: sign + SBOM ---
 
       - name: Sign image with cosign (keyless OIDC)
+        if: github.event_name == 'push' || inputs.dry_run == false
         run: cosign sign --yes --recursive ${{ steps.ko-push.outputs.IMAGE_REF }}
 
       - name: Generate SBOM (SPDX)
         # Syft resolves multi-arch ref to the runner's platform (amd64).
         # The SBOM is attached to the index digest only (not per-platform).
+        if: github.event_name == 'push' || inputs.dry_run == false
         run: |
           syft ${{ steps.ko-push.outputs.IMAGE_REF }} \
             -o spdx-json=sbom.spdx.json
 
       - name: Attest SBOM to image index
+        if: github.event_name == 'push' || inputs.dry_run == false
         run: |
           cosign attest --yes \
             --type spdxjson \
@@ -109,6 +152,7 @@ jobs:
       # --- Helm chart packaging ---
 
       - name: Install Helm
+        if: github.event_name == 'push' || inputs.dry_run == false
         env:
           HELM_VERSION: v3.17.4
         run: |
@@ -123,16 +167,19 @@ jobs:
           helm version
 
       - name: Update Chart version
+        if: github.event_name == 'push' || inputs.dry_run == false
         run: |
           sed -i "s/^version:.*/version: ${{ steps.version.outputs.VERSION }}/" dist/chart/Chart.yaml
           sed -i "s/^appVersion:.*/appVersion: \"${{ steps.version.outputs.VERSION }}\"/" dist/chart/Chart.yaml
 
       - name: Package and push Helm chart to OCI
+        if: github.event_name == 'push' || inputs.dry_run == false
         run: |
           helm package dist/chart --version ${{ steps.version.outputs.VERSION }}
           helm push ntn-operators-${{ steps.version.outputs.VERSION }}.tgz oci://${{ env.REGISTRY }}/${{ github.repository_owner }}
 
       - name: Create GitHub Release
+        if: github.event_name == 'push' || inputs.dry_run == false
         uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3.0.0
         with:
           generate_release_notes: true
@@ -141,7 +188,7 @@ jobs:
           # as "Latest" on the Releases page and Helm OCI consumers can
           # skip it via version constraints. Matches -rc / -beta /
           # -alpha / -dev / -snapshot / etc. in one expression.
-          prerelease: ${{ contains(github.ref_name, '-') }}
+          prerelease: ${{ contains(steps.version.outputs.TAG, '-') }}
           files: |
             ntn-operators-${{ steps.version.outputs.VERSION }}.tgz
             sbom.spdx.json
