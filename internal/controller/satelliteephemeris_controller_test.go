@@ -217,9 +217,19 @@ var _ = Describe("SatelliteEphemeris Controller", func() {
 		BeforeEach(func() { createResource() })
 		AfterEach(func() { deleteResource() })
 
-		It("should not update lastUpdated", func() {
+		It("should still populate satelliteCount and lastUpdated from cached OMMs", func() {
+			// A 304 response is still a successful validation that the
+			// current data is fresh — semantically we should mark the
+			// CR's status with the cached counts + "verified at" time,
+			// not leave status empty. Especially important when a new
+			// CR reuses a URL whose fetcher cache was primed by a
+			// sibling CR (reproducible in E2E via #105's mock setup).
 			mock := &mockGPFetcher{
-				result: ephemeris.GPFetchResult{NotModified: true, FetchedAt: time.Now()},
+				result: ephemeris.GPFetchResult{
+					SatelliteCount: 620,
+					NotModified:    true,
+					FetchedAt:      time.Now(),
+				},
 			}
 			reconciler := newReconciler(mock)
 
@@ -231,7 +241,13 @@ var _ = Describe("SatelliteEphemeris Controller", func() {
 
 			updated := &ntnv1alpha1.SatelliteEphemeris{}
 			Expect(k8sClient.Get(context.Background(), typeNamespacedName, updated)).To(Succeed())
-			Expect(updated.Status.LastUpdated).To(BeNil())
+			Expect(updated.Status.SatelliteCount).To(Equal(620))
+			Expect(updated.Status.LastUpdated).NotTo(BeNil())
+
+			fetchedCond := meta.FindStatusCondition(updated.Status.Conditions, ntnv1alpha1.ConditionGPDataFetched)
+			Expect(fetchedCond).NotTo(BeNil())
+			Expect(fetchedCond.Status).To(Equal(metav1.ConditionTrue))
+			Expect(fetchedCond.Reason).To(Equal("NotModified"))
 		})
 	})
 

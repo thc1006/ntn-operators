@@ -98,6 +98,14 @@ func main() {
 			"is allowed to target. Empty (default) is permit-all, which matches the pre-flag "+
 			"behaviour for single-tenant deployments. Set this in multi-tenant clusters so a "+
 			"tenant cannot aim the operator at arbitrary cluster-internal services.")
+	var ephemerisAllowedPrivateHosts string
+	flag.StringVar(&ephemerisAllowedPrivateHosts, "ephemeris-allowed-private-hosts", "",
+		"Comma-separated list of hostnames whose resolved private/reserved IPs are "+
+			"permitted for SatelliteEphemeris GP-data fetches. Empty (default) enforces "+
+			"the strict SSRF posture: every private IP is blocked at the dial layer. "+
+			"Set this only to enable internal CelesTrak mirrors (e.g. air-gapped "+
+			"deployments) or E2E test mock servers. Production clusters with public "+
+			"CelesTrak access should leave this empty.")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -201,7 +209,10 @@ func main() {
 		os.Exit(1)
 	}
 
-	gpHTTPClient := netutil.NewSafeHTTPClient(30 * time.Second)
+	gpHTTPClient := netutil.NewSafeHTTPClient(
+		30*time.Second,
+		netutil.WithPrivateHostAllowlist(netutil.ParseEndpointAllowlist(ephemerisAllowedPrivateHosts)),
+	)
 	spaceTrackFetcher := ephemeris.NewSpaceTrackFetcher(
 		netutil.NewSafeHTTPClient(30*time.Second),
 		"https://www.space-track.org",

@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 	"testing"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -37,6 +38,11 @@ var (
 	// shouldCleanupCertManager tracks whether CertManager was installed by this suite.
 	shouldCleanupCertManager = false
 )
+
+// celestrakMockHost is the in-cluster DNS name the mock server answers on.
+// Must match the Service FQDN in test/e2e/fixtures/celestrak-mock.yaml AND
+// the URL in test/e2e/fixtures/satelliteephemeris-e2e.yaml.
+const celestrakMockHost = "celestrak-mock.default.svc.cluster.local"
 
 // TestE2E runs the e2e test suite to validate the solution in an isolated environment.
 // The default setup requires Kind and CertManager.
@@ -61,11 +67,62 @@ var _ = BeforeSuite(func() {
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to load the manager image into Kind")
 
 	setupCertManager()
+	setupCelestrakMock()
 })
 
 var _ = AfterSuite(func() {
+	teardownCelestrakMock()
 	teardownCertManager()
 })
+
+// setupCelestrakMock deploys the in-cluster mock that stands in for
+// celestrak.org during E2E. The mock is a tiny nginx Pod serving a
+// checked-in OMM JSON fixture — the operator fetches from its Service,
+// eliminating CelesTrak network flake from the E2E job. The operator
+// gets the --ephemeris-allowed-private-hosts flag in its BeforeAll so
+// its SSRF-safe client can dial the Service's private IP.
+//
+// See test/e2e/fixtures/{oneweb-gp.json,celestrak-mock.yaml,satelliteephemeris-e2e.yaml}.
+func setupCelestrakMock() {
+	By("creating celestrak-mock ConfigMap from test/e2e/fixtures/oneweb-gp.json")
+	// Server-side-apply style: regenerate ConfigMap manifest from the fixture
+	// file at test-runtime so the single source of truth is the checked-in
+	// JSON (no risk of drift with an inlined YAML copy).
+	cmd := exec.Command("kubectl", "create", "configmap", "celestrak-mock-fixture",
+		"-n", "default",
+		"--from-file=gp.json=test/e2e/fixtures/oneweb-gp.json",
+		"--dry-run=client", "-o", "yaml")
+	cfgMapYAML, err := utils.Run(cmd)
+	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to build ConfigMap manifest")
+	applyCmd := exec.Command("kubectl", "apply", "-f", "-")
+	applyCmd.Stdin = strings.NewReader(cfgMapYAML)
+	_, err = utils.Run(applyCmd)
+	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to apply celestrak-mock ConfigMap")
+
+	By("applying celestrak-mock Deployment + Service")
+	cmd = exec.Command("kubectl", "apply", "-f", "test/e2e/fixtures/celestrak-mock.yaml")
+	_, err = utils.Run(cmd)
+	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to apply celestrak-mock manifests")
+
+	By("waiting for celestrak-mock Deployment to become available")
+	cmd = exec.Command("kubectl", "wait", "--for=condition=available",
+		"--timeout=60s", "deployment/celestrak-mock", "-n", "default")
+	_, err = utils.Run(cmd)
+	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "celestrak-mock Deployment did not become available")
+}
+
+// teardownCelestrakMock best-effort removes the mock at suite end.
+// Errors are ignored — the Kind cluster itself is torn down after the
+// suite and clean-up failures here should not fail the run.
+func teardownCelestrakMock() {
+	By("deleting celestrak-mock resources")
+	cmd := exec.Command("kubectl", "delete", "-f", "test/e2e/fixtures/celestrak-mock.yaml",
+		"--ignore-not-found", "--timeout=30s")
+	_, _ = utils.Run(cmd)
+	cmd = exec.Command("kubectl", "delete", "configmap", "celestrak-mock-fixture",
+		"-n", "default", "--ignore-not-found", "--timeout=30s")
+	_, _ = utils.Run(cmd)
+}
 
 // setupCertManager installs CertManager if needed for webhook tests.
 // Skips installation if CERT_MANAGER_INSTALL_SKIP=true or if already present.
