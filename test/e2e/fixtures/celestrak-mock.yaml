@@ -5,9 +5,12 @@
 # `--ephemeris-allowed-private-hosts` flag on the manager must list this
 # hostname so the SSRF-safe HTTP client lets the connection through.
 #
-# Fixture content comes from test/e2e/fixtures/oneweb-gp.json — the test
-# suite creates the ConfigMap from that file at runtime, so DO NOT inline
-# the JSON here (drift risk). This file only declares Deployment + Service.
+# Fixture content comes from pkg/ephemeris/testdata/oneweb-gp.json — the
+# same file pkg/ephemeris's unit tests embed via go:embed, so this mock
+# and the CelesTrakFetcher tests share a single source of truth. The
+# test suite creates the ConfigMap from that file at runtime, so DO NOT
+# inline the JSON here (drift risk). This file only declares Deployment
+# + Service.
 ---
 apiVersion: apps/v1
 kind: Deployment
