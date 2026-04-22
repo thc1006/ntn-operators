@@ -47,3 +47,21 @@ jobs:
 
       - name: Run linter
         run: make lint
+
+  # Gate: every `uses: org/repo@<ref>` in .github/workflows/ must be
+  # a valid SHA-pinned commit. Catches the failure mode from PR #97
+  # where action SHAs were typo'd and slipped past human review.
+  # See #107 and hack/check-action-shas.sh.
+  check-action-shas:
+    name: Action SHAs pinned
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Validate action SHAs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: ./hack/check-action-shas.sh
