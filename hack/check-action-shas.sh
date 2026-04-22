@@ -43,7 +43,12 @@ CHECKED=0
 API_CHECKS=0
 TOKEN="${GH_TOKEN:-${GITHUB_TOKEN:-}}"
 
-# Collect all `uses: ...` lines across *.yml (one per line).
+# Collect all `uses: ...` lines across *.yml (one per line). Matches both
+# block-style (`    uses: foo@sha`) and one-line step form
+# (`  - uses: foo@sha`). The `|| true` is required because `grep` returns
+# exit code 1 on zero matches, and `set -e` above would otherwise abort
+# the script on an empty workflows dir — valid state we want to handle
+# as "checked 0, exit 0".
 # Format of `grep -nH -E` is `FILE:LINENUM:CONTENT`.
 while IFS= read -r raw; do
   FILE="${raw%%:*}"
@@ -52,11 +57,16 @@ while IFS= read -r raw; do
   CONTENT="${REST#*:}"
 
   # Extract the uses value (everything after `uses:` up to whitespace
-  # or comment marker).
+  # or comment marker). Then normalise optional surrounding YAML
+  # quotes for scalars like `uses: "org/repo@<sha>"`.
   USES=$(printf '%s' "${CONTENT}" | sed -nE 's|.*uses:[[:space:]]+([^[:space:]#]+).*|\1|p')
   if [ -z "${USES}" ]; then
     continue
   fi
+  case "${USES}" in
+    \"*\") USES="${USES#\"}"; USES="${USES%\"}" ;;
+    \'*\') USES="${USES#\'}"; USES="${USES%\'}" ;;
+  esac
 
   # Skip local and docker actions.
   case "${USES}" in
@@ -99,7 +109,7 @@ while IFS= read -r raw; do
   if ! printf '%s' "${CONTENT}" | grep -qE '#[[:space:]]*v[0-9]'; then
     echo "::warning file=${FILE},line=${LINE_NO}::Action \`${REF}@${SHA}\` is missing a trailing \`# v<tag>\` comment (auditability only — not a failure)."
   fi
-done < <(grep -nH -E '^[[:space:]]+uses:' "${WORKFLOWS_DIR}"/*.yml)
+done < <(grep -nH -E '^[[:space:]]*-?[[:space:]]*uses:' "${WORKFLOWS_DIR}"/*.yml 2>/dev/null || true)
 
 echo ""
 echo "Checked ${CHECKED} action references across ${WORKFLOWS_DIR}/*.yml"
