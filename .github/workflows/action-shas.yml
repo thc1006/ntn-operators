@@ -1,0 +1,40 @@
+name: Action SHAs
+
+# Dedicated gate for GitHub Actions SHA pinning. Kept out of lint.yml
+# because lint.yml's paths filter (**.go, go.mod, etc.) would trigger
+# this check on every Go-only change — unnecessary API traffic and
+# spurious reruns.
+#
+# See hack/check-action-shas.sh for the validation logic and #107 for
+# the motivation (PR #97's typo'd SHAs slipped past human review).
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/**'
+      - 'hack/check-action-shas.sh'
+  pull_request:
+    paths:
+      - '.github/workflows/**'
+      - 'hack/check-action-shas.sh'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check-action-shas:
+    name: Action SHAs pinned
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Validate action SHAs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: ./hack/check-action-shas.sh
