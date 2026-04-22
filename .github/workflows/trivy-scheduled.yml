@@ -1,0 +1,82 @@
+name: Scheduled Trivy Scan
+
+# Weekly Trivy scan to surface CRITICAL/HIGH CVEs during the work
+# week — not at release-cut time. Builds a fresh local image via
+# `ko build` and scans it; no registry credentials in scope.
+#
+# Ref semantics:
+#   - `schedule`: GHA fires scheduled events against the default
+#     branch (main), so the scan runs against main HEAD.
+#   - `workflow_dispatch`: scans whichever ref you dispatch from
+#     (useful for ad-hoc verification before tagging a release).
+#
+# Motivation: v0.4.0-rc.1 took four attempts to cut — the original
+# (#97) plus fix PRs #98 (action SHA typos), #99 (Go runtime CVEs),
+# and #100 (otel/grpc transitive CVEs). The two CVE-driven fixes
+# (#99, #100) would have landed earlier as quiet weekday PRs with
+# this scan in place, avoiding the Friday release-time fire drill.
+#
+# Schedule: Monday 06:00 UTC = Monday 14:00 Taipei. Catches CVEs
+# published in the prior week before the next week's releases.
+#
+# See #106 for the full design.
+
+on:
+  schedule:
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+# Read-only: this workflow never publishes anything. It only builds
+# a local image and scans it.
+permissions:
+  contents: read
+
+concurrency:
+  # Prevent overlapping runs if a scan ever takes longer than a week.
+  # Don't cancel an in-flight run — queuing is fine.
+  group: trivy-scheduled
+  cancel-in-progress: false
+
+jobs:
+  scan:
+    # Job name mirrors release.yml's build-scan to make it visually
+    # obvious this is the same gate, just with a different trigger.
+    name: Build and scan
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Setup Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: go.mod
+
+      - name: Setup ko
+        uses: ko-build/setup-ko@d006021bd0c28d1ce33a07e7943d48b079944c8d # v0.9
+
+      - name: Build local image with ko (no push)
+        id: ko-local
+        env:
+          KO_DOCKER_REPO: ko.local
+        run: |
+          LOCAL_IMAGE=$(ko build ./cmd/ --local --bare)
+          echo "LOCAL_IMAGE=${LOCAL_IMAGE}" >> "$GITHUB_OUTPUT"
+          echo "Local image: ${LOCAL_IMAGE}"
+
+      - name: Scan with Trivy (CRITICAL/HIGH)
+        # Pin to known-safe SHA after March 2026 supply chain compromise.
+        # See: https://www.stepsecurity.io/blog/trivy-compromised-a-second-time
+        # Identical gate to release.yml's build-scan job — a finding
+        # here means the next release tag push will also fail, so
+        # fixing it this week avoids a release-time fire drill.
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0 (safe)
+        with:
+          image-ref: ${{ steps.ko-local.outputs.LOCAL_IMAGE }}
+          format: 'table'
+          exit-code: '1'
+          severity: 'CRITICAL,HIGH'
+          timeout: '10m'
+      # Note: amd64-only scan, same as release.yml's build-scan. If
+      # an arm64-specific base-layer CVE ever surfaces, this will
+      # miss it. Per-platform scanning is a future enhancement.
