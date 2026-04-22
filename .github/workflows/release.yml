@@ -6,10 +6,8 @@ on:
       - 'v*'
   # Manual dispatch lets us validate the build/scan pipeline without
   # cutting a real tag. Default is dry_run=true (no image push, no
-  # Helm push, no GitHub Release). After v0.4.0-rc.1 needed four
-  # publish-time fixes (action SHAs, then Trivy CVEs), having a way
-  # to dry-run the full pipeline pre-tag is worth the small surface.
-  # Real releases still come from tag pushes.
+  # Helm push, no GitHub Release). Real releases still come from tag
+  # pushes.
   workflow_dispatch:
     inputs:
       dry_run:
@@ -17,19 +15,28 @@ on:
         type: boolean
         default: true
 
-permissions:
-  contents: write
-  packages: write
-  id-token: write  # Required for cosign keyless signing via OIDC
+# Workflow has NO top-level permissions — each job declares its own
+# least-privilege set. See #103 for the rationale: dry-run / scan jobs
+# must not run with publish-capable tokens in scope.
 
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
-  release:
-    name: Build and Release
+  # Phase 1: build the image locally and scan. Runs read-only — no
+  # registry credentials, no cosign OIDC, no GitHub Release write.
+  # Trivy's CRITICAL/HIGH gate lives here; if scan fails, publish
+  # never runs (fail-closed via `needs`).
+  build-scan:
+    name: Build and scan
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    outputs:
+      publish: ${{ steps.publish.outputs.publish }}
+      version: ${{ steps.version.outputs.VERSION }}
+      tag: ${{ steps.version.outputs.TAG }}
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -44,16 +51,9 @@ jobs:
       - name: Setup ko
         uses: ko-build/setup-ko@d006021bd0c28d1ce33a07e7943d48b079944c8d # v0.9
 
-      - name: Install cosign
-        uses: sigstore/cosign-installer@3454372f43399081ed03b604cb2d021dabca52bb # v3.8.2
-
-      - name: Install syft
-        uses: anchore/sbom-action/download-syft@f325610c9f50a54015d37c8d16cb3b0e2c8f4de0 # v0.18.0
-
       - name: Determine publish mode
         # Single source of truth for the "should this run publish?" gate.
-        # All publish-side steps below reference steps.publish.outputs.publish
-        # so adding a new step can't accidentally drift from the others.
+        # Exposed as a job output and consumed by the publish job's `if:`.
         # Truth table: push event → publish; dispatch dry_run=true → skip;
         # dispatch dry_run=false → publish (with synthetic version below).
         # On push, `inputs.dry_run` is empty, so the string compare branches
@@ -70,23 +70,18 @@ jobs:
             echo "publish=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Login to GHCR
-        if: steps.publish.outputs.publish == 'true'
-        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
       - name: Resolve version
+        # Emitted as job output so the publish job can use the same
+        # VERSION/TAG without re-deriving (and risking drift if logic
+        # changes between jobs).
         id: version
         run: |
           set -euo pipefail
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             # Synthetic version for dispatch builds. The image push is
-            # gated below on dry_run=false, so this only ever lands in
-            # the registry on an explicit override — and never clobbers
-            # a real tag thanks to the SHA suffix.
+            # gated on the publish job's `if:`, so this only ever lands
+            # in the registry on an explicit override — and never
+            # clobbers a real tag thanks to the SHA suffix.
             VERSION="0.0.0-dispatch-${GITHUB_SHA::7}"
             TAG="v${VERSION}"
           else
@@ -96,8 +91,6 @@ jobs:
           echo "VERSION=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "TAG=${TAG}" >> "$GITHUB_OUTPUT"
           echo "Resolved version=${VERSION} tag=${TAG}"
-
-      # --- Scan before publish: build locally, scan, then push ---
 
       - name: Build local image with ko (no push)
         id: ko-local
@@ -118,13 +111,63 @@ jobs:
           exit-code: '1'
           severity: 'CRITICAL,HIGH'
           timeout: '10m'
-
       # Note: The local scan only covers the amd64 platform. arm64-specific
       # base layer differences are not scanned here. This is a best-effort
       # gate; for full coverage, per-platform scanning would be needed.
+      #
+      # Note: ko build is deterministic given a frozen go.sum + pinned Go
+      # toolchain. The publish job below rebuilds with --push (because the
+      # locally-built ko.local image can't be tagged+pushed to ghcr.io),
+      # so in theory scan and publish target different artifacts. In
+      # practice the two invocations produce bit-identical image content
+      # because inputs are identical. If a future incident reveals drift,
+      # revisit by saving the local image as an artifact and loading it
+      # in publish.
+
+  # Phase 2: publish. Runs with publish-capable tokens only when
+  # `build-scan` succeeded AND the publish gate resolved to true.
+  # This is the only job in the workflow that can write to GHCR or
+  # create a GitHub Release.
+  publish:
+    name: Publish artifacts
+    needs: build-scan
+    if: needs.build-scan.outputs.publish == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write  # GitHub Release creation
+      packages: write  # GHCR push (ko + Helm OCI)
+      id-token: write  # cosign keyless signing via OIDC
+    env:
+      VERSION: ${{ needs.build-scan.outputs.version }}
+      TAG: ${{ needs.build-scan.outputs.tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Setup Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: go.mod
+
+      - name: Setup ko
+        uses: ko-build/setup-ko@d006021bd0c28d1ce33a07e7943d48b079944c8d # v0.9
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@3454372f43399081ed03b604cb2d021dabca52bb # v3.8.2
+
+      - name: Install syft
+        uses: anchore/sbom-action/download-syft@f325610c9f50a54015d37c8d16cb3b0e2c8f4de0 # v0.18.0
+
+      - name: Login to GHCR
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Push multi-arch image to GHCR
-        if: steps.publish.outputs.publish == 'true'
         id: ko-push
         env:
           KO_DOCKER_REPO: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
@@ -133,9 +176,9 @@ jobs:
           # `latest` is reserved for tag pushes — dispatch builds use the
           # synthetic SHA-suffixed tag only, never `latest`.
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            TAGS="${{ steps.version.outputs.TAG }}"
+            TAGS="${TAG}"
           else
-            TAGS="${{ steps.version.outputs.TAG }},latest"
+            TAGS="${TAG},latest"
           fi
           IMAGE_REF=$(ko build ./cmd/ \
             --platform=linux/amd64,linux/arm64 \
@@ -147,19 +190,16 @@ jobs:
       # --- Supply chain attestation: sign + SBOM ---
 
       - name: Sign image with cosign (keyless OIDC)
-        if: steps.publish.outputs.publish == 'true'
         run: cosign sign --yes --recursive ${{ steps.ko-push.outputs.IMAGE_REF }}
 
       - name: Generate SBOM (SPDX)
         # Syft resolves multi-arch ref to the runner's platform (amd64).
         # The SBOM is attached to the index digest only (not per-platform).
-        if: steps.publish.outputs.publish == 'true'
         run: |
           syft ${{ steps.ko-push.outputs.IMAGE_REF }} \
             -o spdx-json=sbom.spdx.json
 
       - name: Attest SBOM to image index
-        if: steps.publish.outputs.publish == 'true'
         run: |
           cosign attest --yes \
             --type spdxjson \
@@ -169,7 +209,6 @@ jobs:
       # --- Helm chart packaging ---
 
       - name: Install Helm
-        if: steps.publish.outputs.publish == 'true'
         env:
           HELM_VERSION: v3.17.4
         run: |
@@ -184,32 +223,29 @@ jobs:
           helm version
 
       - name: Update Chart version
-        if: steps.publish.outputs.publish == 'true'
         run: |
-          sed -i "s/^version:.*/version: ${{ steps.version.outputs.VERSION }}/" dist/chart/Chart.yaml
-          sed -i "s/^appVersion:.*/appVersion: \"${{ steps.version.outputs.VERSION }}\"/" dist/chart/Chart.yaml
+          sed -i "s/^version:.*/version: ${VERSION}/" dist/chart/Chart.yaml
+          sed -i "s/^appVersion:.*/appVersion: \"${VERSION}\"/" dist/chart/Chart.yaml
 
       - name: Package and push Helm chart to OCI
-        if: steps.publish.outputs.publish == 'true'
         run: |
-          helm package dist/chart --version ${{ steps.version.outputs.VERSION }}
-          helm push ntn-operators-${{ steps.version.outputs.VERSION }}.tgz oci://${{ env.REGISTRY }}/${{ github.repository_owner }}
+          helm package dist/chart --version "${VERSION}"
+          helm push "ntn-operators-${VERSION}.tgz" "oci://${{ env.REGISTRY }}/${{ github.repository_owner }}"
 
       - name: Create GitHub Release
-        if: steps.publish.outputs.publish == 'true'
         uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3.0.0
         with:
           # Pin to the resolved tag so dispatch builds (which run from a
           # branch ref, not a tag ref) don't accidentally create a tag
           # named after the branch. On tag pushes TAG == github.ref_name.
-          tag_name: ${{ steps.version.outputs.TAG }}
+          tag_name: ${{ env.TAG }}
           generate_release_notes: true
           # Any SemVer tag with a pre-release identifier (the "-xxx"
           # suffix) is flagged as a pre-release, so it does not show up
           # as "Latest" on the Releases page and Helm OCI consumers can
           # skip it via version constraints. Matches -rc / -beta /
           # -alpha / -dev / -snapshot / etc. in one expression.
-          prerelease: ${{ contains(steps.version.outputs.TAG, '-') }}
+          prerelease: ${{ contains(env.TAG, '-') }}
           files: |
-            ntn-operators-${{ steps.version.outputs.VERSION }}.tgz
+            ntn-operators-${{ env.VERSION }}.tgz
             sbom.spdx.json
