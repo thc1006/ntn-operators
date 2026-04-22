@@ -106,7 +106,10 @@ func WithPrivateHostAllowlist(allow EndpointAllowlist) Option {
 // against private/reserved ranges before connecting. Hosts in privateAllowed
 // bypass the private-IP check (but every other rule — DNS resolvability,
 // non-empty address set — still applies).
-func safeDialContext(dialer *net.Dialer, privateAllowed EndpointAllowlist) func(ctx context.Context, network, addr string) (net.Conn, error) {
+func safeDialContext(
+	dialer *net.Dialer,
+	privateAllowed EndpointAllowlist,
+) func(ctx context.Context, network, addr string) (net.Conn, error) {
 	return func(ctx context.Context, network, addr string) (net.Conn, error) {
 		log := logr.FromContextOrDiscard(ctx)
 		host, port, err := net.SplitHostPort(addr)

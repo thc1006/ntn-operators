@@ -119,8 +119,23 @@ func (r *SatelliteEphemerisReconciler) Reconcile(ctx context.Context, req ctrl.R
 	}
 
 	// Step 6: Update status with new data.
+	//
+	// Note: both paths (200 fresh fetch, 304 NotModified) populate
+	// SatelliteCount and LastUpdated. The 304 path previously only
+	// updated conditions, which silently corrupted status on the
+	// edge case where a second CR reuses an already-cached URL
+	// while the first CR's status populated the fetcher's in-memory
+	// OMM cache (the GPFetchResult on 304 carries the cached OMMs
+	// via fetcher.ommCache, so len(result.OMMs) == count is correct).
+	// Fixed along with #105's E2E mock which reliably reproduces the
+	// case: two sequential CRs with the same URL hit 304 on the
+	// second reconcile.
+	eph.Status.SatelliteCount = result.SatelliteCount
+	eph.Status.LastUpdated = &metav1.Time{Time: result.FetchedAt}
+	ntnmetrics.GPSatelliteCount.With(prometheus.Labels{"ephemeris": eph.Name}).Set(float64(result.SatelliteCount))
+
 	if result.NotModified {
-		log.Info("GP data unchanged (304 Not Modified)")
+		log.Info("GP data unchanged (304 Not Modified)", "satelliteCount", result.SatelliteCount)
 		meta.SetStatusCondition(&eph.Status.Conditions, metav1.Condition{
 			Type:               ntnv1alpha1.ConditionGPDataFetched,
 			Status:             metav1.ConditionTrue,
@@ -137,10 +152,6 @@ func (r *SatelliteEphemerisReconciler) Reconcile(ctx context.Context, req ctrl.R
 		})
 	} else {
 		log.Info("Fetched GP data successfully", "satelliteCount", result.SatelliteCount)
-		eph.Status.SatelliteCount = result.SatelliteCount
-		eph.Status.LastUpdated = &metav1.Time{Time: result.FetchedAt}
-		ntnmetrics.GPSatelliteCount.With(prometheus.Labels{"ephemeris": eph.Name}).Set(float64(result.SatelliteCount))
-
 		meta.SetStatusCondition(&eph.Status.Conditions, metav1.Condition{
 			Type:               ntnv1alpha1.ConditionGPDataFetched,
 			Status:             metav1.ConditionTrue,
