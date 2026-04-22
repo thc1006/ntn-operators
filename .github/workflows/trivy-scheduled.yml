@@ -1,18 +1,25 @@
 name: Scheduled Trivy Scan
 
-# Weekly Trivy scan on main's latest image, so CRITICAL/HIGH CVEs
-# surface during the work week — not during a Friday release-cut
-# scramble. v0.4.0-rc.1 needed four publish-attempt fixes (PRs #99,
-# #100) because Trivy caught Go runtime + transitive CVEs at
-# tag-push time; a weekly scan would have landed those fixes earlier,
-# in quiet PRs rather than release-blocker PRs.
+# Weekly Trivy scan to surface CRITICAL/HIGH CVEs during the work
+# week — not at release-cut time. Builds a fresh local image via
+# `ko build` and scans it; no registry credentials in scope.
+#
+# Ref semantics:
+#   - `schedule`: GHA fires scheduled events against the default
+#     branch (main), so the scan runs against main HEAD.
+#   - `workflow_dispatch`: scans whichever ref you dispatch from
+#     (useful for ad-hoc verification before tagging a release).
+#
+# Motivation: v0.4.0-rc.1 took four attempts to cut — the original
+# (#97) plus fix PRs #98 (action SHA typos), #99 (Go runtime CVEs),
+# and #100 (otel/grpc transitive CVEs). The two CVE-driven fixes
+# (#99, #100) would have landed earlier as quiet weekday PRs with
+# this scan in place, avoiding the Friday release-time fire drill.
 #
 # Schedule: Monday 06:00 UTC = Monday 14:00 Taipei. Catches CVEs
-# published on the prior week before the next week's releases.
+# published in the prior week before the next week's releases.
 #
-# Also manually dispatchable for ad-hoc verification.
-#
-# See #106 for the motivation and design notes.
+# See #106 for the full design.
 
 on:
   schedule:
@@ -32,7 +39,9 @@ concurrency:
 
 jobs:
   scan:
-    name: Trivy scan (main latest)
+    # Job name mirrors release.yml's build-scan to make it visually
+    # obvious this is the same gate, just with a different trigger.
+    name: Build and scan
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout
