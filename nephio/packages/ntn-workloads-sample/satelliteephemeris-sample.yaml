@@ -15,6 +15,5 @@ spec:
   passPrediction:
     groundStations:
       - gs-taipei-01
-      - gs-hsinchu-01
     minElevation: "10"
     horizon: 24h

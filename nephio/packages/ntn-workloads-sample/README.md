@@ -25,6 +25,17 @@ The `Kptfile` declares a two-step mutator chain that runs on `kpt fn render`:
 
 Both images come from the Nephio R6 canonical KRM function catalog.
 
+## Expected status on a demo cluster
+
+The samples reference realistic NTN inputs (CelesTrak OneWeb feed, Taipei ground station on Ennoconn rugged-edge hardware, GEO cell, terrestrial+OneWeb failover slice). On a plain demo cluster without a Node labeled `ntn.operators.dev/groundstation=<ns>.gs-taipei-01`, you will see:
+
+- `SatelliteEphemeris/oneweb-constellation` — `GPDataFetched=True`, `GPDataParsed=True`, 650+ satellites counted. Pass prediction succeeds because the sample references only `gs-taipei-01`, which this package ships.
+- `GroundStationLifecycle/gs-taipei-01` — phase `Provisioning`, `K8sNodeReady=False` with reason `NodeNotFound`. This is the controller correctly reporting missing hardware, not a package defect — label one of your nodes to advance it.
+- `NTNCellConfig/ntn-cell-geo-demo` — `ConfigApplied=True`, generates `ConfigMap/ocudu-ntn-ntn-cell-geo-demo` with OCUDU `geo_ntn.yml` content.
+- `NTNSlice/enterprise-resilient-slice` — `PathActive=True` with `activePathType: terrestrial`, failover decision `stay` (terrestrial path healthy).
+
+Cross-verified on K8s v1.35.4 on 2026-04-24.
+
 ## Consume
 
 ### Minimum commands
