@@ -80,6 +80,7 @@ Samples in `config/samples/ntn_v1alpha1_*.yaml` and package samples in `nephio/p
 
 - an explicit `namespace: default` field (so `set-namespace` has a value to rewrite)
 - **no** hardcoded `workload` / `app.kubernetes.io/managed-by` labels (those are injected by `set-labels` at render time)
+- `SatelliteEphemeris` only references ground stations that this package itself ships. The canonical `config/samples/ntn_v1alpha1_satelliteephemeris.yaml` references both `gs-taipei-01` and `gs-hsinchu-01` because the `config/samples/` directory also ships `ntn_v1alpha1_groundstationlifecycle_hsinchu.yaml`; the Nephio workloads package only ships `gs-taipei-01`, so the ephemeris sample is trimmed accordingly.
 
 If you add a field to a sample, add it to both locations, then `make nephio-validate`.
 

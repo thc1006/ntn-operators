@@ -9,7 +9,7 @@ Install the sibling [`ntn-operators-crds`](../ntn-operators-crds) package first;
 | File | Purpose |
 |---|---|
 | `Kptfile` | Package metadata + `pipeline.mutators` with `set-namespace` and `set-labels`. |
-| `satelliteephemeris-sample.yaml` | `SatelliteEphemeris` — OneWeb constellation fetched from CelesTrak every 4h, pass-predicting against two Taiwan ground stations. |
+| `satelliteephemeris-sample.yaml` | `SatelliteEphemeris` — OneWeb constellation fetched from CelesTrak every 4h, pass-predicting against the `gs-taipei-01` ground station shipped in this package. |
 | `groundstationlifecycle-sample.yaml` | `GroundStationLifecycle` — Taipei ground station on Ennoconn rugged-edge hardware, K3s edge distro. |
 | `ntncellconfig-sample.yaml` | `NTNCellConfig` — GEO satellite cell, OCUDU provider, transparent payload. |
 | `ntnslice-sample.yaml` | `NTNSlice` — enterprise resilient slice: terrestrial primary + OneWeb failover, AES-256, per-volume/per-minute billing. |
