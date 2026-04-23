@@ -1,0 +1,27 @@
+apiVersion: ntn.operators.dev/v1alpha1
+kind: GroundStationLifecycle
+metadata:
+  labels:
+    app.kubernetes.io/name: ntn-operators
+  name: gs-taipei-01
+  namespace: default
+spec:
+  hardware:
+    vendor: ennoconn
+    model: rugged-edge-5000
+    antennaType: flat-panel
+    bands:
+      - Ka
+      - Ku
+  deployment:
+    location:
+      lat: "25.0330"
+      lon: "121.5654"
+      alt: "15"
+    k8sDistro: k3s
+  monitoring:
+    healthCheckInterval: 30s
+  firmware:
+    autoUpdate: true
+    channel: stable
+    maintenanceWindow: "02:00-04:00 UTC"

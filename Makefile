@@ -203,6 +203,66 @@ deploy: manifests kustomize ## Deploy controller to the K8s cluster specified in
 undeploy: kustomize ## Undeploy controller from the K8s cluster specified in ~/.kube/config. Call with ignore-not-found=true to ignore resource not found errors during deletion.
 	"$(KUSTOMIZE)" build config/default | "$(KUBECTL)" delete --ignore-not-found=$(ignore-not-found) -f -
 
+##@ Nephio
+
+# kpt binary path — prefer PATH. `make nephio-install-tools` installs into
+# $(go env GOPATH)/bin; ensure that directory is on your PATH.
+KPT ?= kpt
+KPT_VERSION ?= v1.0.0-beta.62
+NEPHIO_PKGS := nephio/packages/ntn-operators-crds nephio/packages/ntn-workloads-sample
+
+.PHONY: nephio-install-tools
+nephio-install-tools: ## Install kpt CLI (Linux/macOS amd64) into $(GOPATH)/bin.
+	@set -e; \
+	BIN_DIR="$$(go env GOPATH 2>/dev/null)/bin"; \
+	[ -n "$${BIN_DIR}" ] || { echo "go env GOPATH failed; is Go installed?"; exit 1; }; \
+	mkdir -p "$${BIN_DIR}"; \
+	if command -v kpt >/dev/null 2>&1; then \
+	  echo "kpt already on PATH: $$(command -v kpt) ($$(kpt version 2>/dev/null | head -1))"; \
+	  exit 0; \
+	fi; \
+	OS=$$(uname -s | tr A-Z a-z); ARCH=amd64; \
+	URL="https://github.com/kptdev/kpt/releases/download/$(KPT_VERSION)/kpt_$${OS}_$${ARCH}"; \
+	echo "Downloading kpt $(KPT_VERSION) from $${URL}"; \
+	curl -sSL -o "$${BIN_DIR}/kpt" "$${URL}"; \
+	chmod +x "$${BIN_DIR}/kpt"; \
+	echo "Installed $${BIN_DIR}/kpt ($$("$${BIN_DIR}/kpt" version 2>/dev/null | head -1))"; \
+	echo "If 'kpt' is not on your PATH, run: export PATH=\"$${BIN_DIR}:\$$PATH\""
+
+.PHONY: nephio-sync
+nephio-sync: manifests ## Sync CRDs from config/crd/bases/ into the Nephio ntn-operators-crds package.
+	@set -e; \
+	SRC=config/crd/bases; DST=nephio/packages/ntn-operators-crds; \
+	for src in $$SRC/ntn.operators.dev_*.yaml; do \
+	  base=$$(basename "$$src" | sed 's/^ntn\.operators\.dev_//' | sed 's/\.yaml$$/-crd.yaml/'); \
+	  cp "$$src" "$$DST/$$base"; \
+	  echo "  synced $$src -> $$DST/$$base"; \
+	done
+
+.PHONY: nephio-render
+nephio-render: ## Run 'kpt fn render' on both Nephio packages.
+	@set -e; \
+	for pkg in $(NEPHIO_PKGS); do \
+	  echo "==> $$pkg"; \
+	  $(KPT) fn render "$$pkg"; \
+	done
+
+.PHONY: nephio-validate
+nephio-validate: ## Run the Nephio package validation suite (test/nephio/validate.sh).
+	@bash test/nephio/validate.sh
+
+.PHONY: nephio-verify-sync
+nephio-verify-sync: ## Verify CRD package copies match config/crd/bases/ (CI drift check).
+	@set -e; \
+	SRC=config/crd/bases; DST=nephio/packages/ntn-operators-crds; drift=0; \
+	for src in $$SRC/ntn.operators.dev_*.yaml; do \
+	  base=$$(basename "$$src" | sed 's/^ntn\.operators\.dev_//' | sed 's/\.yaml$$/-crd.yaml/'); \
+	  if ! diff -q "$$src" "$$DST/$$base" >/dev/null 2>&1; then \
+	    echo "DRIFT: $$DST/$$base differs from $$src"; drift=1; \
+	  fi; \
+	done; \
+	if [ $$drift -eq 0 ]; then echo "Nephio CRD package is in sync with config/crd/bases/"; else exit 1; fi
+
 ##@ Dependencies
 
 ## Location to install dependencies to

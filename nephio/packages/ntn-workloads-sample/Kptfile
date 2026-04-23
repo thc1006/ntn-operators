@@ -1,0 +1,26 @@
+apiVersion: kpt.dev/v1
+kind: Kptfile
+metadata:
+  name: ntn-workloads-sample
+  annotations:
+    config.kubernetes.io/local-config: "true"
+info:
+  description: |
+    Sample workload CRs for the ntn-operators project — one of each kind
+    demonstrating realistic NTN deployment data:
+      - SatelliteEphemeris (OneWeb constellation, CelesTrak source)
+      - GroundStationLifecycle (Taipei ground station, K3s edge)
+      - NTNCellConfig (GEO satellite, OCUDU provider)
+      - NTNSlice (terrestrial + oneweb failover slice)
+    Customize per target cluster by editing the set-namespace and set-labels
+    inputs below. The CRDs themselves are shipped in the sibling package
+    'ntn-operators-crds' — install that first. Nephio R6 compatible.
+pipeline:
+  mutators:
+    - image: ghcr.io/kptdev/krm-functions-catalog/set-namespace:v0.4.1
+      configMap:
+        namespace: ntn-system
+    - image: ghcr.io/kptdev/krm-functions-catalog/set-labels:v0.2.1
+      configMap:
+        app.kubernetes.io/managed-by: ntn-operators
+        workload: ntn-sample

@@ -1,0 +1,27 @@
+apiVersion: ntn.operators.dev/v1alpha1
+kind: NTNCellConfig
+metadata:
+  labels:
+    app.kubernetes.io/name: ntn-operators
+  name: ntn-cell-geo-demo
+  namespace: default
+spec:
+  provider:
+    type: ocudu
+    # namespace is enforced to match metadata.namespace for security
+  ntn:
+    cellSpecificKoffset: 150
+    taCommon: 0
+    ephemerisECEF:
+      posX: 20922195
+      posY: 1967783
+      posZ: 19770302
+      # GEO satellite: velocity = 0
+      velX: 0
+      velY: 0
+      velZ: 0
+    payloadType: transparent
+  cellOverrides:
+    pdschMaxHarqRetxs: 0
+    prachMaxMsg3HarqRetx: 0
+    rrcGuardTimeMs: 12800

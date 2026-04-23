@@ -1,0 +1,19 @@
+apiVersion: ntn.operators.dev/v1alpha1
+kind: SatelliteEphemeris
+metadata:
+  labels:
+    app.kubernetes.io/name: ntn-operators
+  name: oneweb-constellation
+  namespace: default
+spec:
+  source:
+    type: CelesTrak
+    url: https://celestrak.org/NORAD/elements/gp.php?GROUP=oneweb&FORMAT=JSON
+    refreshInterval: 4h
+  satellites:
+    constellation: oneweb
+  passPrediction:
+    groundStations:
+      - gs-taipei-01
+    minElevation: "10"
+    horizon: 24h
