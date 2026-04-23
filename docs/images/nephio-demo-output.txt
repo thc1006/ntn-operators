@@ -1,0 +1,70 @@
+────────────────────────────────────────────────────────────────────────
+  ntn-operators — Nephio R6 package integration
+  Demo transcript (2026-04-24)
+────────────────────────────────────────────────────────────────────────
+
+$ kpt version
+1.0.0-beta.62
+
+$ kpt pkg tree nephio/packages/
+packages
+├── Package "ntn-operators-crds"
+│   ├── [Kptfile]  Kptfile ntn-operators-crds
+│   ├── [groundstationlifecycles-crd.yaml]  CustomResourceDefinition groundstationlifecycles.ntn.operators.dev
+│   ├── [ntncellconfigs-crd.yaml]  CustomResourceDefinition ntncellconfigs.ntn.operators.dev
+│   ├── [ntnslices-crd.yaml]  CustomResourceDefinition ntnslices.ntn.operators.dev
+│   └── [satelliteephemeris-crd.yaml]  CustomResourceDefinition satelliteephemeris.ntn.operators.dev
+└── Package "ntn-workloads-sample"
+    ├── [Kptfile]  Kptfile ntn-workloads-sample
+    ├── [groundstationlifecycle-sample.yaml]  GroundStationLifecycle default/gs-taipei-01
+    ├── [ntncellconfig-sample.yaml]  NTNCellConfig default/ntn-cell-geo-demo
+    ├── [ntnslice-sample.yaml]  NTNSlice default/enterprise-resilient-slice
+    └── [satelliteephemeris-sample.yaml]  SatelliteEphemeris default/oneweb-constellation
+
+$ make nephio-validate
+===> Preflight
+  PASS  kpt CLI available (1.0.0-beta.62)
+  PASS  kubectl available (v1.35.4)
+
+===> Suite A: ntn-operators-crds package
+  PASS  T1 package dir exists: nephio/packages/ntn-operators-crds/
+  PASS  T2 Kptfile valid, 'kpt pkg tree' succeeds
+  PASS  T3 'kpt fn render' succeeds on CRDs package
+  PASS  T4 all 4 README-promised CRD filenames present (filename contract honored)
+  PASS  T5 exactly 4 CustomResourceDefinition kinds in package
+  PASS  T6 README.md present
+  PASS  T7 rendered CRDs pass 'kubectl apply --dry-run=client'
+  PASS  T13 CRD drift check passes (package matches config/crd/bases/)
+
+===> Suite B: ntn-workloads-sample package
+  PASS  T8 package dir exists: nephio/packages/ntn-workloads-sample/
+  PASS  T9 Kptfile valid, 'kpt pkg tree' succeeds
+  PASS  T10 'kpt fn render' succeeds + set-namespace mutator applied (namespace: ntn-system)
+  PASS  T11 all 4 README-promised sample filenames present (filename contract honored)
+  PASS  T14 all 4 sample CR kinds present in YAML content
+  PASS  T12 rendered samples parse as valid K8s YAML
+
+===> Summary
+  Passed: 16 / 16
+  Failed: 0 / 16
+
+OK: all Nephio package assertions pass.
+
+$ # Example render on a temp copy (keeps the repo tree pristine):
+$ mkdir -p /tmp/ntn-demo && cp -r nephio/packages/ntn-workloads-sample/. /tmp/ntn-demo/
+$ kpt fn render /tmp/ntn-demo
+Package: "ntn-demo"
+[RUNNING] "ghcr.io/kptdev/krm-functions-catalog/set-namespace:v0.4.1"
+[PASS] "ghcr.io/kptdev/krm-functions-catalog/set-namespace:v0.4.1" in 400ms
+[Results]: [info]: namespace "default" updated to "ntn-system", 4 value(s) changed
+[RUNNING] "ghcr.io/kptdev/krm-functions-catalog/set-labels:v0.2.1"
+[PASS] "ghcr.io/kptdev/krm-functions-catalog/set-labels:v0.2.1" in 200ms
+[Results]: [info]: set 8 labels in total
+Successfully executed 2 function(s) in 1 package(s).
+
+$ # After render: set-namespace rewrote default -> ntn-system
+$ grep "^  namespace:" /tmp/ntn-demo/*-sample.yaml
+/tmp/ntn-demo/ntncellconfig-sample.yaml:  namespace: ntn-system
+/tmp/ntn-demo/ntnslice-sample.yaml:  namespace: ntn-system
+/tmp/ntn-demo/satelliteephemeris-sample.yaml:  namespace: ntn-system
+/tmp/ntn-demo/groundstationlifecycle-sample.yaml:  namespace: ntn-system

@@ -1,0 +1,17 @@
+apiVersion: kpt.dev/v1
+kind: Kptfile
+metadata:
+  name: ntn-operators-crds
+  annotations:
+    config.kubernetes.io/local-config: "true"
+info:
+  description: |
+    CustomResourceDefinitions for the ntn-operators project — the first
+    open-source Kubernetes operator for 3GPP Non-Terrestrial Network (NTN)
+    deployments. Installs four CRDs on the target cluster:
+      - SatelliteEphemeris (satellite ephemeris tracking + SGP4 propagation)
+      - GroundStationLifecycle (ground-station edge node lifecycle)
+      - NTNCellConfig (3GPP TS 38.331 NTN-Config-r17 cell configuration)
+      - NTNSlice (geo-satellite resilient slice with failover policy)
+    This package is CRDs-only; the operator binary is installed separately
+    via Helm (dist/chart/) or OLM (bundle/). Compatible with Nephio R6.
