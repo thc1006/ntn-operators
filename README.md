@@ -69,6 +69,7 @@ graph TB
 - Kubernetes 1.29+ (for CEL validation)
 - kubectl
 - Helm v3.16+ (optional, for Helm-based install)
+- kpt v1.0.0-beta.55+ (optional, for Nephio kpt package install)
 
 ### Option A: Helm Install
 
@@ -97,6 +98,17 @@ hack/kind-setup.sh teardown
 make install    # Install CRDs
 make run        # Run controller locally (connects to current kubeconfig)
 ```
+
+### Option D: Install via Nephio (kpt package)
+
+ntn-operators ships as a [Nephio](https://nephio.org) R6-compatible kpt package set, with CRDs installed once per cluster as-is (no mutation pipeline).
+
+```bash
+kpt pkg get https://github.com/thc1006/ntn-operators.git/nephio/packages/ntn-operators-crds@main ntn-operators-crds
+kubectl apply -f ntn-operators-crds/
+```
+
+See [`nephio/README.md`](nephio/README.md) for the full quick-start (sibling `ntn-workloads-sample` package, Porch `PackageVariant` example, contributor `make nephio-*` targets) and [ADR 0003](docs/adr/0003-nephio-integration.md) for the design rationale.
 
 ### Apply Sample Resources
 

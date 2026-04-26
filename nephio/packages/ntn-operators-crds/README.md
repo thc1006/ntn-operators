@@ -69,7 +69,7 @@ The CRDs land cluster-wide, and per-cluster customization (namespace scoping of 
 kubectl delete -f ntn-operators-crds/
 ```
 
-Warning: deleting a CRD cascades-deletes every CustomResource of that kind. If you want to preserve existing CRs, use `kubectl patch` on the CRD objects to add the `"helm.sh/resource-policy": keep` annotation before deleting, or adopt a GitOps workflow (ArgoCD/Flux) that retains the CRDs separately from the CRs.
+Warning: deleting a CRD cascade-deletes every CustomResource of that kind. If you want to preserve existing CRs before deleting the CRDs, export them first (`kubectl get <kind> -A -o yaml > backup.yaml`) or adopt a GitOps workflow that retains the CRDs separately from the CRs — for example, ArgoCD's `argocd.argoproj.io/sync-options: Prune=false` annotation or Flux's `kustomize.toolkit.fluxcd.io/prune: disabled` annotation, applied to the CRDs.
 
 ## Version compatibility
 
