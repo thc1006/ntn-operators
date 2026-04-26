@@ -303,6 +303,29 @@ fi
 
 ###############################################################################
 echo
+echo "===> Suite C: supply-chain"
+###############################################################################
+
+# T15: every Kptfile pipeline mutator image must be pinned by @sha256 digest.
+# Delegates to hack/check-kptfile-digest-pin.sh (mirrors the action-SHA
+# pattern in hack/check-action-shas.sh, #109). Tag pinning is rejected
+# because GHCR/OCI tags are mutable (#114).
+DIGEST_CHECK="${REPO_ROOT}/hack/check-kptfile-digest-pin.sh"
+if [ -x "$DIGEST_CHECK" ]; then
+  if "$DIGEST_CHECK" "$PKG_DIR" >/dev/null 2>&1; then
+    _ok "T15 all Kptfile pipeline images pinned by @sha256 digest"
+  else
+    _fail "T15 Kptfile pipeline images NOT pinned by @sha256 digest"
+    if [ "$VERBOSE" = "--verbose" ]; then
+      "$DIGEST_CHECK" "$PKG_DIR" 2>&1 | sed 's/^/       /'
+    fi
+  fi
+else
+  _fail "T15 hack/check-kptfile-digest-pin.sh not found or not executable"
+fi
+
+###############################################################################
+echo
 echo "===> Summary"
 ###############################################################################
 

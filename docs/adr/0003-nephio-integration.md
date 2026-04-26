@@ -122,6 +122,7 @@ Tests live in `test/nephio/validate.sh`, wired through `make nephio-validate`:
 5. **Sample coverage** — all four expected sample CR kinds appear in the workloads package, with mutator-applied namespace and labels.
 6. **K8s manifest validity** — `kubectl apply --dry-run=client -f <rendered-output>` succeeds for both (client-side dry-run avoids needing a live cluster in CI).
 7. **Drift detection** — a separate `make nephio-verify-sync` compares SHA of `nephio/packages/ntn-operators-crds/*-crd.yaml` against `config/crd/bases/*.yaml`; mismatch fails CI.
+8. **Supply-chain pinning (T15)** — `hack/check-kptfile-digest-pin.sh` scans every `pipeline.mutators` `image:` entry and fails if any reference is not `<registry>/<path>@sha256:<64-hex>`. Mirrors the action-SHA pinning discipline from `hack/check-action-shas.sh` (#107 / #109). Closes #114.
 
 ## Follow-ups (tracked in new issues, not in this ADR)
 

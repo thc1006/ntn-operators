@@ -58,7 +58,7 @@ Everything runs from the repository root via `make`:
 make nephio-install-tools    # install kpt (version pinned in Makefile) into $(go env GOPATH)/bin
 make nephio-sync             # regenerate package CRDs from config/crd/bases/
 make nephio-render           # run 'kpt fn render' on both packages (in-place — not for CI)
-make nephio-validate         # run test/nephio/validate.sh (full suite, currently 16 assertions)
+make nephio-validate         # run test/nephio/validate.sh (full suite, currently 15 assertions across Suites A/B/C)
 make nephio-verify-sync      # CI drift check — fails if nephio/packages/ntn-operators-crds/*-crd.yaml diverges from config/crd/bases/
 ```
 
@@ -84,6 +84,31 @@ Samples in `config/samples/ntn_v1alpha1_*.yaml` and package samples in `nephio/p
 
 If you add a field to a sample, add it to both locations, then `make nephio-validate`.
 
+### When you bump a KRM-function mutator version
+
+Mutator images in `nephio/packages/ntn-workloads-sample/Kptfile` are pinned by `@sha256:` digest (T15). To bump a version:
+
+1. Resolve the new digest from two independent sources before committing:
+
+   ```bash
+   docker buildx imagetools inspect ghcr.io/kptdev/krm-functions-catalog/<fn>:<new-tag>
+
+   # Token extraction: jq if available, otherwise the python3 fallback below
+   # (jq is not in the contributor prerequisites; python3 always is).
+   TOKEN=$(curl -sL "https://ghcr.io/token?scope=repository:kptdev/krm-functions-catalog/<fn>:pull&service=ghcr.io" \
+     | python3 -c 'import sys,json; print(json.load(sys.stdin)["token"])')
+   curl -sLI \
+     -H "Accept: application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json,application/vnd.docker.distribution.manifest.v2+json" \
+     -H "Authorization: Bearer $TOKEN" \
+     https://ghcr.io/v2/kptdev/krm-functions-catalog/<fn>/manifests/<new-tag> | grep -i docker-content-digest
+   ```
+
+2. Both must report identical `sha256:` values. Replace the `@sha256:` reference in the Kptfile and update the comment line above it with the new tag.
+3. `make nephio-validate` — confirms T15 still passes and the rendered output matches expectations (T10 must show `namespace: ntn-system` after render).
+4. Commit both lines (digest + comment) together so reviewers can audit the version bump in one diff.
+
+For multi-arch images (OCI image index, e.g. `set-labels`), pin the **index** digest — `kpt fn render` resolves the per-platform manifest at runtime. Pinning a per-platform digest would break cross-arch render.
+
 ---
 
 ## Compatibility
@@ -95,6 +120,7 @@ If you add a field to a sample, add it to both locations, then `make nephio-vali
 | `kpt` CLI | v1.0.0-beta.55 or newer |
 | Kubernetes | 1.29+ (CEL validation is GA from 1.29) |
 | KRM function registry | `ghcr.io/kptdev/krm-functions-catalog` (Nephio R6 canonical; `gcr.io/kpt-fn/` tags are still current and functional) |
+| KRM function pinning | `@sha256:` digest (enforced by `hack/check-kptfile-digest-pin.sh` and `test/nephio/validate.sh` T15) |
 
 ---
 
@@ -113,7 +139,6 @@ Three reasons the integration is not cosmetic:
 - No `PackageVariantSet` manifests shipped here. Variants belong in the consumer's deployment repo; see each sub-README for example YAML.
 - No Porch cluster bootstrap. Porch setup is documented at nephio.org — we don't duplicate.
 - No custom KRM functions yet. A future `ntn-validator-fn` could validate cross-CR references (e.g., `NTNSlice.satellitePath.ephemerisRef` resolves to an existing `SatelliteEphemeris`). Tracked as a follow-up.
-- KRM function images are pinned by tag (`:v0.4.1`), not by `@sha256:` digest. Digest pinning is a post-1.0 supply-chain hardening item.
 - We have not yet contributed these packages to `nephio-project/catalog` upstream. The plan is to submit after E2E validation with at least one external Nephio user confirms the packages work in their deployment flow.
 
 ---
