@@ -1,0 +1,71 @@
+name: Nephio Packages
+
+# Dedicated gate for the Nephio R6 kpt package suite (nephio/packages/**)
+# and the T15 supply-chain validator. Kept out of test.yml because that
+# workflow's paths filter covers Go-only changes — wiring this in there
+# would either over-trigger envtest on docs/Kptfile-only diffs or
+# under-trigger the kpt suite on Go-only changes. See #114 (digest pin),
+# #117 (T15 validator), and #119 (this workflow) for the chain.
+#
+# Closes #119.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'nephio/**'
+      - 'hack/check-kptfile-digest-pin.sh'
+      - 'test/nephio/**'
+      - 'config/crd/bases/**'
+      - 'Makefile'
+      - '.github/workflows/nephio.yml'
+  pull_request:
+    paths:
+      - 'nephio/**'
+      - 'hack/check-kptfile-digest-pin.sh'
+      - 'test/nephio/**'
+      - 'config/crd/bases/**'
+      - 'Makefile'
+      - '.github/workflows/nephio.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Validate kpt packages (T1–T15)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Setup Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install kpt CLI
+        # `make nephio-install-tools` downloads the binary into
+        # $(go env GOPATH)/bin at the version pinned in the Makefile
+        # (KPT_VERSION). We need that path on $PATH for subsequent steps.
+        run: |
+          make nephio-install-tools
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: Verify CRD sync (drift check)
+        # Fails if nephio/packages/ntn-operators-crds/*-crd.yaml diverges
+        # from config/crd/bases/*.yaml — would mean someone forgot
+        # `make nephio-sync` after editing api/v1alpha1/*_types.go.
+        run: make nephio-verify-sync
+
+      - name: Run validate.sh suite (T1–T15)
+        # Full hermetic Nephio package validation. T15 enforces the
+        # digest-pin discipline shipped in #117. T7/T12 use kubectl
+        # client-side dry-run; ubuntu-24.04 runner has kubectl
+        # preinstalled.
+        run: make nephio-validate
