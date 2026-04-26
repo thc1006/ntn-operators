@@ -251,6 +251,14 @@ nephio-render: ## Run 'kpt fn render' on both Nephio packages.
 nephio-validate: ## Run the Nephio package validation suite (test/nephio/validate.sh).
 	@bash test/nephio/validate.sh
 
+.PHONY: pitch-check
+pitch-check: ## Verify every claim in docs/pitch/*.md traces to a facts-verified.md row.
+	@python3 hack/pitch-check.py
+
+.PHONY: pitch-check-strict
+pitch-check-strict: ## Same as pitch-check but exit 1 on any FALSE / UNVERIFIABLE match (CI gate).
+	@python3 hack/pitch-check.py --strict
+
 .PHONY: nephio-verify-sync
 nephio-verify-sync: ## Verify CRD package copies match config/crd/bases/ (CI drift check).
 	@set -e; \
