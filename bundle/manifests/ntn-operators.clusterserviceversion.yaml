@@ -47,11 +47,11 @@ metadata:
       ]
     categories: Networking
     capabilities: Full Lifecycle
-    containerImage: ghcr.io/thc1006/ntn-operators:v0.4.0-rc.1
+    containerImage: ghcr.io/thc1006/ntn-operators:v0.4.0
     repository: https://github.com/thc1006/ntn-operators
     createdAt: "2026-04-15T00:00:00Z"
     support: thc1006
-  name: ntn-operators.v0.4.0-rc.1
+  name: ntn-operators.v0.4.0
   namespace: placeholder
 spec:
   apiservicedefinitions: {}
@@ -138,7 +138,7 @@ spec:
               spec:
                 containers:
                   - name: manager
-                    image: ghcr.io/thc1006/ntn-operators:v0.4.0-rc.1
+                    image: ghcr.io/thc1006/ntn-operators:v0.4.0
                     args:
                       - --leader-elect
                       - --health-probe-bind-address=:8081
@@ -214,5 +214,5 @@ spec:
   # point OLM at a CSV it cannot find, failing the install. skipRange
   # says "this CSV can take over from anything older than itself" and
   # is safe whether or not an older CSV exists in the catalog.
-  skipRange: "<0.4.0-rc.1"
-  version: 0.4.0-rc.1
+  skipRange: "<0.4.0"
+  version: 0.4.0
