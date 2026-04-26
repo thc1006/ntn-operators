@@ -5,6 +5,57 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-04-27
+
+Promotion of `0.4.0-rc.1` after a 6-day soak. No CRD or controller breaking
+changes vs rc.1; all additions are backward compatible.
+
+### Added
+
+**Nephio R6 distribution (#51 / #112)**
+- `nephio/packages/ntn-operators-crds` — kpt-installable CRD-only package
+- `nephio/packages/ntn-workloads-sample` — kpt-installable sample CRs with
+  `set-namespace` + `set-labels` mutator pipeline
+- `make nephio-{install-tools,sync,render,validate,verify-sync}` targets
+- ADR 0003 — Nephio integration design rationale
+- README Quick Start Option D — Nephio install path for first-time visitors
+
+**Supply-chain hardening (#114 / #117)**
+- All Kptfile pipeline mutator images pinned by `@sha256:` digest
+  (`set-namespace@sha256:f930…`, `set-labels@sha256:cce5…`)
+- `hack/check-kptfile-digest-pin.sh` enforces digest pinning, mirroring
+  the action-SHA discipline established in `hack/check-action-shas.sh` (#109)
+- `test/nephio/validate.sh` T15 wires the check into the validate suite
+
+**CI gating (#119 / #121)**
+- `.github/workflows/nephio.yml` — dedicated PR/push gate running
+  `make nephio-install-tools` → `nephio-verify-sync` → `nephio-validate`
+- T7 / T12 reimplemented as hermetic python-yaml structural checks
+  (replaces `kubectl apply --dry-run=client`, which required cluster API
+  discovery and failed on hermetic CI runners)
+
+### Changed
+
+- Reconciler 304 status-not-updated bug fix (#110) — SatelliteEphemeris
+  controller now correctly persists status when the upstream returns 304
+- `pkg/netutil/allowlist.go` — private-host SSRF allow-list, OWASP
+  Case 1 hardening (#110)
+- E2E uses in-cluster CelesTrak mock to remove network flake (#105 / #110)
+- OMM test fixture deduplicated between unit and e2e (#111)
+
+### CI hardening (no operator behavior change)
+
+- E2E path filter narrowed; release.yml dry-run dispatch (#102 / #103 / #104)
+- Trivy weekly scheduled scan on main (#108)
+- Action SHA validator catches non-SHA refs at PR time (#107 / #109)
+
+### Upgrade notes from 0.4.0-rc.1
+
+- **No CRD or runtime behavior change** vs rc.1 + the #110 reconciler 304 fix
+- **OLM upgrade**: `spec.skipRange` is `"<0.4.0"` (was `"<0.4.0-rc.1"`).
+  Same reasoning as rc.1 — no rc.1 CSV was published to an OperatorHub
+  catalog, so skipRange is the right pattern.
+
 ## [0.4.0-rc.1] - 2026-04-21
 
 Release candidate for 0.4.0 consolidating the v0.2 Core Hardening, v0.3

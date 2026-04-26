@@ -5,7 +5,7 @@
 
 Kubernetes-native management framework for Non-Terrestrial Networks (NTN). Declaratively manage satellite constellations, ground stations, NTN cell configurations, and terrestrial-satellite failover — all through standard Kubernetes CRDs.
 
-> **Latest release:** [v0.4.0-rc.1](https://github.com/thc1006/ntn-operators/releases/tag/v0.4.0-rc.1) — Prometheus metrics integration, OLM bundle, signal hysteresis, cosign/SBOM supply chain. See [CHANGELOG.md](CHANGELOG.md) for the v0.2 → v0.3 → v0.4 additions.
+> **Latest release:** [v0.4.0](https://github.com/thc1006/ntn-operators/releases/tag/v0.4.0) — Nephio R6 kpt package integration, Kptfile `@sha256:` digest pinning + T15 supply-chain validator, OWASP private-host allowlist for Prometheus endpoints, and reconciler 304 status fix. See [CHANGELOG.md](CHANGELOG.md) for the full v0.4.0-rc.1 → 0.4.0 delta.
 
 ## Custom Resource Definitions
 
