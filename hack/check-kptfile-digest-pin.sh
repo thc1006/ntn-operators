@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
 #
+# Requires bash 4+ (uses mapfile, [[ =~ ]], BASH_REMATCH). macOS users
+# on the system bash 3.2 should `brew install bash` and re-run; Linux
+# distros and CI runners ship bash 5+ by default.
+#
 # check-kptfile-digest-pin.sh — verify every Kptfile pipeline mutator
-# (and validator) image is pinned by @sha256 digest, not by mutable tag.
+# AND validator image is pinned by @sha256 digest, not by mutable tag.
 #
 # Motivation: GHCR / OCI tags are mutable. A compromised upstream could
 # silently repoint `set-namespace:v0.4.1` to a malicious image on the
@@ -43,7 +47,12 @@ CHECKED=0
 mapfile -t KPTFILES < <(find "${PKGS_DIR}" -type f -name Kptfile | sort)
 
 if [ "${#KPTFILES[@]}" -eq 0 ]; then
-  echo "warning: no Kptfile found under ${PKGS_DIR}" >&2
+  # No Kptfiles under a directory that exists is a setup error (e.g., the
+  # packages tree was renamed but this script's default was not updated).
+  # Treat as exit 2 to match the missing-dir branch above and avoid the
+  # silent green of "0 errors checked".
+  echo "error: no Kptfile found under ${PKGS_DIR}" >&2
+  exit 2
 fi
 
 for KPT in "${KPTFILES[@]}"; do

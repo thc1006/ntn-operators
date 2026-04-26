@@ -92,8 +92,14 @@ Mutator images in `nephio/packages/ntn-workloads-sample/Kptfile` are pinned by `
 
    ```bash
    docker buildx imagetools inspect ghcr.io/kptdev/krm-functions-catalog/<fn>:<new-tag>
-   curl -sLI -H "Accept: application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json,application/vnd.docker.distribution.manifest.v2+json" \
-     -H "Authorization: Bearer $(curl -sL "https://ghcr.io/token?scope=repository:kptdev/krm-functions-catalog/<fn>:pull&service=ghcr.io" | jq -r .token)" \
+
+   # Token extraction: jq if available, otherwise the python3 fallback below
+   # (jq is not in the contributor prerequisites; python3 always is).
+   TOKEN=$(curl -sL "https://ghcr.io/token?scope=repository:kptdev/krm-functions-catalog/<fn>:pull&service=ghcr.io" \
+     | python3 -c 'import sys,json; print(json.load(sys.stdin)["token"])')
+   curl -sLI \
+     -H "Accept: application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json,application/vnd.docker.distribution.manifest.v2+json" \
+     -H "Authorization: Bearer $TOKEN" \
      https://ghcr.io/v2/kptdev/krm-functions-catalog/<fn>/manifests/<new-tag> | grep -i docker-content-digest
    ```
 
