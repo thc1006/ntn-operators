@@ -98,6 +98,17 @@ make install    # Install CRDs
 make run        # Run controller locally (connects to current kubeconfig)
 ```
 
+### Option D: Install via Nephio (kpt package)
+
+ntn-operators ships as a [Nephio](https://nephio.org) R6-compatible kpt package set. The CRDs install once per cluster; sample workloads compose per namespace through `kpt fn render`.
+
+```bash
+kpt pkg get https://github.com/thc1006/ntn-operators.git/nephio/packages/ntn-operators-crds@main ntn-operators-crds
+kubectl apply -f ntn-operators-crds/
+```
+
+See [`nephio/README.md`](nephio/README.md) for the full quick-start (workloads sample, Porch `PackageVariant` example, contributor `make nephio-*` targets) and [ADR 0003](docs/adr/0003-nephio-integration.md) for the design rationale.
+
 ### Apply Sample Resources
 
 ```bash
