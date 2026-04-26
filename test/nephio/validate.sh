@@ -59,7 +59,10 @@ _info() { echo "  ----  $1"; }
 # kpt is required to be on $PATH. The canonical install path is
 # $(go env GOPATH)/bin, which `make nephio-install-tools` puts on $PATH.
 _has_kpt()    { command -v kpt >/dev/null 2>&1; }
-_has_kubectl(){ command -v kubectl >/dev/null 2>&1; }
+# NB: T7 and T12 used to require kubectl for client-side dry-run apply.
+# That depended on cluster API discovery, which fails on hermetic CI
+# runners with no kubeconfig. Both tests now use python3 yaml.safe_load_all
+# with structural shape checks — kubectl is no longer required.
 
 ###############################################################################
 echo "===> Preflight"
@@ -75,11 +78,14 @@ else
   exit 1
 fi
 
-if _has_kubectl; then
-  kc_ver=$(kubectl version --client 2>/dev/null | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' | head -1)
-  _ok "kubectl available (${kc_ver})"
+if command -v python3 >/dev/null 2>&1; then
+  py_ver=$(python3 --version 2>&1 | head -1)
+  _ok "python3 available (${py_ver}) — required for T7/T12 structural YAML checks"
 else
-  _info "kubectl missing — skipping dry-run apply tests (T7, T12)"
+  _fail "python3 not on PATH — T7/T12 cannot run; install python3"
+  echo
+  echo "ABORT: cannot run without python3."
+  exit 1
 fi
 
 ###############################################################################
@@ -155,21 +161,45 @@ else
   _fail "T6 README.md missing in $CRDS_PKG"
 fi
 
-# T7: rendered CRDs pass kubectl client-side dry-run (on temp copy, source stays clean)
-if [ -f "$CRDS_PKG/Kptfile" ] && _has_kubectl; then
+# T7: rendered CRDs are well-formed CustomResourceDefinition YAML
+#     (hermetic — uses python3 yaml.safe_load_all and a structural shape
+#      check). kubectl was abandoned here because `kubectl apply
+#      --dry-run=client` performs cluster API discovery even with
+#      --validate=false, which fails on CI runners that have no
+#      kubeconfig context (#119 first-run failure).
+if [ -f "$CRDS_PKG/Kptfile" ]; then
   tmpdir=$(mktemp -d)
   cp -r "$CRDS_PKG"/. "$tmpdir/"
   kpt fn render "$tmpdir" >/dev/null 2>&1
   crd_files=$(ls "$tmpdir"/*-crd.yaml 2>/dev/null)
   if [ -n "$crd_files" ]; then
-    cat "$tmpdir"/*-crd.yaml | kubectl apply --dry-run=client -f - >/dev/null 2>&1
+    cat > "$tmpdir/_check.py" <<'PY'
+import sys, yaml
+errs = []
+for i, doc in enumerate(yaml.safe_load_all(sys.stdin)):
+    if doc is None:
+        continue
+    if not isinstance(doc, dict):
+        errs.append(f"doc {i}: not a YAML mapping")
+        continue
+    if doc.get("kind") != "CustomResourceDefinition":
+        errs.append(f"doc {i}: kind={doc.get('kind')!r}, expected CustomResourceDefinition")
+    spec = doc.get("spec") or {}
+    for required in ("group", "names", "scope", "versions"):
+        if required not in spec:
+            errs.append(f"doc {i}: missing required spec.{required}")
+for e in errs:
+    print(e, file=sys.stderr)
+sys.exit(1 if errs else 0)
+PY
+    cat "$tmpdir"/*-crd.yaml | python3 "$tmpdir/_check.py" >/dev/null 2>"$tmpdir/.err"
     rc=$?
     if [ $rc -eq 0 ]; then
-      _ok "T7 rendered CRDs pass 'kubectl apply --dry-run=client'"
+      _ok "T7 rendered CRDs are well-formed CustomResourceDefinition YAML"
     else
-      _fail "T7 rendered CRDs failed 'kubectl apply --dry-run=client' (exit $rc)"
-      if [ "$VERBOSE" = "--verbose" ]; then
-        cat "$tmpdir"/*-crd.yaml | kubectl apply --dry-run=client -f - 2>&1 | sed 's/^/       /' | head -20
+      _fail "T7 rendered CRDs failed structural validation (exit $rc)"
+      if [ "$VERBOSE" = "--verbose" ] && [ -f "$tmpdir/.err" ]; then
+        sed 's/^/       /' "$tmpdir/.err" | head -20
       fi
     fi
   else
@@ -278,21 +308,45 @@ if [ ${#missing[@]} -eq 0 ]; then
   fi
 fi
 
-# T12: rendered workloads parse as valid K8s YAML (CRDs may not be installed locally)
-if [ -f "$WORKLOADS_PKG/Kptfile" ] && _has_kubectl; then
+# T12: rendered samples parse as valid YAML and declare an expected NTN kind
+#      (hermetic — same kubectl-vs-API-discovery rationale as T7).
+if [ -f "$WORKLOADS_PKG/Kptfile" ]; then
   tmpdir=$(mktemp -d)
   cp -r "$WORKLOADS_PKG"/. "$tmpdir/"
   kpt fn render "$tmpdir" >/dev/null 2>&1
   sample_files=$(ls "$tmpdir"/*-sample.yaml 2>/dev/null)
   if [ -n "$sample_files" ]; then
-    cat "$tmpdir"/*-sample.yaml | kubectl apply --dry-run=client --validate=false -f - >/dev/null 2>&1
+    EXPECTED_KINDS_CSV=$(IFS=,; echo "${EXPECTED_SAMPLE_KINDS[*]}")
+    cat > "$tmpdir/_check.py" <<'PY'
+import os, sys, yaml
+expected = set(os.environ["EXPECTED_KINDS"].split(","))
+errs = []
+for i, doc in enumerate(yaml.safe_load_all(sys.stdin)):
+    if doc is None:
+        continue
+    if not isinstance(doc, dict):
+        errs.append(f"doc {i}: not a YAML mapping")
+        continue
+    api = doc.get("apiVersion")
+    kind = doc.get("kind")
+    if api != "ntn.operators.dev/v1alpha1":
+        errs.append(f"doc {i}: apiVersion={api!r}, expected ntn.operators.dev/v1alpha1")
+    if kind not in expected:
+        errs.append(f"doc {i}: kind={kind!r}, not in expected {sorted(expected)}")
+    if "metadata" not in doc or not isinstance(doc.get("metadata"), dict):
+        errs.append(f"doc {i}: missing metadata")
+for e in errs:
+    print(e, file=sys.stderr)
+sys.exit(1 if errs else 0)
+PY
+    cat "$tmpdir"/*-sample.yaml | EXPECTED_KINDS="$EXPECTED_KINDS_CSV" python3 "$tmpdir/_check.py" >/dev/null 2>"$tmpdir/.err"
     rc=$?
     if [ $rc -eq 0 ]; then
-      _ok "T12 rendered samples parse as valid K8s YAML"
+      _ok "T12 rendered samples are well-formed NTN CR YAML"
     else
-      _fail "T12 rendered samples failed YAML parse (exit $rc)"
-      if [ "$VERBOSE" = "--verbose" ]; then
-        cat "$tmpdir"/*-sample.yaml | kubectl apply --dry-run=client --validate=false -f - 2>&1 | sed 's/^/       /' | head -20
+      _fail "T12 rendered samples failed structural validation (exit $rc)"
+      if [ "$VERBOSE" = "--verbose" ] && [ -f "$tmpdir/.err" ]; then
+        sed 's/^/       /' "$tmpdir/.err" | head -20
       fi
     fi
   else
