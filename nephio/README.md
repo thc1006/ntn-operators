@@ -64,6 +64,8 @@ make nephio-verify-sync      # CI drift check — fails if nephio/packages/ntn-o
 
 The test script `test/nephio/validate.sh` is the executable contract. It is hermetic (no live cluster needed) and is the single source of truth for whether the packages are releasable.
 
+The same suite runs in CI via [`.github/workflows/nephio.yml`](../.github/workflows/nephio.yml) on every PR that touches `nephio/**`, `hack/check-kptfile-digest-pin.sh`, `test/nephio/**`, `config/crd/bases/**`, the `Makefile`, or the workflow file itself. PRs that do not touch any of those paths skip the suite by design.
+
 ### When you change a CRD
 
 1. Edit `api/v1alpha1/*_types.go`
