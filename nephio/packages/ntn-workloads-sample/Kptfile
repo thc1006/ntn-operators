@@ -17,10 +17,15 @@ info:
     'ntn-operators-crds' — install that first. Nephio R6 compatible.
 pipeline:
   mutators:
-    - image: ghcr.io/kptdev/krm-functions-catalog/set-namespace:v0.4.1
+    # set-namespace v0.4.1 (manifest v2, single-arch).
+    # Digest cross-verified 2026-04-26 via `docker buildx imagetools inspect`
+    # and the GHCR /v2 manifest API (Docker-Content-Digest header).
+    - image: ghcr.io/kptdev/krm-functions-catalog/set-namespace@sha256:f930d9248001fa763799cc81cf2d89bbf83954fc65de0db20ab038a21784f323
       configMap:
         namespace: ntn-system
-    - image: ghcr.io/kptdev/krm-functions-catalog/set-labels:v0.2.1
+    # set-labels v0.2.1 (OCI image index, multi-arch — kpt fn render
+    # resolves to linux/amd64 or linux/arm64 at runtime).
+    - image: ghcr.io/kptdev/krm-functions-catalog/set-labels@sha256:cce5893f108d8c3d18bd363e0d3d587f187b86b410c5d1b9d29d900e7fa8f4cf
       configMap:
         app.kubernetes.io/managed-by: ntn-operators
         workload: ntn-sample
