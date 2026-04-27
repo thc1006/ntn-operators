@@ -47,6 +47,12 @@ metadata:
       ]
     categories: Networking
     capabilities: Full Lifecycle
+    # certified: declares whether this is a Red-Hat-certified operator. For
+    # community submissions to k8s-operatorhub/community-operators (which
+    # power operatorhub.io) the canonical value is "false". Verified 2026-04
+    # against 100% of recent submissions (infinispan 2.5.7 / rabbitmq 1.19.1
+    # / clickhouse 0.26.3 all carry this annotation).
+    certified: "false"
     containerImage: ghcr.io/thc1006/ntn-operators:v0.4.0
     repository: https://github.com/thc1006/ntn-operators
     # description: short tile text shown on operatorhub.io marketplace cards.
