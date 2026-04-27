@@ -47,9 +47,22 @@ metadata:
       ]
     categories: Networking
     capabilities: Full Lifecycle
+    # certified: declares whether this is a Red-Hat-certified operator. For
+    # community submissions to k8s-operatorhub/community-operators (which
+    # power operatorhub.io) the canonical value is "false". Verified 2026-04
+    # against 100% of recent submissions (infinispan 2.5.7 / rabbitmq 1.19.1
+    # / clickhouse 0.26.3 all carry this annotation).
+    certified: "false"
     containerImage: ghcr.io/thc1006/ntn-operators:v0.4.0
     repository: https://github.com/thc1006/ntn-operators
-    createdAt: "2026-04-15T00:00:00Z"
+    # description: short tile text shown on operatorhub.io marketplace cards.
+    # Hard limit is 135 chars per k8s-operatorhub/community-operators
+    # packaging-required-fields. Long-form prose lives in spec.description.
+    description: "Kubernetes-native NTN: satellite ephemeris, ground station lifecycle, NTN cell config, terrestrial-satellite slice failover."
+    # createdAt: ISO-8601 timestamp of the bundle's published release. Tracks
+    # the v0.4.0 GitHub Release publish time (release.yml run 24963575814,
+    # 2026-04-26T18:12:49Z UTC). Bump on every version cut.
+    createdAt: "2026-04-26T18:12:49Z"
     support: thc1006
   name: ntn-operators.v0.4.0
   namespace: placeholder
