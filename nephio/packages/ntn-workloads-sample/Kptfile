@@ -17,15 +17,17 @@ info:
     'ntn-operators-crds' — install that first. Nephio R6 compatible.
 pipeline:
   mutators:
-    # set-namespace v0.4.1 (manifest v2, single-arch).
-    # Digest cross-verified 2026-04-26 via `docker buildx imagetools inspect`
-    # and the GHCR /v2 manifest API (Docker-Content-Digest header).
-    - image: ghcr.io/kptdev/krm-functions-catalog/set-namespace@sha256:f930d9248001fa763799cc81cf2d89bbf83954fc65de0db20ab038a21784f323
+    # set-namespace v0.4.5 (OCI image index, multi-arch — amd64 + arm64).
+    # Bumped from v0.4.1 in #118; v0.4.x is now distributed as a manifest
+    # list. Digest cross-verified 2026-05-01 via `docker buildx imagetools
+    # inspect` and the GHCR /v2 manifest API (Docker-Content-Digest header).
+    - image: ghcr.io/kptdev/krm-functions-catalog/set-namespace@sha256:2f596c0b4c703a1649a80e0921ded857e507a3aeac497835b75f18937fbb120a
       configMap:
         namespace: ntn-system
-    # set-labels v0.2.1 (OCI image index, multi-arch — kpt fn render
-    # resolves to linux/amd64 or linux/arm64 at runtime).
-    - image: ghcr.io/kptdev/krm-functions-catalog/set-labels@sha256:cce5893f108d8c3d18bd363e0d3d587f187b86b410c5d1b9d29d900e7fa8f4cf
+    # set-labels v0.2.4 (OCI image index, multi-arch — kpt fn render
+    # resolves to linux/amd64 or linux/arm64 at runtime). Bumped from
+    # v0.2.1 in #118. Digest cross-verified 2026-05-01 (same SOP).
+    - image: ghcr.io/kptdev/krm-functions-catalog/set-labels@sha256:e68caa56d3e7857ae28892a49051daa7393aa13e7806bf67e5c5ab3488540208
       configMap:
         app.kubernetes.io/managed-by: ntn-operators
         workload: ntn-sample
