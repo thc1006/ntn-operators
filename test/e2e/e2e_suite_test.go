@@ -33,11 +33,44 @@ import (
 )
 
 var (
+	// defaultManagerImage is the placeholder used when MANAGER_IMAGE is not
+	// set. Intentionally a non-pullable hostname so a forgotten override
+	// fails fast on Pod ImagePullBackOff rather than silently using stale
+	// state.
+	defaultManagerImage = "example.com/ntn-operators:v0.0.1"
+
 	// managerImage is the manager image to be built and loaded for testing.
-	managerImage = "example.com/ntn-operators:v0.0.1"
+	// Override with the MANAGER_IMAGE env var when targeting an existing
+	// cluster so the controller Deployment pulls from a reachable registry.
+	// Resolved once at init() so a single env value is observed for the
+	// whole suite (BeforeSuite + every spec).
+	managerImage string
+
 	// shouldCleanupCertManager tracks whether CertManager was installed by this suite.
 	shouldCleanupCertManager = false
 )
+
+func init() {
+	if v := os.Getenv("MANAGER_IMAGE"); v != "" {
+		managerImage = v
+	} else {
+		managerImage = defaultManagerImage
+	}
+}
+
+// envTrue returns true iff the named env var is set to a value the wider
+// k8s ecosystem treats as true ("true"/"1"/"yes", case-insensitive). This
+// matches controller-runtime's USE_EXISTING_CLUSTER convention so an
+// E2E_USE_EXISTING_CLUSTER=false value disables the new path as readers
+// expect.
+func envTrue(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(name))) {
+	case "1", "true", "yes", "y", "on":
+		return true
+	default:
+		return false
+	}
+}
 
 // celestrakMockHost is the in-cluster DNS name the mock server answers on.
 // Must match the Service FQDN in test/e2e/fixtures/celestrak-mock.yaml AND
@@ -48,6 +81,9 @@ const celestrakMockHost = "celestrak-mock.default.svc.cluster.local"
 // The default setup requires Kind and CertManager.
 //
 // To skip CertManager installation, set: CERT_MANAGER_INSTALL_SKIP=true
+// To run against a pre-existing cluster (e.g. kubeadm) with the manager
+// image already pushed to a registry the cluster can pull from, set:
+//   E2E_USE_EXISTING_CLUSTER=1 MANAGER_IMAGE=<your-registry>/ntn-operators:v0.0.1
 func TestE2E(t *testing.T) {
 	RegisterFailHandler(Fail)
 	_, _ = fmt.Fprintf(GinkgoWriter, "Starting ntn-operators e2e test suite\n")
@@ -55,16 +91,37 @@ func TestE2E(t *testing.T) {
 }
 
 var _ = BeforeSuite(func() {
-	By("building the manager image")
-	cmd := exec.Command("make", "docker-build", fmt.Sprintf("IMG=%s", managerImage))
-	_, err := utils.Run(cmd)
-	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to build the manager image")
+	useExisting := envTrue("E2E_USE_EXISTING_CLUSTER")
 
-	// TODO(user): If you want to change the e2e test vendor from Kind,
-	// ensure the image is built and available, then remove the following block.
-	By("loading the manager image on Kind")
-	err = utils.LoadImageToKindClusterWithName(managerImage)
-	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to load the manager image into Kind")
+	// Fail fast: if the user opted into the existing-cluster path but
+	// forgot to point MANAGER_IMAGE at a registry the cluster can pull
+	// from, the controller Deployment will eventually ImagePullBackOff
+	// against the placeholder. Surface that mistake here, before any
+	// CRDs/RBAC are applied.
+	if useExisting && managerImage == defaultManagerImage {
+		Fail(fmt.Sprintf(
+			"E2E_USE_EXISTING_CLUSTER is set but MANAGER_IMAGE was not overridden — "+
+				"refusing to deploy placeholder %q. Set MANAGER_IMAGE=<your-registry>/ntn-operators:<tag>.",
+			defaultManagerImage,
+		))
+	}
+
+	if !useExisting {
+		By("building the manager image")
+		cmd := exec.Command("make", "docker-build", fmt.Sprintf("IMG=%s", managerImage))
+		_, err := utils.Run(cmd)
+		ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to build the manager image")
+
+		// E2E_USE_EXISTING_CLUSTER offers an opt-out for non-Kind setups
+		// (kubeadm/k3s/EKS/...); see the doc comment above TestE2E.
+		By("loading the manager image on Kind")
+		err = utils.LoadImageToKindClusterWithName(managerImage)
+		ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to load the manager image into Kind")
+	} else {
+		_, _ = fmt.Fprintf(GinkgoWriter,
+			"E2E_USE_EXISTING_CLUSTER=%q — skipping docker-build / Kind load (image expected at %s)\n",
+			os.Getenv("E2E_USE_EXISTING_CLUSTER"), managerImage)
+	}
 
 	setupCertManager()
 	setupCelestrakMock()

@@ -110,9 +110,12 @@ setup-test-e2e: ## Set up a Kind cluster for e2e tests if it does not exist
 	esac
 
 .PHONY: test-e2e
-test-e2e: setup-test-e2e manifests generate fmt vet ## Run the e2e tests. Expected an isolated environment using Kind.
+test-e2e: manifests generate fmt vet ## Run the e2e tests. Defaults to a Kind environment; set E2E_USE_EXISTING_CLUSTER=true (and MANAGER_IMAGE) to target an existing cluster instead.
+	@if [ -z "$$E2E_USE_EXISTING_CLUSTER" ]; then $(MAKE) setup-test-e2e; \
+	else echo "E2E_USE_EXISTING_CLUSTER set — skipping Kind setup"; fi
 	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go test -tags=e2e ./test/e2e/ -v -ginkgo.v
-	$(MAKE) cleanup-test-e2e
+	@if [ -z "$$E2E_USE_EXISTING_CLUSTER" ]; then $(MAKE) cleanup-test-e2e; \
+	else echo "E2E_USE_EXISTING_CLUSTER set — skipping Kind teardown"; fi
 
 .PHONY: cleanup-test-e2e
 cleanup-test-e2e: ## Tear down the Kind cluster used for e2e tests
