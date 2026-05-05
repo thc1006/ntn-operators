@@ -34,7 +34,14 @@ import (
 
 var (
 	// managerImage is the manager image to be built and loaded for testing.
-	managerImage = "example.com/ntn-operators:v0.0.1"
+	// Override with the MANAGER_IMAGE env var when targeting an existing
+	// cluster so the controller Deployment pulls from a reachable registry.
+	managerImage = func() string {
+		if v := os.Getenv("MANAGER_IMAGE"); v != "" {
+			return v
+		}
+		return "example.com/ntn-operators:v0.0.1"
+	}()
 	// shouldCleanupCertManager tracks whether CertManager was installed by this suite.
 	shouldCleanupCertManager = false
 )
@@ -48,6 +55,9 @@ const celestrakMockHost = "celestrak-mock.default.svc.cluster.local"
 // The default setup requires Kind and CertManager.
 //
 // To skip CertManager installation, set: CERT_MANAGER_INSTALL_SKIP=true
+// To run against a pre-existing cluster (e.g. kubeadm) with the manager
+// image already pushed to a registry the cluster can pull from, set:
+//   E2E_USE_EXISTING_CLUSTER=1 MANAGER_IMAGE=<your-registry>/ntn-operators:v0.0.1
 func TestE2E(t *testing.T) {
 	RegisterFailHandler(Fail)
 	_, _ = fmt.Fprintf(GinkgoWriter, "Starting ntn-operators e2e test suite\n")
@@ -55,16 +65,18 @@ func TestE2E(t *testing.T) {
 }
 
 var _ = BeforeSuite(func() {
-	By("building the manager image")
-	cmd := exec.Command("make", "docker-build", fmt.Sprintf("IMG=%s", managerImage))
-	_, err := utils.Run(cmd)
-	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to build the manager image")
+	if os.Getenv("E2E_USE_EXISTING_CLUSTER") == "" {
+		By("building the manager image")
+		cmd := exec.Command("make", "docker-build", fmt.Sprintf("IMG=%s", managerImage))
+		_, err := utils.Run(cmd)
+		ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to build the manager image")
 
-	// TODO(user): If you want to change the e2e test vendor from Kind,
-	// ensure the image is built and available, then remove the following block.
-	By("loading the manager image on Kind")
-	err = utils.LoadImageToKindClusterWithName(managerImage)
-	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to load the manager image into Kind")
+		By("loading the manager image on Kind")
+		err = utils.LoadImageToKindClusterWithName(managerImage)
+		ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to load the manager image into Kind")
+	} else {
+		_, _ = fmt.Fprintf(GinkgoWriter, "E2E_USE_EXISTING_CLUSTER=1 — skipping docker-build / Kind load (image expected at %s)\n", managerImage)
+	}
 
 	setupCertManager()
 	setupCelestrakMock()
