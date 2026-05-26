@@ -613,10 +613,19 @@ ntn contains NTN-specific radio parameters per 3GPP TS 38.213 / OCUDU geo_ntn.ym
         <td><b>cellSpecificKoffset</b></td>
         <td>integer</td>
         <td>
-          cellSpecificKoffset sets the cell-specific k-offset for NTN (0-1023).<br/>
+          cellSpecificKoffset is the cell-specific K_offset for NTN scheduling timing
+(3GPP TS 38.213 / TS 38.300 §16.14.2). Its unit is milliseconds: OCUDU stores
+cell_specific_koffset as std::chrono::milliseconds and converts it to
+operating-SCS slots internally, so the value passes through this operator
+unchanged with no unit conversion. (3GPP expresses K_offset as a slot count
+assuming the 15 kHz reference SCS, where 1 slot = 1 ms; that identity is only
+how the IE is defined, not a conversion the user applies here.)
+The 3GPP IE cellSpecificKoffset-r17 is INTEGER(0..1023), but OCUDU rejects 0
+(its CLI and config validation enforce 1-1023), so Minimum is 1 to mirror the
+backend rather than the spec.<br/>
           <br/>
             <i>Default</i>: 150<br/>
-            <i>Minimum</i>: 0<br/>
+            <i>Minimum</i>: 1<br/>
             <i>Maximum</i>: 1023<br/>
         </td>
         <td>false</td>

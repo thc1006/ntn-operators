@@ -5,6 +5,44 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+**NTNCellConfig schema — OCUDU `ntn_config` alignment (#144)**
+- `spec.ntn.cellSpecificKoffset` minimum tightened from `0` to `1`. The 3GPP IE
+  `cellSpecificKoffset-r17` is `INTEGER(0..1023)` and permits `0`, but OCUDU
+  rejects `0` (its CLI and config validation enforce 1-1023), so the CRD mirrors
+  the backend rather than the spec. An explicit `cellSpecificKoffset: 0` is now
+  rejected at admission; omitting the field still defaults to `150` (the typed
+  zero value is dropped by `omitempty`, so only an explicit `0` reaches the
+  validation).
+- Field documentation now states the unit correctly: the value is in
+  **milliseconds** (TS 38.213 / TS 38.300 §16.14.2). OCUDU stores
+  `cell_specific_koffset` as `std::chrono::milliseconds` and converts it to
+  operating-SCS slots internally, so the integer passes through this operator
+  unchanged — no unit conversion. (3GPP expresses K_offset as a slot count
+  assuming the 15 kHz reference SCS, where 1 slot = 1 ms; that is only how the
+  IE is defined, not a conversion applied here.)
+- This brings the CRD into alignment with 7 of the 8 fields in OCUDU's
+  `ntn_config` struct (`ntnUlSyncValidityDur`, `polarization`, `taReport`,
+  `taInfo.taCommonDrift*`, `epochTime`, `ephemeris*`, and `cellSpecificKoffset`
+  were verified present and correctly rendered). The 8th field, `k_mac`, stays
+  intentionally deferred pending upstream OCUDU MR!597 reassessment (tracked in
+  #52); no schema change for it here.
+
+**Dependencies / CI**
+- Bumped `onsi/ginkgo/v2` 2.28.1 → 2.28.2 (#133), `aquasecurity/trivy-action`
+  0.35.0 → 0.36.0 (#127), `docker/login-action` 4.1.0 → 4.2.0 (#145), and Nephio
+  KRM mutators `set-namespace` 0.4.5 / `set-labels` 0.2.4 (#118 / #134).
+
+### Added
+
+- E2E suite can run against an existing cluster instead of always provisioning a
+  Kind cluster (#135).
+- OLM ClusterServiceVersion description and `certified` annotation, with
+  `createdAt` aligned to the 2026-04 OperatorHub convention (#124).
+
 ## [0.4.0] - 2026-04-27
 
 Promotion of `0.4.0-rc.1` after a 6-day soak. No CRD or controller breaking
