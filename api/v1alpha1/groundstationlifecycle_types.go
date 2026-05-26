@@ -18,6 +18,7 @@ package v1alpha1
 
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 )
 
 // HardwareSpec describes the ground station hardware.
@@ -205,5 +206,8 @@ type GroundStationLifecycleList struct {
 }
 
 func init() {
-	SchemeBuilder.Register(&GroundStationLifecycle{}, &GroundStationLifecycleList{})
+	SchemeBuilder.Register(func(s *runtime.Scheme) error {
+		s.AddKnownTypes(SchemeGroupVersion, &GroundStationLifecycle{}, &GroundStationLifecycleList{})
+		return nil
+	})
 }
