@@ -18,6 +18,7 @@ package v1alpha1
 
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 )
 
 // NTNCellConfigSpec defines the desired NTN cell configuration.
@@ -474,5 +475,8 @@ type NTNCellConfigList struct {
 }
 
 func init() {
-	SchemeBuilder.Register(&NTNCellConfig{}, &NTNCellConfigList{})
+	SchemeBuilder.Register(func(s *runtime.Scheme) error {
+		s.AddKnownTypes(SchemeGroupVersion, &NTNCellConfig{}, &NTNCellConfigList{})
+		return nil
+	})
 }
