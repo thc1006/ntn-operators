@@ -184,7 +184,12 @@ type ntnNeighborCellData struct {
 }
 
 type configData struct {
-	PayloadType               string
+	PayloadType string
+	// Koffset is the cell-specific K_offset in milliseconds. OCUDU stores
+	// cell_specific_koffset as std::chrono::milliseconds and converts to
+	// operating-SCS slots internally, so this value passes through unchanged
+	// (no unit conversion). OCUDU accepts 1-1023 and rejects 0; the 3GPP IE
+	// allows 0..1023, so the CRD's Minimum=1 mirrors OCUDU, not the spec.
 	Koffset                   int
 	TACommon                  int
 	TAInfoExtended            bool

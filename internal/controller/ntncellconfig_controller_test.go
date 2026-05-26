@@ -27,6 +27,8 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -699,6 +701,75 @@ var _ = Describe("NTNCellConfig Controller", func() {
 			err := k8sClient.Create(context.Background(), cr)
 			Expect(err).To(HaveOccurred())
 			Expect(err.Error()).To(ContainSubstring("zeros"))
+		})
+	})
+
+	// --- cellSpecificKoffset range alignment with OCUDU (1-1023) ---
+	//
+	// OCUDU stores cell_specific_koffset as std::chrono::milliseconds with a
+	// config range of 1-1023; 0 is not accepted. The CRD's Minimum=1 mirrors
+	// that lower bound. Note the omitempty/default interaction: the typed Go
+	// client drops a zero int (omitempty) so an "unset" koffset defaults to
+	// 150 and never reaches the Minimum check — only an *explicit* 0 in the
+	// wire object exercises it, which is why this case uses unstructured.
+	Context("cellSpecificKoffset must be within OCUDU range 1-1023", func() {
+		newCellConfigUnstructured := func(name string, koffset int64) *unstructured.Unstructured {
+			u := &unstructured.Unstructured{}
+			u.SetGroupVersionKind(schema.GroupVersionKind{
+				Group: "ntn.operators.dev", Version: "v1alpha1", Kind: "NTNCellConfig",
+			})
+			u.SetName(name)
+			u.SetNamespace(namespace)
+			u.Object["spec"] = map[string]any{
+				"provider": map[string]any{"type": "ocudu", "namespace": namespace},
+				"ntn": map[string]any{
+					"cellSpecificKoffset": koffset,
+					"payloadType":         "transparent",
+					"ephemerisECEF": map[string]any{
+						"posX": int64(20922195), "posY": int64(1967783), "posZ": int64(19770302),
+					},
+				},
+			}
+			return u
+		}
+
+		It("should reject an explicit cellSpecificKoffset of 0 (below OCUDU min)", func() {
+			err := k8sClient.Create(context.Background(), newCellConfigUnstructured("koffset-zero", 0))
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("greater than or equal to 1"))
+		})
+
+		It("should reject a cellSpecificKoffset above OCUDU max (1024)", func() {
+			err := k8sClient.Create(context.Background(), newCellConfigUnstructured("koffset-over-max", 1024))
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("less than or equal to 1023"))
+		})
+
+		It("should accept the lower valid boundary cellSpecificKoffset=1", func() {
+			// The OCUDU/CRD lower bound is inclusive: 1 is the smallest accepted
+			// value. Guards against the Minimum being mis-set to 2 (off-by-one).
+			u := newCellConfigUnstructured("koffset-min-boundary", 1)
+			Expect(k8sClient.Create(context.Background(), u)).To(Succeed())
+			Expect(k8sClient.Delete(context.Background(), u)).To(Succeed())
+		})
+
+		It("should default an omitted (zero) cellSpecificKoffset to 150, not reject it", func() {
+			// Typed client: koffset==0 is the int zero value, omitempty drops it,
+			// the apiserver applies default=150. Documents why explicit-0 rejection
+			// above needs unstructured rather than the typed geoSpec().
+			cr := &ntnv1alpha1.NTNCellConfig{
+				ObjectMeta: metav1.ObjectMeta{Name: "koffset-defaulted", Namespace: namespace},
+				Spec:       geoSpec(),
+			}
+			cr.Spec.NTN.CellSpecificKoffset = 0
+			Expect(k8sClient.Create(context.Background(), cr)).To(Succeed())
+
+			fetched := &ntnv1alpha1.NTNCellConfig{}
+			Expect(k8sClient.Get(context.Background(),
+				types.NamespacedName{Name: "koffset-defaulted", Namespace: namespace}, fetched)).To(Succeed())
+			Expect(fetched.Spec.NTN.CellSpecificKoffset).To(Equal(150))
+
+			Expect(k8sClient.Delete(context.Background(), fetched)).To(Succeed())
 		})
 	})
 })

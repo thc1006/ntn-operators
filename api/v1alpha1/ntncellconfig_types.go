@@ -65,8 +65,17 @@ type ProviderRef struct {
 // +kubebuilder:validation:XValidation:rule="!(has(self.ephemerisECEF) && has(self.ephemerisOrbital))",message="ephemerisECEF and ephemerisOrbital are mutually exclusive"
 // +kubebuilder:validation:XValidation:rule="!has(self.ephemerisECEF) || self.ephemerisECEF.posX != 0 || self.ephemerisECEF.posY != 0 || self.ephemerisECEF.posZ != 0",message="ephemerisECEF position must not be all zeros"
 type NTNParams struct {
-	// cellSpecificKoffset sets the cell-specific k-offset for NTN (0-1023).
-	// +kubebuilder:validation:Minimum=0
+	// cellSpecificKoffset is the cell-specific K_offset for NTN scheduling timing
+	// (3GPP TS 38.213 / TS 38.300 §16.14.2). Its unit is milliseconds: OCUDU stores
+	// cell_specific_koffset as std::chrono::milliseconds and converts it to
+	// operating-SCS slots internally, so the value passes through this operator
+	// unchanged with no unit conversion. (3GPP expresses K_offset as a slot count
+	// assuming the 15 kHz reference SCS, where 1 slot = 1 ms; that identity is only
+	// how the IE is defined, not a conversion the user applies here.)
+	// The 3GPP IE cellSpecificKoffset-r17 is INTEGER(0..1023), but OCUDU rejects 0
+	// (its CLI and config validation enforce 1-1023), so Minimum is 1 to mirror the
+	// backend rather than the spec.
+	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=1023
 	// +kubebuilder:default=150
 	CellSpecificKoffset int `json:"cellSpecificKoffset,omitempty"`
