@@ -53,18 +53,17 @@ metadata:
     # against 100% of recent submissions (infinispan 2.5.7 / rabbitmq 1.19.1
     # / clickhouse 0.26.3 all carry this annotation).
     certified: "false"
-    containerImage: ghcr.io/thc1006/ntn-operators:v0.4.0
+    containerImage: ghcr.io/thc1006/ntn-operators:v0.5.0-rc.1
     repository: https://github.com/thc1006/ntn-operators
     # description: short tile text shown on operatorhub.io marketplace cards.
     # Hard limit is 135 chars per k8s-operatorhub/community-operators
     # packaging-required-fields. Long-form prose lives in spec.description.
     description: "Kubernetes-native NTN: satellite ephemeris, ground station lifecycle, NTN cell config, terrestrial-satellite slice failover."
-    # createdAt: ISO-8601 timestamp of the bundle's published release. Tracks
-    # the v0.4.0 GitHub Release publish time (release.yml run 24963575814,
-    # 2026-04-26T18:12:49Z UTC). Bump on every version cut.
-    createdAt: "2026-04-26T18:12:49Z"
+    # createdAt: ISO-8601 timestamp of the bundle's published release.
+    # Bump on every version cut (approximate; set at release-prep time).
+    createdAt: "2026-05-26T23:48:50Z"
     support: thc1006
-  name: ntn-operators.v0.4.0
+  name: ntn-operators.v0.5.0-rc.1
   namespace: placeholder
 spec:
   apiservicedefinitions: {}
@@ -151,7 +150,7 @@ spec:
               spec:
                 containers:
                   - name: manager
-                    image: ghcr.io/thc1006/ntn-operators:v0.4.0
+                    image: ghcr.io/thc1006/ntn-operators:v0.5.0-rc.1
                     args:
                       - --leader-elect
                       - --health-probe-bind-address=:8081
@@ -227,5 +226,5 @@ spec:
   # point OLM at a CSV it cannot find, failing the install. skipRange
   # says "this CSV can take over from anything older than itself" and
   # is safe whether or not an older CSV exists in the catalog.
-  skipRange: "<0.4.0"
-  version: 0.4.0
+  skipRange: "<0.5.0-rc.1"
+  version: 0.5.0-rc.1

@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.5.0-rc.1] - 2026-05-27
 
 ### Changed
 
@@ -32,9 +32,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   #52); no schema change for it here.
 
 **Dependencies / CI**
+- Bumped the k8s.io stack to **0.36.0** (api, apimachinery, client-go + indirect
+  apiextensions-apiserver / apiserver / component-base) with
+  `sigs.k8s.io/controller-runtime` **0.23.3 → 0.24.1** (#150). controller-runtime
+  0.24 deprecates `controller-runtime/pkg/scheme`, so the api package's scheme
+  registration was migrated to the `k8s.io/apimachinery/pkg/runtime.NewSchemeBuilder`
+  pattern (current kubebuilder v4 scaffold). No CRD/deepcopy or runtime behavior change.
+- Bumped `sigstore/cosign-installer` 3.8.2 → **4.1.2**, with the cosign **binary
+  pinned to `v2.6.3`** (#149). Installer v4 defaults to cosign v3.x, which would
+  change the published signature/attestation format (OCI 1.1 referrers + new
+  protobuf bundle) vs v0.4.0; pinning v2.x keeps the release format-consistent.
+  The deliberate cosign v3 migration is tracked in #148.
 - Bumped `onsi/ginkgo/v2` 2.28.1 → 2.28.2 (#133), `aquasecurity/trivy-action`
-  0.35.0 → 0.36.0 (#127), `docker/login-action` 4.1.0 → 4.2.0 (#145), and Nephio
-  KRM mutators `set-namespace` 0.4.5 / `set-labels` 0.2.4 (#118 / #134).
+  0.35.0 → 0.36.0 (#127), `docker/login-action` 4.1.0 → 4.2.0 (#145),
+  `anchore/sbom-action` 0.18.0 → 0.24.0 (#126, the syft used for the release
+  SBOM), and Nephio KRM mutators `set-namespace` 0.4.5 / `set-labels` 0.2.4
+  (#118 / #134).
 
 ### Added
 
