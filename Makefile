@@ -73,6 +73,18 @@ bundle: manifests ## Sync CRDs into OLM bundle manifests.
 	done
 	cp config/crd/bases/*.yaml bundle/manifests/
 
+.PHONY: bundle-verify-sync
+bundle-verify-sync: ## Verify OLM bundle CRD copies match config/crd/bases/ (CI drift check).
+	@set -e; \
+	SRC=config/crd/bases; DST=bundle/manifests; drift=0; \
+	for src in $$SRC/ntn.operators.dev_*.yaml; do \
+	  base=$$(basename "$$src"); \
+	  if ! diff -q "$$src" "$$DST/$$base" >/dev/null 2>&1; then \
+	    echo "DRIFT: $$DST/$$base differs from $$src (run 'make bundle')"; drift=1; \
+	  fi; \
+	done; \
+	if [ $$drift -eq 0 ]; then echo "OLM bundle CRDs are in sync with config/crd/bases/"; else exit 1; fi
+
 .PHONY: bundle-build
 bundle-build: bundle ## Build the OLM bundle image.
 	$(CONTAINER_TOOL) build -f bundle.Dockerfile -t $(BUNDLE_IMG) .
