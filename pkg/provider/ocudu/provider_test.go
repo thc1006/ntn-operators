@@ -295,14 +295,16 @@ func TestPushEphemerisUpdate_ECEF(t *testing.T) {
 		t.Fatalf("Get ConfigMap: %v", err)
 	}
 	yaml := cm.Data["geo_ntn.yml"]
-	if !contains(yaml, "pos_x: 99999") {
-		t.Errorf("expected updated pos_x in YAML:\n%s", yaml)
+	// Emitted as physical SI: 99999 × 1.3 m, 30 × 0.06 m/s (the runtime push
+	// path must convert codepoints just like GenerateConfig).
+	if !contains(yaml, "pos_x: 129998.70000000001") {
+		t.Errorf("expected updated pos_x (physical metres) in YAML:\n%s", yaml)
 	}
-	if !contains(yaml, "vel_z: 30") {
-		t.Errorf("expected updated vel_z in YAML:\n%s", yaml)
+	if !contains(yaml, "vel_z: 1.7999999999999998") {
+		t.Errorf("expected updated vel_z (physical m/s) in YAML:\n%s", yaml)
 	}
-	// Old values should be gone.
-	if contains(yaml, "pos_x: 20922195") {
+	// Old physical value (geoSpec 20922195 × 1.3 = 27198853.5) should be gone.
+	if contains(yaml, "pos_x: 27198853.5") {
 		t.Error("old pos_x should have been replaced")
 	}
 }
@@ -444,7 +446,7 @@ cell_cfg:
 		t.Fatal(err)
 	}
 	yaml := updated.Data["geo_ntn.yml"]
-	if !contains(yaml, "pos_x: 111") {
+	if !contains(yaml, "pos_x: 144.3") { // 111 codepoint × 1.3 m
 		t.Errorf("expected new pos_x:\n%s", yaml)
 	}
 	// Old values + comments should be gone.

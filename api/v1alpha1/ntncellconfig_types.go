@@ -83,7 +83,7 @@ type NTNParams struct {
 
 	// taCommon sets the common Timing Advance value (0-66485757).
 	// +kubebuilder:validation:Minimum=0
-	// +kubebuilder:validation:Maximum=66485757
+	// +kubebuilder:validation:Maximum=66485756
 	// +kubebuilder:default=0
 	TACommon int `json:"taCommon,omitempty"`
 
@@ -172,18 +172,29 @@ type TAInfo struct {
 	// taCommon is the common Timing Advance value (0-66485757). Required when
 	// taInfo is set — explicitly provide 0 for GEO satellites.
 	// +kubebuilder:validation:Minimum=0
-	// +kubebuilder:validation:Maximum=66485757
+	// +kubebuilder:validation:Maximum=66485756
 	TACommon int `json:"taCommon"`
 
-	// taCommonDrift is the TA drift rate.
+	// taCommonDrift is the TA drift rate in 3GPP codepoints (ta-CommonDrift-r17,
+	// -257303 to 257303). The operator emits taCommonDrift × 2e-4 as µs/s
+	// (OCUDU accepts ±51.4606 µs/s).
+	// +kubebuilder:validation:Minimum=-257303
+	// +kubebuilder:validation:Maximum=257303
 	// +optional
 	TACommonDrift int `json:"taCommonDrift,omitempty"`
 
-	// taCommonDriftVariant is the TA drift rate variant.
+	// taCommonDriftVariant is the TA drift-rate variant in codepoints
+	// (ta-CommonDriftVariant-r17, 0 to 28949). Emitted × 2e-5 as µs/s²
+	// (OCUDU accepts 0-0.57898 µs/s²).
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=28949
 	// +optional
 	TACommonDriftVariant int `json:"taCommonDriftVariant,omitempty"`
 
-	// taCommonOffset is an additional TA offset.
+	// taCommonOffset is an additional common-TA offset in codepoints (same
+	// 0.004072 µs granularity as taCommon; 0 to 2455796 maps to OCUDU's 0-10000 µs).
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=2455795
 	// +optional
 	TACommonOffset int `json:"taCommonOffset,omitempty"`
 }
@@ -281,16 +292,23 @@ type SatSwitchWithResync struct {
 // matching OCUDU's orbital_coordinates_t representation.
 // All angular values are in units of 1e-4 degrees (per 3GPP TS 38.331).
 type EphemerisOrbital struct {
-	// semiMajorAxis is the semi-major axis in metres.
-	// +kubebuilder:validation:Minimum=6370000
+	// semiMajorAxis is the semi-major axis in metres, emitted as-is to OCUDU
+	// (which accepts 6500000-42998632 m).
+	// +kubebuilder:validation:Minimum=6500000
+	// +kubebuilder:validation:Maximum=42998632
 	SemiMajorAxis int `json:"semiMajorAxis"`
-	// eccentricity is the orbital eccentricity scaled by 1e6 (0-999999 for e < 1.0).
+	// eccentricity is the orbital eccentricity scaled by 1e6 (0-15005). The
+	// operator emits eccentricity × 1e-6; OCUDU accepts e ≤ 0.01500510825.
 	// +kubebuilder:validation:Minimum=0
-	// +kubebuilder:validation:Maximum=999999
+	// +kubebuilder:validation:Maximum=15005
 	Eccentricity int `json:"eccentricity"`
-	// inclination is the orbital inclination in 1e-4 degrees (0-1800000 = 0°-180°).
+	// inclination is the orbital inclination in 1e-4 degrees; the operator emits
+	// inclination × π/1.8e6 as radians. OCUDU's orbital ephemeris accepts only
+	// [0°, 90°] (0 to +π/2 rad), so inclinations above 90° (e.g. sun-synchronous
+	// ~98°, retrograde) are NOT representable via the orbital path — use
+	// ephemerisECEF (SGP4 state vector) for those. Max is 900000 (90°).
 	// +kubebuilder:validation:Minimum=0
-	// +kubebuilder:validation:Maximum=1800000
+	// +kubebuilder:validation:Maximum=900000
 	Inclination int `json:"inclination"`
 	// rightAscension is the right ascension of the ascending node in 1e-4 degrees (0-3600000).
 	// +kubebuilder:validation:Minimum=0
@@ -312,34 +330,51 @@ const (
 	ECEFPositionStep = 1.3
 	// ECEFVelocityStep is the velocity quantization step in m/s (0.06 m/s per LSB).
 	ECEFVelocityStep = 0.06
-	// ECEFPosMax is the maximum ECEF position value (2^26 - 1).
-	ECEFPosMax = 67108863
-	// ECEFPosMin is the minimum ECEF position value (-2^26).
-	ECEFPosMin = -67108864
+	// ECEFPosMin is the 3GPP positionX/Y/Z-r17 lower bound -2^25; × ECEFPositionStep
+	// (1.3 m) = -43620761.6 m, exactly OCUDU's accepted floor.
+	ECEFPosMin = -33554432
+	// ECEFPosMax is 33554430, one below the 3GPP upper bound 2^25-1 (33554431):
+	// OCUDU's CLI range tops out at 43620759.3 m = 33554430.2 codepoints, so
+	// 33554431 (→ 43620760.3 m) would be rejected. (Previously this was ±2^26,
+	// twice the spec, which let the emitter produce out-of-range metres.)
+	ECEFPosMax = 33554430
+	// ECEFVelMax/ECEFVelMin are the 3GPP velocityVX/VY/VZ-r17 bounds,
+	// INTEGER(-2^17 .. 2^17-1). × ECEFVelocityStep (0.06 m/s) this maps to
+	// OCUDU's accepted physical range ±7864.32 m/s.
+	ECEFVelMax = 131071
+	ECEFVelMin = -131072
 )
 
 // EphemerisECEF defines the satellite position and velocity in Earth-Centered
 // Earth-Fixed coordinates. For GEO satellites, velocity fields should be 0.
 type EphemerisECEF struct {
-	// posX is the X position of the satellite (-67108864 to 67108863).
-	// +kubebuilder:validation:Minimum=-67108864
-	// +kubebuilder:validation:Maximum=67108863
+	// posX is the X position in 1.3 m/LSB codepoints (3GPP positionX-r17,
+	// -33554432 to 33554431). The operator emits posX × 1.3 as metres to OCUDU.
+	// +kubebuilder:validation:Minimum=-33554432
+	// +kubebuilder:validation:Maximum=33554430
 	PosX int `json:"posX"`
-	// posY is the Y position of the satellite (-67108864 to 67108863).
-	// +kubebuilder:validation:Minimum=-67108864
-	// +kubebuilder:validation:Maximum=67108863
+	// posY is the Y position in 1.3 m/LSB codepoints (-33554432 to 33554431).
+	// +kubebuilder:validation:Minimum=-33554432
+	// +kubebuilder:validation:Maximum=33554430
 	PosY int `json:"posY"`
-	// posZ is the Z position of the satellite (-67108864 to 67108863).
-	// +kubebuilder:validation:Minimum=-67108864
-	// +kubebuilder:validation:Maximum=67108863
+	// posZ is the Z position in 1.3 m/LSB codepoints (-33554432 to 33554431).
+	// +kubebuilder:validation:Minimum=-33554432
+	// +kubebuilder:validation:Maximum=33554430
 	PosZ int `json:"posZ"`
-	// velX is the X velocity of the satellite (0 for GEO).
+	// velX is the X velocity in 0.06 m/s/LSB codepoints (3GPP velocityVX-r17,
+	// -131072 to 131071; 0 for GEO). The operator emits velX × 0.06 as m/s.
+	// +kubebuilder:validation:Minimum=-131072
+	// +kubebuilder:validation:Maximum=131071
 	// +kubebuilder:default=0
 	VelX int `json:"velX,omitempty"`
-	// velY is the Y velocity of the satellite (0 for GEO).
+	// velY is the Y velocity in 0.06 m/s/LSB codepoints (-131072 to 131071; 0 for GEO).
+	// +kubebuilder:validation:Minimum=-131072
+	// +kubebuilder:validation:Maximum=131071
 	// +kubebuilder:default=0
 	VelY int `json:"velY,omitempty"`
-	// velZ is the Z velocity of the satellite (0 for GEO).
+	// velZ is the Z velocity in 0.06 m/s/LSB codepoints (-131072 to 131071; 0 for GEO).
+	// +kubebuilder:validation:Minimum=-131072
+	// +kubebuilder:validation:Maximum=131071
 	// +kubebuilder:default=0
 	VelZ int `json:"velZ,omitempty"`
 }

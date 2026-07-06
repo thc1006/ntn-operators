@@ -59,9 +59,10 @@ func TestGenerateConfig_GEODefault(t *testing.T) {
 	// Ephemeris MUST use ephemeris_info_ecef (not ephemeris_info).
 	assertContains(t, yaml, "ephemeris_info_ecef:")
 	assertNotContains(t, yaml, "ephemeris_info:")
-	assertContains(t, yaml, "pos_x: 20922195")
-	assertContains(t, yaml, "pos_y: 1967783")
-	assertContains(t, yaml, "pos_z: 19770302")
+	// Emitted as physical metres = codepoint × 1.3 (20922195×1.3, 1967783×1.3, …).
+	assertContains(t, yaml, "pos_x: 27198853.5")
+	assertContains(t, yaml, "pos_y: 2558117.9")
+	assertContains(t, yaml, "pos_z: 25701392.6")
 	assertContains(t, yaml, "vel_x: 0")
 	assertContains(t, yaml, "vel_y: 0")
 	assertContains(t, yaml, "vel_z: 0")
@@ -95,7 +96,7 @@ func TestGenerateConfig_CustomKoffset(t *testing.T) {
 	yaml := string(data)
 	assertContains(t, yaml, "cell_specific_koffset: 500")
 	// ta_common under ta_info subsection
-	assertContains(t, yaml, "ta_common: 1000")
+	assertContains(t, yaml, "ta_common: 4.072") // 1000 × 0.004072 µs
 }
 
 func TestGenerateConfig_CustomCellOverrides(t *testing.T) {
@@ -139,9 +140,10 @@ func TestGenerateConfig_LEOWithVelocity(t *testing.T) {
 	}
 
 	yaml := string(data)
-	assertContains(t, yaml, "vel_x: 100")
-	assertContains(t, yaml, "vel_y: -200")
-	assertContains(t, yaml, "vel_z: 50")
+	// Emitted as physical m/s = codepoint × 0.06 (100×0.06=6, -200×0.06=-12, …).
+	assertContains(t, yaml, "vel_x: 6")
+	assertContains(t, yaml, "vel_y: -12")
+	assertContains(t, yaml, "vel_z: 3")
 }
 
 func TestGenerateConfig_OrbitalEphemeris(t *testing.T) {
@@ -172,11 +174,12 @@ func TestGenerateConfig_OrbitalEphemeris(t *testing.T) {
 	assertNotContains(t, yaml, "ephemeris_info_ecef:")
 
 	assertContains(t, yaml, "semi_major_axis: 6921000")
-	assertContains(t, yaml, "eccentricity: 1")
-	assertContains(t, yaml, "inclination: 879000")
-	assertContains(t, yaml, "longitude: 1000000")
-	assertContains(t, yaml, "periapsis: 900000")
-	assertContains(t, yaml, "mean_anomaly: 2700000")
+	// Physical: eccentricity × 1e-6; angles × π/1.8e6 (1e-4° → radians).
+	assertContains(t, yaml, "eccentricity: 0.000001")
+	assertContains(t, yaml, "inclination: 1.5341444125030157")
+	assertContains(t, yaml, "longitude: 1.7453292519943295")
+	assertContains(t, yaml, "periapsis: 1.5707963267948966")
+	assertContains(t, yaml, "mean_anomaly: 4.71238898038469")
 }
 
 func TestGenerateConfig_BothEphemerisSet(t *testing.T) {
@@ -224,10 +227,11 @@ func TestGenerateConfig_TAInfoExtended(t *testing.T) {
 	}
 	yaml := string(data)
 	assertContains(t, yaml, "ta_info:")
-	assertContains(t, yaml, "ta_common: 1000")
-	assertContains(t, yaml, "ta_common_drift: 50")
-	assertContains(t, yaml, "ta_common_drift_variant: 10")
-	assertContains(t, yaml, "ta_common_offset: 200")
+	assertContains(t, yaml, "ta_common: 4.072") // 1000 × 0.004072 µs
+	// Physical µs family: drift × 2e-4, variant × 2e-5, offset × 0.004072.
+	assertContains(t, yaml, "ta_common_drift: 0.01")
+	assertContains(t, yaml, "ta_common_drift_variant: 0.0002")
+	assertContains(t, yaml, "ta_common_offset: 0.8144")
 }
 
 func TestGenerateConfig_EpochTime(t *testing.T) {
@@ -292,8 +296,9 @@ func TestGenerateConfig_GatewayLocation(t *testing.T) {
 	// The serving-cell gateway key is "gateway_location"; "ntn_gateway_location"
 	// is only valid nested under sat_switch_with_resync and is rejected here.
 	assertNotContains(t, yaml, "ntn_gateway_location:")
-	assertContains(t, yaml, "latitude: 248500")
-	assertContains(t, yaml, "longitude: 1210000")
+	// Emitted as degrees = codepoint × 1e-4 (248500 → 24.85, 1210000 → 121).
+	assertContains(t, yaml, "latitude: 24.85")
+	assertContains(t, yaml, "longitude: 121")
 	assertContains(t, yaml, "altitude: 100")
 }
 
@@ -523,8 +528,8 @@ func TestGenerateConfig_MovingRefLocation(t *testing.T) {
 	}
 	yaml := string(data)
 	assertContains(t, yaml, "moving_ref_location:")
-	assertContains(t, yaml, "latitude: 248500")
-	assertContains(t, yaml, "longitude: 1210000")
+	assertContains(t, yaml, "latitude: 24.85")
+	assertContains(t, yaml, "longitude: 121")
 }
 
 func TestGenerateConfig_SatSwitchWithResync(t *testing.T) {
@@ -591,7 +596,7 @@ func TestGenerateConfig_MatchesLiveGNBFormat(t *testing.T) {
 		"    ta_info:",
 		"      ta_common: 0",
 		"    ephemeris_info_ecef:",
-		"      pos_x: 20922195",
+		"      pos_x: 27198853.5", // 20922195 codepoint × 1.3 m
 		"  sib:",
 		"    si_sched_info:",
 		"      - si_period: 16",
@@ -684,8 +689,8 @@ func TestGenerateConfig_ReferenceLocation(t *testing.T) {
 
 	yaml := string(data)
 	assertContains(t, yaml, "reference_location:")
-	assertContains(t, yaml, "latitude: 248500")
-	assertContains(t, yaml, "longitude: 1210000")
+	assertContains(t, yaml, "latitude: 24.85")
+	assertContains(t, yaml, "longitude: 121")
 }
 
 func TestGenerateConfig_ReferenceLocationOmittedWhenNil(t *testing.T) {
@@ -726,8 +731,11 @@ func TestGenerateConfig_DistanceThresholdAndTService(t *testing.T) {
 	}
 
 	yaml := string(data)
-	assertContains(t, yaml, "distance_threshold: 5000")
-	assertContains(t, yaml, "t_service: 600")
+	assertContains(t, yaml, "distance_threshold: 5000") // metres, passthrough
+	// t_service is intentionally NOT emitted: the CRD models a duration in
+	// seconds but OCUDU's t_service is an absolute Unix-ms/UTC timestamp, so
+	// emitting the duration would be wrong. Setting it must be a no-op.
+	assertNotContains(t, yaml, "t_service:")
 }
 
 func TestGenerateConfig_DistanceThresholdAndTServiceOmitted(t *testing.T) {

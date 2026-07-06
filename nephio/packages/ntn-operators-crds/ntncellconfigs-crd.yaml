@@ -160,37 +160,45 @@ spec:
                       Mutually exclusive with ephemerisOrbital.
                     properties:
                       posX:
-                        description: posX is the X position of the satellite (-67108864
-                          to 67108863).
-                        maximum: 67108863
-                        minimum: -67108864
+                        description: |-
+                          posX is the X position in 1.3 m/LSB codepoints (3GPP positionX-r17,
+                          -33554432 to 33554431). The operator emits posX × 1.3 as metres to OCUDU.
+                        maximum: 33554430
+                        minimum: -33554432
                         type: integer
                       posY:
-                        description: posY is the Y position of the satellite (-67108864
-                          to 67108863).
-                        maximum: 67108863
-                        minimum: -67108864
+                        description: posY is the Y position in 1.3 m/LSB codepoints
+                          (-33554432 to 33554431).
+                        maximum: 33554430
+                        minimum: -33554432
                         type: integer
                       posZ:
-                        description: posZ is the Z position of the satellite (-67108864
-                          to 67108863).
-                        maximum: 67108863
-                        minimum: -67108864
+                        description: posZ is the Z position in 1.3 m/LSB codepoints
+                          (-33554432 to 33554431).
+                        maximum: 33554430
+                        minimum: -33554432
                         type: integer
                       velX:
                         default: 0
-                        description: velX is the X velocity of the satellite (0 for
-                          GEO).
+                        description: |-
+                          velX is the X velocity in 0.06 m/s/LSB codepoints (3GPP velocityVX-r17,
+                          -131072 to 131071; 0 for GEO). The operator emits velX × 0.06 as m/s.
+                        maximum: 131071
+                        minimum: -131072
                         type: integer
                       velY:
                         default: 0
-                        description: velY is the Y velocity of the satellite (0 for
-                          GEO).
+                        description: velY is the Y velocity in 0.06 m/s/LSB codepoints
+                          (-131072 to 131071; 0 for GEO).
+                        maximum: 131071
+                        minimum: -131072
                         type: integer
                       velZ:
                         default: 0
-                        description: velZ is the Z velocity of the satellite (0 for
-                          GEO).
+                        description: velZ is the Z velocity in 0.06 m/s/LSB codepoints
+                          (-131072 to 131071; 0 for GEO).
+                        maximum: 131071
+                        minimum: -131072
                         type: integer
                     required:
                     - posX
@@ -210,15 +218,20 @@ spec:
                         minimum: 0
                         type: integer
                       eccentricity:
-                        description: eccentricity is the orbital eccentricity scaled
-                          by 1e6 (0-999999 for e < 1.0).
-                        maximum: 999999
+                        description: |-
+                          eccentricity is the orbital eccentricity scaled by 1e6 (0-15005). The
+                          operator emits eccentricity × 1e-6; OCUDU accepts e ≤ 0.01500510825.
+                        maximum: 15005
                         minimum: 0
                         type: integer
                       inclination:
-                        description: inclination is the orbital inclination in 1e-4
-                          degrees (0-1800000 = 0°-180°).
-                        maximum: 1800000
+                        description: |-
+                          inclination is the orbital inclination in 1e-4 degrees; the operator emits
+                          inclination × π/1.8e6 as radians. OCUDU's orbital ephemeris accepts only
+                          [0°, 90°] (0 to +π/2 rad), so inclinations above 90° (e.g. sun-synchronous
+                          ~98°, retrograde) are NOT representable via the orbital path — use
+                          ephemerisECEF (SGP4 state vector) for those. Max is 900000 (90°).
+                        maximum: 900000
                         minimum: 0
                         type: integer
                       meanAnomaly:
@@ -234,8 +247,11 @@ spec:
                         minimum: 0
                         type: integer
                       semiMajorAxis:
-                        description: semiMajorAxis is the semi-major axis in metres.
-                        minimum: 6370000
+                        description: |-
+                          semiMajorAxis is the semi-major axis in metres, emitted as-is to OCUDU
+                          (which accepts 6500000-42998632 m).
+                        maximum: 42998632
+                        minimum: 6500000
                         type: integer
                     required:
                     - argOfPeriapsis
@@ -463,7 +479,7 @@ spec:
                   taCommon:
                     default: 0
                     description: taCommon sets the common Timing Advance value (0-66485757).
-                    maximum: 66485757
+                    maximum: 66485756
                     minimum: 0
                     type: integer
                   taInfo:
@@ -475,17 +491,31 @@ spec:
                         description: |-
                           taCommon is the common Timing Advance value (0-66485757). Required when
                           taInfo is set — explicitly provide 0 for GEO satellites.
-                        maximum: 66485757
+                        maximum: 66485756
                         minimum: 0
                         type: integer
                       taCommonDrift:
-                        description: taCommonDrift is the TA drift rate.
+                        description: |-
+                          taCommonDrift is the TA drift rate in 3GPP codepoints (ta-CommonDrift-r17,
+                          -257303 to 257303). The operator emits taCommonDrift × 2e-4 as µs/s
+                          (OCUDU accepts ±51.4606 µs/s).
+                        maximum: 257303
+                        minimum: -257303
                         type: integer
                       taCommonDriftVariant:
-                        description: taCommonDriftVariant is the TA drift rate variant.
+                        description: |-
+                          taCommonDriftVariant is the TA drift-rate variant in codepoints
+                          (ta-CommonDriftVariant-r17, 0 to 28949). Emitted × 2e-5 as µs/s²
+                          (OCUDU accepts 0-0.57898 µs/s²).
+                        maximum: 28949
+                        minimum: 0
                         type: integer
                       taCommonOffset:
-                        description: taCommonOffset is an additional TA offset.
+                        description: |-
+                          taCommonOffset is an additional common-TA offset in codepoints (same
+                          0.004072 µs granularity as taCommon; 0 to 2455796 maps to OCUDU's 0-10000 µs).
+                        maximum: 2455795
+                        minimum: 0
                         type: integer
                     required:
                     - taCommon

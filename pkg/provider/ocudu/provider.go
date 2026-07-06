@@ -248,28 +248,37 @@ func leadingSpaces(s string) int {
 // renderEphemerisBlock renders an ephemeris block indented to `indent` spaces
 // for the key line and `indent+2` for its children, using OCUDU's key names
 // (orbital elements are longitude/periapsis, not right_ascension/arg_of_periapsis).
+//
+// It applies the SAME codepoint→physical-SI conversions as GenerateConfig (see
+// the conversion-factor constants in config.go): OCUDU's config parser expects
+// physical metres / m·s⁻¹ / radians / dimensionless values, not the CRD's 3GPP
+// codepoints. Emitting raw codepoints here would make the runtime ephemeris push
+// either out-of-range-rejected (velocity/eccentricity) or silently off by 1.3×
+// (position). semi_major_axis is already metres in the CRD (passthrough).
 func renderEphemerisBlock(update provider.EphemerisUpdate, indent int) []string {
 	pad := strings.Repeat(" ", indent)
 	child := strings.Repeat(" ", indent+2)
 	if update.Orbital != nil {
+		o := update.Orbital
 		return []string{
 			pad + "ephemeris_orbital:",
-			fmt.Sprintf("%ssemi_major_axis: %d", child, update.Orbital.SemiMajorAxis),
-			fmt.Sprintf("%seccentricity: %d", child, update.Orbital.Eccentricity),
-			fmt.Sprintf("%sinclination: %d", child, update.Orbital.Inclination),
-			fmt.Sprintf("%slongitude: %d", child, update.Orbital.RightAscension),
-			fmt.Sprintf("%speriapsis: %d", child, update.Orbital.ArgOfPeriapsis),
-			fmt.Sprintf("%smean_anomaly: %d", child, update.Orbital.MeanAnomaly),
+			fmt.Sprintf("%ssemi_major_axis: %d", child, o.SemiMajorAxis),
+			fmt.Sprintf("%seccentricity: %s", child, flt(float64(o.Eccentricity)*eccentricityScale)),
+			fmt.Sprintf("%sinclination: %s", child, flt(float64(o.Inclination)*milliDegToRad)),
+			fmt.Sprintf("%slongitude: %s", child, flt(float64(o.RightAscension)*milliDegToRad)),
+			fmt.Sprintf("%speriapsis: %s", child, flt(float64(o.ArgOfPeriapsis)*milliDegToRad)),
+			fmt.Sprintf("%smean_anomaly: %s", child, flt(float64(o.MeanAnomaly)*milliDegToRad)),
 		}
 	}
+	e := update.ECEF
 	return []string{
 		pad + "ephemeris_info_ecef:",
-		fmt.Sprintf("%spos_x: %d", child, update.ECEF.PosX),
-		fmt.Sprintf("%spos_y: %d", child, update.ECEF.PosY),
-		fmt.Sprintf("%spos_z: %d", child, update.ECEF.PosZ),
-		fmt.Sprintf("%svel_x: %d", child, update.ECEF.VelX),
-		fmt.Sprintf("%svel_y: %d", child, update.ECEF.VelY),
-		fmt.Sprintf("%svel_z: %d", child, update.ECEF.VelZ),
+		fmt.Sprintf("%spos_x: %s", child, flt(float64(e.PosX)*ntnv1alpha1.ECEFPositionStep)),
+		fmt.Sprintf("%spos_y: %s", child, flt(float64(e.PosY)*ntnv1alpha1.ECEFPositionStep)),
+		fmt.Sprintf("%spos_z: %s", child, flt(float64(e.PosZ)*ntnv1alpha1.ECEFPositionStep)),
+		fmt.Sprintf("%svel_x: %s", child, flt(float64(e.VelX)*ntnv1alpha1.ECEFVelocityStep)),
+		fmt.Sprintf("%svel_y: %s", child, flt(float64(e.VelY)*ntnv1alpha1.ECEFVelocityStep)),
+		fmt.Sprintf("%svel_z: %s", child, flt(float64(e.VelZ)*ntnv1alpha1.ECEFVelocityStep)),
 	}
 }
 

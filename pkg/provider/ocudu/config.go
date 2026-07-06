@@ -19,12 +19,51 @@ package ocudu
 import (
 	"bytes"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"text/template"
 
 	ntnv1alpha1 "github.com/thc1006/ntn-operators/api/v1alpha1"
 )
+
+// OCUDU physical-unit conversion factors.
+//
+// The CRD carries 3GPP raw codepoints (the SIB19 IE representation), but OCUDU's
+// gNB config parser expects PHYSICAL SI values (metres, m/s, radians, µs,
+// degrees) and converts them back to codepoints internally for SIB19 ASN.1
+// encoding. Emitting `codepoint × factor` therefore round-trips to exactly the
+// intended SIB19 value. Factors are the inverse of OCUDU's own divisors, taken
+// from lib/du/du_high/du_manager/converters/asn1_ntn_config_helpers.cpp:
+//   ta_common / 0.004072, ta_common_drift / 0.0002, ta_common_drift_variant /
+//   0.00002, position / 1.3, velocity / 0.06, eccentricity / 1.431e-8,
+//   inclination|longitude|periapsis|mean_anomaly / 2.341e-8 (radians),
+//   geodetic degrees. (ECEF position/velocity steps reuse the CRD's 3GPP
+//   constants ntnv1alpha1.ECEFPositionStep / ECEFVelocityStep.)
+const (
+	// taCommonStepUs is µs per ta_common / ta_common_offset codepoint.
+	taCommonStepUs = 0.004072
+	// taCommonDriftStep is µs/s per ta_common_drift codepoint.
+	taCommonDriftStep = 0.0002
+	// taCommonDriftVarStep is µs/s² per ta_common_drift_variant codepoint.
+	taCommonDriftVarStep = 0.00002
+	// eccentricityScale converts the CRD's ×1e6-scaled eccentricity to the raw
+	// dimensionless value OCUDU expects.
+	eccentricityScale = 1.0e-6
+	// oneEMinus4DegToDeg converts a 1e-4-degree codepoint to degrees (geodetic
+	// latitude/longitude).
+	oneEMinus4DegToDeg = 1.0e-4
+)
+
+// milliDegToRad converts a 1e-4-degree angular codepoint (orbital elements) to
+// radians: (codepoint / 1e4) × π/180.
+var milliDegToRad = math.Pi / 1_800_000.0
+
+// flt formats a float64 as a plain decimal (never scientific notation, shortest
+// round-tripping form) for emission into the OCUDU YAML config.
+func flt(v float64) string {
+	return strconv.FormatFloat(v, 'f', -1, 64)
+}
 
 // yamlQuote emits a YAML 1.2 double-quoted string using Go's strconv.Quote.
 // strconv.Quote produces a Go-escaped double-quoted string; YAML 1.2
@@ -85,28 +124,28 @@ cell_cfg:
   ntn:
     cell_specific_koffset: {{ .Koffset }}
     ta_info:
-      ta_common: {{ .TACommon }}
+      ta_common: {{ flt .TACommon }}
 {{- if .TAInfoExtended }}
-      ta_common_drift: {{ .TACommonDrift }}
-      ta_common_drift_variant: {{ .TACommonDriftVariant }}
-      ta_common_offset: {{ .TACommonOffset }}
+      ta_common_drift: {{ flt .TACommonDrift }}
+      ta_common_drift_variant: {{ flt .TACommonDriftVariant }}
+      ta_common_offset: {{ flt .TACommonOffset }}
 {{- end }}
 {{- if .UseOrbital }}
     ephemeris_orbital:
       semi_major_axis: {{ .OrbSemiMajorAxis }}
-      eccentricity: {{ .OrbEccentricity }}
-      inclination: {{ .OrbInclination }}
-      longitude: {{ .OrbRightAscension }}
-      periapsis: {{ .OrbArgOfPeriapsis }}
-      mean_anomaly: {{ .OrbMeanAnomaly }}
+      eccentricity: {{ flt .OrbEccentricity }}
+      inclination: {{ flt .OrbInclination }}
+      longitude: {{ flt .OrbRightAscension }}
+      periapsis: {{ flt .OrbArgOfPeriapsis }}
+      mean_anomaly: {{ flt .OrbMeanAnomaly }}
 {{- else }}
     ephemeris_info_ecef:
-      pos_x: {{ .EphPosX }}
-      pos_y: {{ .EphPosY }}
-      pos_z: {{ .EphPosZ }}
-      vel_x: {{ .EphVelX }}
-      vel_y: {{ .EphVelY }}
-      vel_z: {{ .EphVelZ }}
+      pos_x: {{ flt .EphPosX }}
+      pos_y: {{ flt .EphPosY }}
+      pos_z: {{ flt .EphPosZ }}
+      vel_x: {{ flt .EphVelX }}
+      vel_y: {{ flt .EphVelY }}
+      vel_z: {{ flt .EphVelZ }}
 {{- end }}
 {{- if .EpochTime }}
     epoch_time:
@@ -121,8 +160,8 @@ cell_cfg:
 {{- end }}
 {{- if .GatewayLocation }}
     gateway_location:
-      latitude: {{ .GatewayLatitude }}
-      longitude: {{ .GatewayLongitude }}
+      latitude: {{ flt .GatewayLatitude }}
+      longitude: {{ flt .GatewayLongitude }}
       altitude: {{ .GatewayAltitude }}
 {{- end }}
 {{- if .HasNCells }}
@@ -136,19 +175,16 @@ cell_cfg:
 {{- end }}
 {{- if .HasReferenceLocation }}
     reference_location:
-      latitude: {{ .RefLatitude }}
-      longitude: {{ .RefLongitude }}
+      latitude: {{ flt .RefLatitude }}
+      longitude: {{ flt .RefLongitude }}
 {{- end }}
 {{- if .HasDistanceThreshold }}
     distance_threshold: {{ .DistanceThreshold }}
 {{- end }}
-{{- if .HasTService }}
-    t_service: {{ .TService }}
-{{- end }}
 {{- if .MovingRefLocation }}
     moving_ref_location:
-      latitude: {{ .MovingRefLatitude }}
-      longitude: {{ .MovingRefLongitude }}
+      latitude: {{ flt .MovingRefLatitude }}
+      longitude: {{ flt .MovingRefLongitude }}
 {{- end }}
 {{- if .HasPolarization }}
     polarization:
@@ -183,7 +219,7 @@ cu_cp:
 
 var parsedTemplate = template.Must(
 	template.New("ocudu-ntn").
-		Funcs(template.FuncMap{"yamlQuote": yamlQuote}).
+		Funcs(template.FuncMap{"yamlQuote": yamlQuote, "flt": flt}).
 		Parse(configTemplate),
 )
 
@@ -201,24 +237,26 @@ type configData struct {
 	// (no unit conversion). OCUDU accepts 1-1023 and rejects 0; the 3GPP IE
 	// allows 0..1023, so the CRD's Minimum=1 mirrors OCUDU, not the spec.
 	Koffset                   int
-	TACommon                  int
+	// The following are PHYSICAL SI values emitted to OCUDU, converted from the
+	// CRD's 3GPP codepoints (see the conversion-factor constants above).
+	TACommon                  float64 // µs
 	TAInfoExtended            bool
-	TACommonDrift             int
-	TACommonDriftVariant      int
-	TACommonOffset            int
+	TACommonDrift             float64 // µs/s
+	TACommonDriftVariant      float64 // µs/s²
+	TACommonOffset            float64 // µs
 	UseOrbital                bool
-	EphPosX                   int
-	EphPosY                   int
-	EphPosZ                   int
-	EphVelX                   int
-	EphVelY                   int
-	EphVelZ                   int
-	OrbSemiMajorAxis          int
-	OrbEccentricity           int
-	OrbInclination            int
-	OrbRightAscension         int
-	OrbArgOfPeriapsis         int
-	OrbMeanAnomaly            int
+	EphPosX                   float64 // m
+	EphPosY                   float64 // m
+	EphPosZ                   float64 // m
+	EphVelX                   float64 // m/s
+	EphVelY                   float64 // m/s
+	EphVelZ                   float64 // m/s
+	OrbSemiMajorAxis          int     // m (already physical in the CRD — passthrough)
+	OrbEccentricity           float64 // dimensionless
+	OrbInclination            float64 // rad
+	OrbRightAscension         float64 // rad (OCUDU key: longitude)
+	OrbArgOfPeriapsis         float64 // rad (OCUDU key: periapsis)
+	OrbMeanAnomaly            float64 // rad
 	EpochTime                 bool
 	EpochSFN                  int
 	EpochSubframeNumber       int
@@ -227,21 +265,19 @@ type configData struct {
 	FeederDLFreq              int64
 	FeederULFreq              int64
 	GatewayLocation           bool
-	GatewayLatitude           int
-	GatewayLongitude          int
-	GatewayAltitude           int
+	GatewayLatitude           float64 // degrees
+	GatewayLongitude          float64 // degrees
+	GatewayAltitude           int     // m (passthrough)
 	HasNCells                 bool
 	NCells                    []ntnNeighborCellData
 	HasReferenceLocation      bool
-	RefLatitude               int
-	RefLongitude              int
+	RefLatitude               float64 // degrees
+	RefLongitude              float64 // degrees
 	HasDistanceThreshold      bool
-	DistanceThreshold         int
-	HasTService               bool
-	TService                  int
+	DistanceThreshold         int // m (passthrough)
 	MovingRefLocation         bool
-	MovingRefLatitude         int
-	MovingRefLongitude        int
+	MovingRefLatitude         float64 // degrees
+	MovingRefLongitude        float64 // degrees
 	HasPolarization           bool
 	PolarizationDL            string
 	PolarizationUL            string
@@ -302,7 +338,7 @@ func baseConfigData(spec *ntnv1alpha1.NTNCellConfigSpec) configData {
 	return configData{
 		PayloadType:          payloadType,
 		Koffset:              spec.NTN.CellSpecificKoffset,
-		TACommon:             spec.NTN.TACommon,
+		TACommon:             float64(spec.NTN.TACommon) * taCommonStepUs,
 		PdschMaxHarqRetxs:    0,
 		PrachMaxMsg3HarqRetx: 0,
 		RrcGuardTimeMs:       12800,
@@ -318,14 +354,14 @@ func applyTAInfo(data *configData, spec *ntnv1alpha1.NTNCellConfigSpec) {
 	}
 
 	ta := spec.NTN.TAInfo
-	data.TACommon = ta.TACommon
+	data.TACommon = float64(ta.TACommon) * taCommonStepUs
 
 	// Emit drift/offset sub-fields only when at least one is non-zero.
 	if ta.TACommonDrift != 0 || ta.TACommonDriftVariant != 0 || ta.TACommonOffset != 0 {
 		data.TAInfoExtended = true
-		data.TACommonDrift = ta.TACommonDrift
-		data.TACommonDriftVariant = ta.TACommonDriftVariant
-		data.TACommonOffset = ta.TACommonOffset
+		data.TACommonDrift = float64(ta.TACommonDrift) * taCommonDriftStep
+		data.TACommonDriftVariant = float64(ta.TACommonDriftVariant) * taCommonDriftVarStep
+		data.TACommonOffset = float64(ta.TACommonOffset) * taCommonStepUs
 	}
 }
 
@@ -343,14 +379,14 @@ func applyOptionalNTNFields(data *configData, spec *ntnv1alpha1.NTNCellConfigSpe
 	}
 	if spec.NTN.NTNGatewayLocation != nil {
 		data.GatewayLocation = true
-		data.GatewayLatitude = spec.NTN.NTNGatewayLocation.Latitude
-		data.GatewayLongitude = spec.NTN.NTNGatewayLocation.Longitude
+		data.GatewayLatitude = float64(spec.NTN.NTNGatewayLocation.Latitude) * oneEMinus4DegToDeg
+		data.GatewayLongitude = float64(spec.NTN.NTNGatewayLocation.Longitude) * oneEMinus4DegToDeg
 		data.GatewayAltitude = spec.NTN.NTNGatewayLocation.Altitude
 	}
 	if spec.NTN.MovingRefLocation != nil {
 		data.MovingRefLocation = true
-		data.MovingRefLatitude = spec.NTN.MovingRefLocation.Latitude
-		data.MovingRefLongitude = spec.NTN.MovingRefLocation.Longitude
+		data.MovingRefLatitude = float64(spec.NTN.MovingRefLocation.Latitude) * oneEMinus4DegToDeg
+		data.MovingRefLongitude = float64(spec.NTN.MovingRefLocation.Longitude) * oneEMinus4DegToDeg
 	}
 	// satSwitchWithResync is intentionally not emitted — see configTemplate note.
 	// The CRD's targetPCI/t304 shape does not map to OCUDU's sat_switch_with_resync;
@@ -385,17 +421,18 @@ func applyStage3Fields(data *configData, spec *ntnv1alpha1.NTNCellConfigSpec) {
 	}
 	if spec.NTN.ReferenceLocation != nil {
 		data.HasReferenceLocation = true
-		data.RefLatitude = spec.NTN.ReferenceLocation.Latitude
-		data.RefLongitude = spec.NTN.ReferenceLocation.Longitude
+		data.RefLatitude = float64(spec.NTN.ReferenceLocation.Latitude) * oneEMinus4DegToDeg
+		data.RefLongitude = float64(spec.NTN.ReferenceLocation.Longitude) * oneEMinus4DegToDeg
 	}
 	if spec.NTN.DistanceThreshold != nil {
 		data.HasDistanceThreshold = true
 		data.DistanceThreshold = *spec.NTN.DistanceThreshold
 	}
-	if spec.NTN.TService != nil {
-		data.HasTService = true
-		data.TService = *spec.NTN.TService
-	}
+	// t_service is intentionally NOT emitted: OCUDU's t_service is an ABSOLUTE
+	// end-of-service time (Unix ms / UTC string), but the CRD models tService as
+	// a service DURATION in seconds. Emitting a duration as a timestamp would be
+	// wrong (e.g. 100 → 100 ms past the 1970 epoch). Correct support needs the
+	// CRD to carry an absolute time; tracked with the sat-switch redesign work.
 }
 
 func applyCellOverrides(data *configData, spec *ntnv1alpha1.NTNCellConfigSpec) {
@@ -432,20 +469,22 @@ func applyEphemeris(data *configData, spec *ntnv1alpha1.NTNCellConfigSpec) error
 
 	switch {
 	case spec.NTN.EphemerisOrbital != nil:
+		orb := spec.NTN.EphemerisOrbital
 		data.UseOrbital = true
-		data.OrbSemiMajorAxis = spec.NTN.EphemerisOrbital.SemiMajorAxis
-		data.OrbEccentricity = spec.NTN.EphemerisOrbital.Eccentricity
-		data.OrbInclination = spec.NTN.EphemerisOrbital.Inclination
-		data.OrbRightAscension = spec.NTN.EphemerisOrbital.RightAscension
-		data.OrbArgOfPeriapsis = spec.NTN.EphemerisOrbital.ArgOfPeriapsis
-		data.OrbMeanAnomaly = spec.NTN.EphemerisOrbital.MeanAnomaly
+		data.OrbSemiMajorAxis = orb.SemiMajorAxis // metres — already physical, passthrough
+		data.OrbEccentricity = float64(orb.Eccentricity) * eccentricityScale
+		data.OrbInclination = float64(orb.Inclination) * milliDegToRad
+		data.OrbRightAscension = float64(orb.RightAscension) * milliDegToRad
+		data.OrbArgOfPeriapsis = float64(orb.ArgOfPeriapsis) * milliDegToRad
+		data.OrbMeanAnomaly = float64(orb.MeanAnomaly) * milliDegToRad
 	case spec.NTN.EphemerisECEF != nil:
-		data.EphPosX = spec.NTN.EphemerisECEF.PosX
-		data.EphPosY = spec.NTN.EphemerisECEF.PosY
-		data.EphPosZ = spec.NTN.EphemerisECEF.PosZ
-		data.EphVelX = spec.NTN.EphemerisECEF.VelX
-		data.EphVelY = spec.NTN.EphemerisECEF.VelY
-		data.EphVelZ = spec.NTN.EphemerisECEF.VelZ
+		e := spec.NTN.EphemerisECEF
+		data.EphPosX = float64(e.PosX) * ntnv1alpha1.ECEFPositionStep
+		data.EphPosY = float64(e.PosY) * ntnv1alpha1.ECEFPositionStep
+		data.EphPosZ = float64(e.PosZ) * ntnv1alpha1.ECEFPositionStep
+		data.EphVelX = float64(e.VelX) * ntnv1alpha1.ECEFVelocityStep
+		data.EphVelY = float64(e.VelY) * ntnv1alpha1.ECEFVelocityStep
+		data.EphVelZ = float64(e.VelZ) * ntnv1alpha1.ECEFVelocityStep
 	default:
 		return fmt.Errorf("either ephemerisECEF or ephemerisOrbital must be set")
 	}
