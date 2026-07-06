@@ -18,6 +18,7 @@ package provider
 
 import (
 	"context"
+	"errors"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -34,6 +35,43 @@ type EphemerisUpdate struct {
 	Orbital *ntnv1alpha1.EphemerisOrbital
 }
 
+// CellIdentity identifies an OCUDU cell for runtime remote commands.
+type CellIdentity struct {
+	// PLMN is the cell's PLMN string (e.g. "00101").
+	PLMN string
+	// NCI is the NR Cell Identity.
+	NCI uint64
+}
+
+// ResolvedRemoteControl is a gNB's resolved remote-control WebSocket endpoint,
+// derived from NTNCellConfig.spec.provider.remoteControl. OCUDU's remote_control
+// server is plaintext and unauthenticated (localhost by default), so the safe
+// deployment is a sidecar next to the gNB pod; cross-pod requires a NetworkPolicy.
+type ResolvedRemoteControl struct {
+	// Endpoint is host:port of the gNB remote_control server (e.g. 127.0.0.1:8001).
+	Endpoint string
+}
+
+// RuntimeUpdate is a runtime NTN configuration update for a single cell, pushed
+// via OCUDU's ntn_config_update remote command (MR !798). It currently carries a
+// fresh ephemeris (the #176 use case) plus the fields that command requires.
+type RuntimeUpdate struct {
+	// Cell identifies the target cell (plmn + nci) OCUDU keys the update on.
+	Cell CellIdentity
+	// EpochUnixMs is the ephemeris epoch in Unix milliseconds; OCUDU requires it
+	// to be in the future.
+	EpochUnixMs int64
+	// UlSyncValidityDur is the ntn-UlSyncValidityDuration value in seconds.
+	UlSyncValidityDur int
+	// Ephemeris is the fresh state vector (ECEF or orbital).
+	Ephemeris EphemerisUpdate
+}
+
+// ErrRuntimeUnsupported is returned when a provider has no runtime push transport
+// or the target has no remote-control endpoint configured. Callers fall back to
+// the ConfigMap bootstrap path.
+var ErrRuntimeUnsupported = errors.New("runtime NTN config push is not supported for this target")
+
 // NTNProvider abstracts NTN backend interactions for cell configuration
 // and ephemeris updates. Ground station lifecycle is handled directly
 // by its respective controller.
@@ -49,8 +87,15 @@ type NTNProvider interface {
 	// GetCellStatus returns the current applied configuration status.
 	GetCellStatus(ctx context.Context, crName, namespace string) (*ntnv1alpha1.NTNCellConfigStatus, error)
 
-	// PushEphemerisUpdate pushes fresh ephemeris data to the backend.
+	// PushEphemerisUpdate pushes fresh ephemeris data to the backend by rewriting
+	// the bootstrap ConfigMap (the gNB must reload). Kept as the baseline path.
 	PushEphemerisUpdate(ctx context.Context, crName, namespace string, update EphemerisUpdate) error
+
+	// PushRuntimeUpdate pushes a runtime NTN config update to the gNB's
+	// remote-control WebSocket (OCUDU ntn_config_update, MR !798) — a live update
+	// with no ConfigMap rewrite / reload. Returns ErrRuntimeUnsupported when the
+	// provider or target has no runtime transport configured.
+	PushRuntimeUpdate(ctx context.Context, target ResolvedRemoteControl, update RuntimeUpdate) error
 
 	// EnsureOwnership sets ownership metadata (e.g., OwnerReference) on
 	// the provider's managed artifact so it is garbage-collected when

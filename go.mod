@@ -4,6 +4,7 @@ go 1.26.3
 
 require (
 	github.com/akhenakh/sgp4 v0.0.0-20260314155803-8ee03fc877eb
+	github.com/coder/websocket v1.8.15
 	github.com/go-logr/logr v1.4.3
 	github.com/onsi/ginkgo/v2 v2.28.2
 	github.com/onsi/gomega v1.39.1

@@ -240,6 +240,24 @@ func (p *Provider) PushEphemerisUpdate(
 	return nil
 }
 
+// PushRuntimeUpdate pushes a live NTN config update to the gNB's remote_control
+// WebSocket via the ntn_config_update command (OCUDU MR !798) — no ConfigMap
+// rewrite or gNB reload. Returns provider.ErrRuntimeUnsupported when no
+// remote-control endpoint is configured (the caller falls back to the ConfigMap
+// bootstrap path via PushEphemerisUpdate).
+func (p *Provider) PushRuntimeUpdate(
+	ctx context.Context, target provider.ResolvedRemoteControl, update provider.RuntimeUpdate,
+) error {
+	if target.Endpoint == "" {
+		return provider.ErrRuntimeUnsupported
+	}
+	env, err := buildNTNConfigUpdate(update)
+	if err != nil {
+		return err
+	}
+	return pushNTNConfigUpdate(ctx, target.Endpoint, env)
+}
+
 // leadingSpaces returns the number of leading ASCII space characters in s.
 func leadingSpaces(s string) int {
 	return len(s) - len(strings.TrimLeft(s, " "))
