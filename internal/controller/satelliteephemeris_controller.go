@@ -196,6 +196,12 @@ func (r *SatelliteEphemerisReconciler) Reconcile(ctx context.Context, req ctrl.R
 		meta.RemoveStatusCondition(&eph.Status.Conditions, ntnv1alpha1.ConditionPassesPredicted)
 	}
 
+	// Step 7b: Propagate tracked satellites to a future epoch for runtime
+	// ephemeris push (#176). Epoch = now + refresh interval so it stays in the
+	// future across the whole cycle (OCUDU's ntn_config_update requires a future
+	// epoch; its propagator tolerates propagating backward from it).
+	r.propagateStates(eph, result, time.Now().Add(effectiveInterval))
+
 	if err := r.Status().Update(ctx, eph); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -205,6 +211,44 @@ func (r *SatelliteEphemerisReconciler) Reconcile(ctx context.Context, req ctrl.R
 	}
 
 	return ctrl.Result{RequeueAfter: effectiveInterval}, nil
+}
+
+// maxPropagatedStates caps how many per-satellite propagated states are stored
+// in status, to respect etcd object-size limits (~1.5 MB).
+const maxPropagatedStates = 128
+
+// propagateStates propagates the tracked satellites' orbits (SGP4) to the given
+// future epoch and records the ECEF state vectors in status.propagatedStates for
+// downstream runtime ephemeris push (#176). The set is filtered by
+// spec.satellites.noradIDs and capped; un-propagatable satellites are skipped.
+func (r *SatelliteEphemerisReconciler) propagateStates(
+	eph *ntnv1alpha1.SatelliteEphemeris,
+	result ephemeris.GPFetchResult,
+	epoch time.Time,
+) {
+	var norad []int
+	if eph.Spec.Satellites != nil {
+		norad = eph.Spec.Satellites.NoradIDs
+	}
+	omms := ephemeris.FilterOMMs(result.OMMs, norad)
+	epochMs := epoch.UnixMilli()
+	states := make([]ntnv1alpha1.PropagatedState, 0, len(omms))
+	for i := range omms {
+		if len(states) >= maxPropagatedStates {
+			break
+		}
+		ecef, err := ephemeris.PropagateToECEF(omms[i], epoch)
+		if err != nil {
+			continue // skip satellites whose SGP4 propagation fails / goes out of range
+		}
+		states = append(states, ntnv1alpha1.PropagatedState{
+			Satellite:   omms[i].ObjectName,
+			NoradID:     omms[i].NoradCatID,
+			EpochUnixMs: epochMs,
+			ECEF:        *ecef,
+		})
+	}
+	eph.Status.PropagatedStates = states
 }
 
 // predictPasses resolves ground stations and computes pass windows.

@@ -393,6 +393,15 @@ func (r *NTNCellConfigReconciler) pushEphemerisUpdateIfNeeded(
 		return false, marker, nil
 	}
 
+	// Runtime push path: when a remote-control endpoint + cellID are configured,
+	// push the SGP4-propagated ephemeris live via ntn_config_update (#176) instead
+	// of rewriting the bootstrap ConfigMap with the CR's static ephemeris.
+	if spec.Provider.RemoteControl != nil && spec.CellID != nil {
+		return r.pushRuntimeEphemeris(ctx, cc, spec, eph, prov, marker)
+	}
+
+	// ConfigMap bootstrap path (backward compatible): push the CR's static
+	// spec.ntn ephemeris by rewriting the ConfigMap; the gNB reloads it.
 	update := provider.EphemerisUpdate{}
 	switch {
 	case spec.NTN.EphemerisOrbital != nil:
@@ -414,6 +423,64 @@ func (r *NTNCellConfigReconciler) pushEphemerisUpdateIfNeeded(
 	}
 
 	return true, marker, nil
+}
+
+// pushRuntimeEphemeris pushes the SGP4-propagated ephemeris (from the referenced
+// SatelliteEphemeris status) to the gNB via the runtime ntn_config_update path.
+// This closes #176: the operator consumes the propagated state vector instead of
+// discarding it and re-emitting the CR's static ephemeris.
+func (r *NTNCellConfigReconciler) pushRuntimeEphemeris(
+	ctx context.Context,
+	cc *ntnv1alpha1.NTNCellConfig,
+	spec *ntnv1alpha1.NTNCellConfigSpec,
+	eph *ntnv1alpha1.SatelliteEphemeris,
+	prov provider.NTNProvider,
+	marker string,
+) (bool, string, error) {
+	state := selectPropagatedState(eph.Status.PropagatedStates, spec.EphemerisNoradID)
+	if state == nil {
+		return false, marker, newEphemerisPushError(
+			ephemerisReasonPayloadMissing,
+			fmt.Errorf("no propagated state in SatelliteEphemeris %q for noradID selector %v",
+				eph.Name, spec.EphemerisNoradID),
+		)
+	}
+	ulSync := 5
+	if spec.NTN.NTNUlSyncValidityDur != nil {
+		ulSync = *spec.NTN.NTNUlSyncValidityDur
+	}
+	ecef := state.ECEF // copy out of the slice before taking its address
+	update := provider.RuntimeUpdate{
+		Cell:              provider.CellIdentity{PLMN: spec.CellID.PLMN, NCI: uint64(spec.CellID.NCI)},
+		EpochUnixMs:       state.EpochUnixMs,
+		UlSyncValidityDur: ulSync,
+		Ephemeris:         provider.EphemerisUpdate{ECEF: &ecef},
+	}
+	target := provider.ResolvedRemoteControl{Endpoint: spec.Provider.RemoteControl.Endpoint}
+	if err := prov.PushRuntimeUpdate(ctx, target, update); err != nil {
+		return false, marker, newEphemerisPushError(
+			ephemerisReasonProviderPushFailed,
+			fmt.Errorf("provider PushRuntimeUpdate: %w", err),
+		)
+	}
+	return true, marker, nil
+}
+
+// selectPropagatedState picks the propagated state matching noradID, or the first
+// available when noradID is nil. Returns nil when none match.
+func selectPropagatedState(states []ntnv1alpha1.PropagatedState, noradID *int) *ntnv1alpha1.PropagatedState {
+	if len(states) == 0 {
+		return nil
+	}
+	if noradID == nil {
+		return &states[0]
+	}
+	for i := range states {
+		if states[i].NoradID == *noradID {
+			return &states[i]
+		}
+	}
+	return nil
 }
 
 func isEphemerisPushUpToDate(cc *ntnv1alpha1.NTNCellConfig, marker string) bool {

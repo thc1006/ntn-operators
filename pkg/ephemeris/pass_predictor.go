@@ -66,7 +66,7 @@ func PredictPasses(
 	}
 
 	// Apply NORAD ID filter if specified.
-	filtered := filterOMMs(omms, noradFilter)
+	filtered := FilterOMMs(omms, noradFilter)
 	if len(filtered) == 0 {
 		return nil, nil
 	}
@@ -219,8 +219,8 @@ func predictSingle(
 	return results, nil
 }
 
-// filterOMMs returns OMMs matching the NORAD ID filter. If filter is empty, returns all.
-func filterOMMs(omms []sgp4.OMM, noradFilter []int) []sgp4.OMM {
+// FilterOMMs returns OMMs matching the NORAD ID filter. If filter is empty, returns all.
+func FilterOMMs(omms []sgp4.OMM, noradFilter []int) []sgp4.OMM {
 	if len(noradFilter) == 0 {
 		return omms
 	}
