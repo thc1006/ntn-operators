@@ -54,6 +54,48 @@ type ntnConfigCellJSON struct {
 	EpochTimestamp    int64             `json:"epoch_timestamp"`
 	UlSyncValidityDur int               `json:"ntn_ul_sync_validity_duration"`
 	EphemerisInfo     ephemerisInfoJSON `json:"ephemeris_info"`
+	// SatSwitch is the per-cell sat_switch_with_resync block (issue #52 / #49
+	// mechanism); omitted unless a switch is pending.
+	SatSwitch *satSwitchJSON `json:"sat_switch_with_resync,omitempty"`
+}
+
+// satSwitchJSON mirrors OCUDU's per-cell sat_switch_with_resync object. All
+// scalars are optional except the nested ntn_cfg (OCUDU rejects a switch without
+// it). Timestamps are Unix ms; the sat-switch epoch is NOT future-checked by
+// OCUDU (unlike the serving-cell epoch_timestamp).
+type satSwitchJSON struct {
+	EpochTimestamp  int64               `json:"epoch_timestamp,omitempty"`
+	GatewayLocation *geodeticJSON       `json:"ntn_gateway_location,omitempty"`
+	TServiceStart   int64               `json:"t_service_start,omitempty"`
+	SSBTimeOffsetSf int                 `json:"ssb_time_offset_sf,omitempty"`
+	NTNCfg          satSwitchNtnCfgJSON `json:"ntn_cfg"`
+}
+
+// geodeticJSON is OCUDU's geodetic_coordinates_t: degrees, degrees, metres.
+type geodeticJSON struct {
+	Latitude  float64 `json:"latitude"`
+	Longitude float64 `json:"longitude"`
+	Altitude  float64 `json:"altitude"`
+}
+
+// satSwitchNtnCfgJSON is the nested ntn_cfg of a sat switch. It is the ONLY
+// OCUDU surface accepting k_mac. Note the key is ntn_ul_sync_validity_dur here
+// (NOT the serving-cell's ntn_ul_sync_validity_duration), and ta_info accepts
+// only ta_common/ta_common_drift/ta_common_drift_variant (no offset).
+type satSwitchNtnCfgJSON struct {
+	EphemerisInfo        ephemerisInfoJSON `json:"ephemeris_info"`
+	KMac                 *int              `json:"k_mac,omitempty"`
+	CellSpecificKoffset  *int              `json:"cell_specific_koffset,omitempty"`
+	NTNUlSyncValidityDur *int              `json:"ntn_ul_sync_validity_dur,omitempty"`
+	TAInfo               *taInfoJSON       `json:"ta_info,omitempty"`
+	TAReport             *bool             `json:"ta_report,omitempty"`
+}
+
+// taInfoJSON is OCUDU's runtime ta_info: physical values (µs, µs/s, µs/s²).
+type taInfoJSON struct {
+	TACommon             float64  `json:"ta_common"`
+	TACommonDrift        *float64 `json:"ta_common_drift,omitempty"`
+	TACommonDriftVariant *float64 `json:"ta_common_drift_variant,omitempty"`
 }
 
 type ephemerisInfoJSON struct {
@@ -79,19 +121,20 @@ type orbitalJSON struct {
 	MeanAnomaly   float64 `json:"mean_anomaly"`
 }
 
-// buildNTNConfigUpdate converts a RuntimeUpdate into the wire envelope, applying
-// the same codepoint→physical-SI conversions as the static config emitter.
-func buildNTNConfigUpdate(u provider.RuntimeUpdate) (ntnConfigUpdateEnvelope, error) {
-	cell := ntnConfigCellJSON{
-		PLMN:              u.Cell.PLMN,
-		NCI:               u.Cell.NCI,
-		EpochTimestamp:    u.EpochUnixMs,
-		UlSyncValidityDur: u.UlSyncValidityDur,
+// buildEphemerisInfo converts an EphemerisUpdate to the wire ephemeris_info,
+// applying the same codepoint→physical-SI conversions as the static config
+// emitter. Shared by the serving cell and the sat-switch nested ntn_cfg.
+func buildEphemerisInfo(e provider.EphemerisUpdate) (ephemerisInfoJSON, error) {
+	var info ephemerisInfoJSON
+	// ECEF and orbital are mutually exclusive (the CRD CEL rules enforce this at
+	// admission; guard here too so a bypassing caller can't emit an ambiguous frame).
+	if e.ECEF != nil && e.Orbital != nil {
+		return info, fmt.Errorf("ephemeris update has both ECEF and orbital data (mutually exclusive)")
 	}
 	switch {
-	case u.Ephemeris.Orbital != nil:
-		o := u.Ephemeris.Orbital
-		cell.EphemerisInfo.Orbital = &orbitalJSON{
+	case e.Orbital != nil:
+		o := e.Orbital
+		info.Orbital = &orbitalJSON{
 			SemiMajorAxis: float64(o.SemiMajorAxis), // metres, passthrough
 			Eccentricity:  float64(o.Eccentricity) * eccentricityScale,
 			Inclination:   float64(o.Inclination) * milliDegToRad,
@@ -99,18 +142,106 @@ func buildNTNConfigUpdate(u provider.RuntimeUpdate) (ntnConfigUpdateEnvelope, er
 			Periapsis:     float64(o.ArgOfPeriapsis) * milliDegToRad,
 			MeanAnomaly:   float64(o.MeanAnomaly) * milliDegToRad,
 		}
-	case u.Ephemeris.ECEF != nil:
-		e := u.Ephemeris.ECEF
-		cell.EphemerisInfo.ECEF = &ecefJSON{
-			PositionX:  float64(e.PosX) * ntnv1alpha1.ECEFPositionStep,
-			PositionY:  float64(e.PosY) * ntnv1alpha1.ECEFPositionStep,
-			PositionZ:  float64(e.PosZ) * ntnv1alpha1.ECEFPositionStep,
-			VelocityVX: float64(e.VelX) * ntnv1alpha1.ECEFVelocityStep,
-			VelocityVY: float64(e.VelY) * ntnv1alpha1.ECEFVelocityStep,
-			VelocityVZ: float64(e.VelZ) * ntnv1alpha1.ECEFVelocityStep,
+	case e.ECEF != nil:
+		ec := e.ECEF
+		info.ECEF = &ecefJSON{
+			PositionX:  float64(ec.PosX) * ntnv1alpha1.ECEFPositionStep,
+			PositionY:  float64(ec.PosY) * ntnv1alpha1.ECEFPositionStep,
+			PositionZ:  float64(ec.PosZ) * ntnv1alpha1.ECEFPositionStep,
+			VelocityVX: float64(ec.VelX) * ntnv1alpha1.ECEFVelocityStep,
+			VelocityVY: float64(ec.VelY) * ntnv1alpha1.ECEFVelocityStep,
+			VelocityVZ: float64(ec.VelZ) * ntnv1alpha1.ECEFVelocityStep,
 		}
 	default:
-		return ntnConfigUpdateEnvelope{}, fmt.Errorf("runtime update has neither ECEF nor orbital ephemeris")
+		return info, fmt.Errorf("ephemeris update has neither ECEF nor orbital data")
+	}
+	return info, nil
+}
+
+// buildTAInfo converts a CRD TAInfo to the runtime ta_info wire object. Only
+// ta_common / ta_common_drift / ta_common_drift_variant exist on this surface;
+// ta_common_offset is YAML-only and is intentionally dropped.
+func buildTAInfo(ta *ntnv1alpha1.TAInfo) *taInfoJSON {
+	out := &taInfoJSON{TACommon: float64(ta.TACommon) * taCommonStepUs}
+	if ta.TACommonDrift != 0 {
+		d := float64(ta.TACommonDrift) * taCommonDriftStep
+		out.TACommonDrift = &d
+	}
+	if ta.TACommonDriftVariant != 0 {
+		v := float64(ta.TACommonDriftVariant) * taCommonDriftVarStep
+		out.TACommonDriftVariant = &v
+	}
+	return out
+}
+
+// buildSatSwitch converts a CRD SatSwitchWithResync to the wire
+// sat_switch_with_resync object. The nested ntn_cfg ephemeris is required.
+func buildSatSwitch(s *ntnv1alpha1.SatSwitchWithResync) (*satSwitchJSON, error) {
+	info, err := buildEphemerisInfo(provider.EphemerisUpdate{
+		ECEF:    s.NTNConfig.EphemerisECEF,
+		Orbital: s.NTNConfig.EphemerisOrbital,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("sat_switch_with_resync.ntn_cfg: %w", err)
+	}
+	// Copy scalar pointers by value into fresh allocations so the wire envelope
+	// never aliases live CR-spec memory (consistent with the fields allocated below).
+	cfg := satSwitchNtnCfgJSON{EphemerisInfo: info}
+	if s.NTNConfig.KMac != nil {
+		k := *s.NTNConfig.KMac
+		cfg.KMac = &k
+	}
+	if s.NTNConfig.NTNUlSyncValidityDur != nil {
+		d := *s.NTNConfig.NTNUlSyncValidityDur
+		cfg.NTNUlSyncValidityDur = &d
+	}
+	if s.NTNConfig.TAReport != nil {
+		rep := *s.NTNConfig.TAReport
+		cfg.TAReport = &rep
+	}
+	if s.NTNConfig.CellSpecificKoffset > 0 {
+		k := s.NTNConfig.CellSpecificKoffset
+		cfg.CellSpecificKoffset = &k
+	}
+	if s.NTNConfig.TAInfo != nil {
+		cfg.TAInfo = buildTAInfo(s.NTNConfig.TAInfo)
+	}
+	out := &satSwitchJSON{
+		EpochTimestamp:  s.EpochUnixMs,
+		TServiceStart:   s.TServiceStartUnixMs,
+		SSBTimeOffsetSf: s.SSBTimeOffsetSubframes,
+		NTNCfg:          cfg,
+	}
+	if s.GatewayLocation != nil {
+		out.GatewayLocation = &geodeticJSON{
+			Latitude:  float64(s.GatewayLocation.Latitude) * oneEMinus4DegToDeg,
+			Longitude: float64(s.GatewayLocation.Longitude) * oneEMinus4DegToDeg,
+			Altitude:  float64(s.GatewayLocation.Altitude),
+		}
+	}
+	return out, nil
+}
+
+// buildNTNConfigUpdate converts a RuntimeUpdate into the wire envelope, applying
+// the same codepoint→physical-SI conversions as the static config emitter.
+func buildNTNConfigUpdate(u provider.RuntimeUpdate) (ntnConfigUpdateEnvelope, error) {
+	info, err := buildEphemerisInfo(u.Ephemeris)
+	if err != nil {
+		return ntnConfigUpdateEnvelope{}, fmt.Errorf("runtime update: %w", err)
+	}
+	cell := ntnConfigCellJSON{
+		PLMN:              u.Cell.PLMN,
+		NCI:               u.Cell.NCI,
+		EpochTimestamp:    u.EpochUnixMs,
+		UlSyncValidityDur: u.UlSyncValidityDur,
+		EphemerisInfo:     info,
+	}
+	if u.SatSwitch != nil {
+		ss, err := buildSatSwitch(u.SatSwitch)
+		if err != nil {
+			return ntnConfigUpdateEnvelope{}, err
+		}
+		cell.SatSwitch = ss
 	}
 	return ntnConfigUpdateEnvelope{Cmd: ntnConfigUpdateCmd, Cells: []ntnConfigCellJSON{cell}}, nil
 }

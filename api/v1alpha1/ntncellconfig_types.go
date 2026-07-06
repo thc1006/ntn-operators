@@ -315,18 +315,112 @@ type NTNPolarization struct {
 	UL string `json:"ul,omitempty"`
 }
 
-// SatSwitchWithResync provides handover hints for satellite-to-satellite transitions.
-// 3GPP Release 18 SIB19. Allows UEs to prepare for serving cell change when
-// the current satellite leaves coverage.
+// SatSwitchWithResync describes a scheduled satellite-to-satellite switch
+// (3GPP Release 18 SIB19 sat-SwitchWithReSync), mirroring OCUDU's
+// sat_switch_with_resync_t. It carries the NEXT satellite's assistance info so
+// the cell can pre-announce the switch before the serving satellite leaves
+// coverage.
+//
+// Delivery is RUNTIME-ONLY: the operator pushes it via OCUDU's ntn_config_update
+// remote command as the per-cell `sat_switch_with_resync` block. That is the one
+// OCUDU surface that accepts k_mac (issue #52) — OCUDU's bootstrap YAML exposes
+// no k_mac handle on any cell, so this field is never emitted into the static
+// ConfigMap (a boot-time "next satellite" would also be meaningless, the switch
+// target is inherently dynamic). Requires spec.provider.remoteControl +
+// spec.cellID; without them the field is inert.
+//
+// This is the switch MECHANISM only. Deciding WHEN to switch (autonomous
+// multi-satellite failover) is issue #49 and remains out of scope here — the
+// operator pushes whatever switch the spec declares.
 type SatSwitchWithResync struct {
-	// targetPCI is the Physical Cell Identity of the target cell after switch (0-1007).
-	// +kubebuilder:validation:Minimum=0
-	// +kubebuilder:validation:Maximum=1007
-	TargetPCI int `json:"targetPCI"`
+	// ntnConfig is the target satellite's NTN configuration after the switch.
+	// Required: OCUDU rejects a sat_switch_with_resync that has no ntn_cfg.
+	NTNConfig SatSwitchNTNConfig `json:"ntnConfig"`
 
-	// t304 is the handover timer value in milliseconds per 3GPP TS 38.331.
-	// +kubebuilder:validation:Enum=50;100;150;200;500;1000;2000;10000
-	T304 int `json:"t304"`
+	// epochUnixMs is the reference epoch for the target assistance info, in Unix
+	// milliseconds. 0 omits the field. Unlike the serving-cell epoch, OCUDU does
+	// not require the sat-switch epoch to be in the future.
+	// +optional
+	EpochUnixMs int64 `json:"epochUnixMs,omitempty"`
+
+	// tServiceStartUnixMs is when the target satellite starts serving, in Unix
+	// milliseconds. 0 omits the field.
+	// +optional
+	TServiceStartUnixMs int64 `json:"tServiceStartUnixMs,omitempty"`
+
+	// ssbTimeOffsetSubframes is the SSB time offset in subframes (0-159), mapping
+	// to OCUDU's ssb_time_offset_sf.
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=159
+	// +optional
+	SSBTimeOffsetSubframes int `json:"ssbTimeOffsetSubframes,omitempty"`
+
+	// gatewayLocation is the target satellite's NTN gateway (feeder) location,
+	// emitted as OCUDU's ntn_gateway_location geodetic coordinates.
+	// +optional
+	GatewayLocation *NTNGatewayLocation `json:"gatewayLocation,omitempty"`
+}
+
+// SatSwitchNTNConfig is the target satellite's assistance info carried inside a
+// satellite switch (OCUDU sat_switch_with_resync.ntn_cfg). Exactly one ephemeris
+// representation must be set — switching to a satellite with no ephemeris is
+// meaningless.
+// +kubebuilder:validation:XValidation:rule="has(self.ephemerisECEF) || has(self.ephemerisOrbital)",message="exactly one of ephemerisECEF or ephemerisOrbital must be set"
+// +kubebuilder:validation:XValidation:rule="!(has(self.ephemerisECEF) && has(self.ephemerisOrbital))",message="ephemerisECEF and ephemerisOrbital are mutually exclusive"
+type SatSwitchNTNConfig struct {
+	// ephemerisECEF is the target satellite's ECEF state vector.
+	// Mutually exclusive with ephemerisOrbital.
+	// +optional
+	EphemerisECEF *EphemerisECEF `json:"ephemerisECEF,omitempty"`
+
+	// ephemerisOrbital is the target satellite's Keplerian elements.
+	// Mutually exclusive with ephemerisECEF.
+	// +optional
+	EphemerisOrbital *EphemerisOrbital `json:"ephemerisOrbital,omitempty"`
+
+	// kMac is the MAC-CE scheduling offset k_mac (3GPP kmac-r17, INTEGER 1..512).
+	// It tunes the k-offset applied to MAC CE contention-based resolution so UE
+	// MAC feedback stays time-aligned with the satellite round-trip; distinct from
+	// cellSpecificKoffset (PUSCH/PDSCH offset).
+	//
+	// This is the ONLY OCUDU surface that accepts k_mac (issue #52): the runtime
+	// ntn_config_update command's sat_switch_with_resync.ntn_cfg. k_mac is NOT in
+	// OCUDU's bootstrap YAML on any cell (serving, neighbor, or satswitch), so the
+	// serving-cell static config remains 7/8 on the ntn_config field set by design.
+	//
+	// The 1..512 bound here is LOAD-BEARING: OCUDU's runtime update path does not
+	// range-check k_mac (verified against a live gNB — it accepts out-of-range
+	// values that would then violate the ASN.1 kmac-r17 constraint), so this CRD
+	// validation is the only guard keeping a 3GPP-invalid k_mac off the wire.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=512
+	// +optional
+	KMac *int `json:"kMac,omitempty"`
+
+	// cellSpecificKoffset is the target cell-specific K_offset in milliseconds
+	// (1-1023), same semantics as NTNParams.cellSpecificKoffset. 0 omits it.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=1023
+	// +optional
+	CellSpecificKoffset int `json:"cellSpecificKoffset,omitempty"`
+
+	// ntnUlSyncValidityDur is the target UL-sync validity duration in seconds.
+	// OCUDU keys this ntn_ul_sync_validity_dur inside ntn_cfg — deliberately
+	// distinct from the serving-cell ntn_ul_sync_validity_duration key.
+	// +kubebuilder:validation:Enum=5;10;15;20;25;30;35;40;45;50;55;60;120;180;240;900
+	// +optional
+	NTNUlSyncValidityDur *int `json:"ntnUlSyncValidityDur,omitempty"`
+
+	// taInfo provides the target satellite's timing-advance parameters. The
+	// runtime ntn_cfg accepts only ta_common / ta_common_drift /
+	// ta_common_drift_variant — NOT ta_common_offset (that key is YAML-only), so
+	// taInfo.taCommonOffset is ignored when pushed here.
+	// +optional
+	TAInfo *TAInfo `json:"taInfo,omitempty"`
+
+	// taReport enables UE TA reporting for the target satellite.
+	// +optional
+	TAReport *bool `json:"taReport,omitempty"`
 }
 
 // EphemerisOrbital defines the satellite orbit using Keplerian elements,

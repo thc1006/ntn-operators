@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -150,6 +151,116 @@ func wsTestServer(t *testing.T, reply string) (string, func() []byte) {
 		defer mu.Unlock()
 		return got
 	}
+}
+
+// satSwitchRuntimeUpdate is an ECEF serving-cell update carrying a full
+// sat_switch_with_resync block, including k_mac (issue #52).
+func satSwitchRuntimeUpdate() provider.RuntimeUpdate {
+	kmac := 300
+	dur := 30
+	rep := true
+	u := ecefRuntimeUpdate()
+	u.SatSwitch = &ntnv1alpha1.SatSwitchWithResync{
+		EpochUnixMs:            1893456000000,
+		TServiceStartUnixMs:    1893456060000,
+		SSBTimeOffsetSubframes: 4,
+		GatewayLocation:        &ntnv1alpha1.NTNGatewayLocation{Latitude: 248500, Longitude: 1210000, Altitude: 100},
+		NTNConfig: ntnv1alpha1.SatSwitchNTNConfig{
+			EphemerisECEF:        &ntnv1alpha1.EphemerisECEF{PosX: 1000000, PosY: 2000000, PosZ: 3000000},
+			KMac:                 &kmac,
+			CellSpecificKoffset:  20,
+			NTNUlSyncValidityDur: &dur,
+			TAReport:             &rep,
+			TAInfo:               &ntnv1alpha1.TAInfo{TACommon: 1000, TACommonDrift: 50, TACommonDriftVariant: 10},
+		},
+	}
+	return u
+}
+
+// The sat_switch_with_resync wire block must match OCUDU's per-cell schema:
+// nested key is ntn_cfg, the k_mac field is a plain int (no conversion), the
+// UL-sync key is ntn_ul_sync_validity_dur (NOT the serving-cell _duration), and
+// physical fields (gateway degrees, ta µs, nested ephemeris metres) are converted.
+func TestBuildNTNConfigUpdate_SatSwitch_KMac_WireFormat(t *testing.T) {
+	b, err := json.Marshal(mustBuild(t, satSwitchRuntimeUpdate()))
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	js := string(b)
+	for _, want := range []string{
+		`"sat_switch_with_resync":{`,
+		`"ntn_cfg":{`,
+		`"k_mac":300`, // issue #52 — passthrough int, the whole point
+		`"cell_specific_koffset":20`,
+		`"ntn_ul_sync_validity_dur":30`, // nested key is _dur, not _duration
+		`"ta_report":true`,
+		`"ssb_time_offset_sf":4`,
+		`"t_service_start":1893456060000`,
+		`"position_x":1300000`, // nested ephemeris converted (1000000 × 1.3)
+	} {
+		if !strings.Contains(js, want) {
+			t.Errorf("sat-switch envelope missing %q\n%s", want, js)
+		}
+	}
+	// The serving cell keeps its own ntn_ul_sync_validity_duration; the nested
+	// block must NOT reuse that key. Exactly one _duration in the whole frame.
+	if n := strings.Count(js, `"ntn_ul_sync_validity_duration"`); n != 1 {
+		t.Errorf("expected exactly one serving-cell _duration key, got %d:\n%s", n, js)
+	}
+
+	// Verify physical float conversions numerically (json float formatting is
+	// fragile as a substring). Round-trip through the same wire types.
+	var rt ntnConfigUpdateEnvelope
+	if err := json.Unmarshal(b, &rt); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	ss := rt.Cells[0].SatSwitch
+	if ss == nil {
+		t.Fatal("sat_switch_with_resync missing after round-trip")
+	}
+	if ss.GatewayLocation == nil || math.Abs(ss.GatewayLocation.Latitude-24.85) > 1e-9 {
+		t.Errorf("gateway latitude = %+v, want 24.85 (248500 × 1e-4)", ss.GatewayLocation)
+	}
+	if ss.NTNCfg.TAInfo == nil {
+		t.Fatal("nested ta_info missing")
+	}
+	if got := ss.NTNCfg.TAInfo.TACommon; math.Abs(got-4.072) > 1e-6 { // 1000 × 0.004072
+		t.Errorf("ta_common = %v, want ~4.072", got)
+	}
+	if ss.NTNCfg.TAInfo.TACommonDrift == nil || math.Abs(*ss.NTNCfg.TAInfo.TACommonDrift-0.01) > 1e-9 { // 50 × 2e-4
+		t.Errorf("ta_common_drift = %v, want 0.01", ss.NTNCfg.TAInfo.TACommonDrift)
+	}
+}
+
+// A sat switch with no nested ephemeris is meaningless, so the CRD (and this
+// builder) require exactly one ephemeris. This is STRICTER than OCUDU, whose
+// parser treats sat_switch_with_resync.ntn_cfg.ephemeris_info as optional.
+func TestBuildNTNConfigUpdate_SatSwitch_MissingEphemeris_Errors(t *testing.T) {
+	u := ecefRuntimeUpdate()
+	u.SatSwitch = &ntnv1alpha1.SatSwitchWithResync{} // NTNConfig has no ephemeris
+	if _, err := buildNTNConfigUpdate(u); err == nil {
+		t.Fatal("expected error when the sat-switch nested ntn_cfg has no ephemeris")
+	}
+}
+
+// No pending switch → the frame must omit sat_switch_with_resync entirely.
+func TestBuildNTNConfigUpdate_NoSatSwitch_OmitsBlock(t *testing.T) {
+	b, err := json.Marshal(mustBuild(t, ecefRuntimeUpdate()))
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Contains(string(b), "sat_switch_with_resync") {
+		t.Errorf("frame leaked a sat_switch_with_resync block:\n%s", b)
+	}
+}
+
+func mustBuild(t *testing.T, u provider.RuntimeUpdate) ntnConfigUpdateEnvelope {
+	t.Helper()
+	env, err := buildNTNConfigUpdate(u)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	return env
 }
 
 func TestPushNTNConfigUpdate_Success(t *testing.T) {

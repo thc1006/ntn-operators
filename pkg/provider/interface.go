@@ -65,6 +65,12 @@ type RuntimeUpdate struct {
 	UlSyncValidityDur int
 	// Ephemeris is the fresh state vector (ECEF or orbital).
 	Ephemeris EphemerisUpdate
+	// SatSwitch, when non-nil, adds a sat_switch_with_resync block to the push:
+	// the next satellite's assistance info, including k_mac (issue #52) — the
+	// only OCUDU surface that accepts k_mac. Rides alongside the serving-cell
+	// ephemeris in the same per-cell update (OCUDU requires cell ephemeris_info
+	// regardless). nil means no pending switch.
+	SatSwitch *ntnv1alpha1.SatSwitchWithResync
 }
 
 // ErrRuntimeUnsupported is returned when a provider has no runtime push transport

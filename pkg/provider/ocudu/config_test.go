@@ -533,18 +533,21 @@ func TestGenerateConfig_MovingRefLocation(t *testing.T) {
 }
 
 func TestGenerateConfig_SatSwitchWithResync(t *testing.T) {
-	// satSwitchWithResync is intentionally NOT emitted. The CRD's targetPCI/t304
-	// shape does not map to OCUDU's sat_switch_with_resync (a satellite switch
-	// carrying satellite_idx/ephemeris/gateway/t_service_start/ssb_time_offset and
-	// a nested ntn_cfg), so emitting it would inject unknown keys and fail the
-	// whole config parse (verified by booting the gNB). Setting the field must be
-	// a no-op, not a parse-breaker, until the CRD field is redesigned.
+	// satSwitchWithResync is a RUNTIME-only feature: it must NEVER appear in the
+	// static YAML. It is delivered via the ntn_config_update remote command (the
+	// only OCUDU surface carrying its k_mac field). Setting it must be a no-op for
+	// the static emitter, not a parse-breaker (emitting it would inject unknown
+	// keys and fail the whole config parse — verified by booting the gNB).
+	kmac := 300
 	spec := &ntnv1alpha1.NTNCellConfigSpec{
 		NTN: ntnv1alpha1.NTNParams{
 			EphemerisECEF: &ntnv1alpha1.EphemerisECEF{PosX: 1, PosY: 2, PosZ: 3},
 			SatSwitchWithResync: &ntnv1alpha1.SatSwitchWithResync{
-				TargetPCI: 100,
-				T304:      150,
+				SSBTimeOffsetSubframes: 4,
+				NTNConfig: ntnv1alpha1.SatSwitchNTNConfig{
+					EphemerisECEF: &ntnv1alpha1.EphemerisECEF{PosX: 10, PosY: 20, PosZ: 30},
+					KMac:          &kmac,
+				},
 			},
 		},
 	}
@@ -554,8 +557,8 @@ func TestGenerateConfig_SatSwitchWithResync(t *testing.T) {
 	}
 	yaml := string(data)
 	assertNotContains(t, yaml, "sat_switch_with_resync:")
-	assertNotContains(t, yaml, "target_pci:")
-	assertNotContains(t, yaml, "t304:")
+	assertNotContains(t, yaml, "k_mac:")
+	assertNotContains(t, yaml, "t_service_start:")
 }
 
 func TestGenerateConfig_NilSpec(t *testing.T) {
@@ -864,7 +867,11 @@ func TestGenerateConfig_YAMLRoundTrip(t *testing.T) {
 			EpochTime:           &ntnv1alpha1.EpochTime{SFN: 512, SubframeNumber: 5},
 			EphemerisECEF:       &ntnv1alpha1.EphemerisECEF{PosX: 1, PosY: 2, PosZ: 3, VelX: 10, VelY: 20, VelZ: 30},
 			MovingRefLocation:   &ntnv1alpha1.MovingRefLocation{Latitude: 248500, Longitude: 1210000},
-			SatSwitchWithResync: &ntnv1alpha1.SatSwitchWithResync{TargetPCI: 1, T304: 100},
+			SatSwitchWithResync: &ntnv1alpha1.SatSwitchWithResync{
+				NTNConfig: ntnv1alpha1.SatSwitchNTNConfig{
+					EphemerisECEF: &ntnv1alpha1.EphemerisECEF{PosX: 1, PosY: 2, PosZ: 3},
+				},
+			},
 			NeighborCells: []ntnv1alpha1.NTNNeighborCell{
 				{PhysicalCellID: 7, Frequency: 632628},
 				{PhysicalCellID: 42},

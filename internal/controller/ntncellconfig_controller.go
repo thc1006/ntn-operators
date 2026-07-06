@@ -423,6 +423,20 @@ func (r *NTNCellConfigReconciler) pushEphemerisUpdateIfNeeded(
 		return r.pushRuntimeEphemeris(ctx, cc, spec, eph, prov, marker)
 	}
 
+	// A satSwitchWithResync is runtime-only (its k_mac has no bootstrap-YAML
+	// surface, issue #52). On the ConfigMap path it cannot be delivered, so make
+	// that observable instead of silently dropping it — a cell that sets a switch
+	// without remoteControl+cellID is misconfigured.
+	if spec.NTN.SatSwitchWithResync != nil {
+		logf.FromContext(ctx).Info(
+			"satSwitchWithResync is set but ignored: it requires spec.provider.remoteControl and spec.cellID (runtime push); the ConfigMap path cannot deliver it",
+			"cell", cc.Name)
+		if r.Recorder != nil {
+			r.Recorder.Eventf(cc, nil, "Warning", "SatSwitchIgnored", "SatSwitchIgnored",
+				"%s", "satSwitchWithResync (incl. k_mac) requires remoteControl+cellID; ignored on the ConfigMap path")
+		}
+	}
+
 	// ConfigMap bootstrap path (backward compatible): push the CR's static
 	// spec.ntn ephemeris by rewriting the ConfigMap; the gNB reloads it.
 	update := provider.EphemerisUpdate{}
@@ -490,6 +504,13 @@ func (r *NTNCellConfigReconciler) pushRuntimeEphemeris(
 		EpochUnixMs:       state.EpochUnixMs,
 		UlSyncValidityDur: ulSync,
 		Ephemeris:         provider.EphemerisUpdate{ECEF: &ecef},
+	}
+	// Attach a pending satellite switch (issue #52 / #49 mechanism): it rides in
+	// the same per-cell frame as the serving ephemeris. This is the only surface
+	// that carries k_mac. The switch only reaches the gNB when a fresh serving
+	// ephemeris push happens (OCUDU requires the cell's ephemeris_info anyway).
+	if spec.NTN.SatSwitchWithResync != nil {
+		update.SatSwitch = spec.NTN.SatSwitchWithResync
 	}
 	target := provider.ResolvedRemoteControl{Endpoint: spec.Provider.RemoteControl.Endpoint}
 	if err := prov.PushRuntimeUpdate(ctx, target, update); err != nil {

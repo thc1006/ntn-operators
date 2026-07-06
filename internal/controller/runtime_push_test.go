@@ -131,6 +131,64 @@ func TestPushEphemerisUpdateIfNeeded_RuntimePath_Closes176(t *testing.T) {
 	}
 }
 
+// A pending satSwitchWithResync must ride along in the runtime push (issue #52 —
+// the only surface that carries k_mac), delivered with the serving ephemeris.
+func TestPushEphemerisUpdateIfNeeded_SatSwitchAttached(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := ntnv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme: %v", err)
+	}
+	eph := ephWithPropagatedState(time.Now().Add(time.Hour).UnixMilli())
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(eph).Build()
+	r := &NTNCellConfigReconciler{Client: c}
+	mock := &provider.MockProvider{}
+
+	kmac := 200
+	cc := ccWithRemoteControl()
+	cc.Spec.NTN.SatSwitchWithResync = &ntnv1alpha1.SatSwitchWithResync{
+		NTNConfig: ntnv1alpha1.SatSwitchNTNConfig{
+			EphemerisECEF: &ntnv1alpha1.EphemerisECEF{PosX: 6000000, PosY: 1, PosZ: 1},
+			KMac:          &kmac,
+		},
+	}
+
+	pushed, _, err := r.pushEphemerisUpdateIfNeeded(context.Background(), cc, &cc.Spec, mock)
+	if err != nil || !pushed {
+		t.Fatalf("push: pushed=%v err=%v", pushed, err)
+	}
+	if mock.LastRuntime == nil || mock.LastRuntime.SatSwitch == nil {
+		t.Fatal("sat switch was not attached to the runtime push")
+	}
+	if k := mock.LastRuntime.SatSwitch.NTNConfig.KMac; k == nil || *k != 200 {
+		t.Errorf("k_mac not propagated to the push: %+v", mock.LastRuntime.SatSwitch.NTNConfig)
+	}
+}
+
+// Without a pending switch, the runtime push must not carry a sat-switch block.
+func TestPushEphemerisUpdateIfNeeded_NoSatSwitchByDefault(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := ntnv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme: %v", err)
+	}
+	eph := ephWithPropagatedState(time.Now().Add(time.Hour).UnixMilli())
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(eph).Build()
+	r := &NTNCellConfigReconciler{Client: c}
+	mock := &provider.MockProvider{}
+
+	cc := ccWithRemoteControl()
+	pushed, _, err := r.pushEphemerisUpdateIfNeeded(context.Background(), cc, &cc.Spec, mock)
+	if err != nil || !pushed {
+		t.Fatalf("push: pushed=%v err=%v", pushed, err)
+	}
+	// Must actually have pushed (so the SatSwitch==nil check below isn't vacuous).
+	if mock.RuntimeCalls != 1 || mock.LastRuntime == nil {
+		t.Fatalf("expected exactly one runtime push, got RuntimeCalls=%d", mock.RuntimeCalls)
+	}
+	if mock.LastRuntime.SatSwitch != nil {
+		t.Error("runtime push carried a sat-switch when none was configured")
+	}
+}
+
 // Backward compatibility: without remoteControl, the reconciler must use the
 // ConfigMap PushEphemerisUpdate path with the CR's static ephemeris.
 func TestPushEphemerisUpdateIfNeeded_BackwardCompatConfigMapPath(t *testing.T) {
