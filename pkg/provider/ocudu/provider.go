@@ -240,64 +240,78 @@ func (p *Provider) PushEphemerisUpdate(
 	return nil
 }
 
-// replaceEphemeris replaces the ephemeris block in OCUDU config YAML.
-// Returns the updated content and whether a replacement was made.
+// leadingSpaces returns the number of leading ASCII space characters in s.
+func leadingSpaces(s string) int {
+	return len(s) - len(strings.TrimLeft(s, " "))
+}
+
+// renderEphemerisBlock renders an ephemeris block indented to `indent` spaces
+// for the key line and `indent+2` for its children, using OCUDU's key names
+// (orbital elements are longitude/periapsis, not right_ascension/arg_of_periapsis).
+func renderEphemerisBlock(update provider.EphemerisUpdate, indent int) []string {
+	pad := strings.Repeat(" ", indent)
+	child := strings.Repeat(" ", indent+2)
+	if update.Orbital != nil {
+		return []string{
+			pad + "ephemeris_orbital:",
+			fmt.Sprintf("%ssemi_major_axis: %d", child, update.Orbital.SemiMajorAxis),
+			fmt.Sprintf("%seccentricity: %d", child, update.Orbital.Eccentricity),
+			fmt.Sprintf("%sinclination: %d", child, update.Orbital.Inclination),
+			fmt.Sprintf("%slongitude: %d", child, update.Orbital.RightAscension),
+			fmt.Sprintf("%speriapsis: %d", child, update.Orbital.ArgOfPeriapsis),
+			fmt.Sprintf("%smean_anomaly: %d", child, update.Orbital.MeanAnomaly),
+		}
+	}
+	return []string{
+		pad + "ephemeris_info_ecef:",
+		fmt.Sprintf("%spos_x: %d", child, update.ECEF.PosX),
+		fmt.Sprintf("%spos_y: %d", child, update.ECEF.PosY),
+		fmt.Sprintf("%spos_z: %d", child, update.ECEF.PosZ),
+		fmt.Sprintf("%svel_x: %d", child, update.ECEF.VelX),
+		fmt.Sprintf("%svel_y: %d", child, update.ECEF.VelY),
+		fmt.Sprintf("%svel_z: %d", child, update.ECEF.VelZ),
+	}
+}
+
+// replaceEphemeris replaces the ephemeris block in OCUDU config YAML in place,
+// preserving the block's existing indentation (the block now lives under
+// cell_cfg.ntn, so its key is indented 4 spaces and its body 6). Returns the
+// updated content and whether a replacement was made.
+//
+// It matches the ephemeris_info_ecef:/ephemeris_orbital: key line (tolerating an
+// inline comment), re-renders the block at the same indent, then drops the old
+// body — every following line indented strictly deeper than the key — stopping
+// at the first sibling/parent key (indent <= key) or blank line. This is
+// indentation-relative, so it never consumes sibling ntn keys the way a fixed
+// "skip 4-space lines" rule would once the block was nested.
 func replaceEphemeris(
 	content string, update provider.EphemerisUpdate,
 ) (string, bool) {
-	var newBlock string
-	if update.Orbital != nil {
-		newBlock = fmt.Sprintf(`  ephemeris_orbital:
-    semi_major_axis: %d
-    eccentricity: %d
-    inclination: %d
-    right_ascension: %d
-    arg_of_periapsis: %d
-    mean_anomaly: %d`,
-			update.Orbital.SemiMajorAxis,
-			update.Orbital.Eccentricity,
-			update.Orbital.Inclination,
-			update.Orbital.RightAscension,
-			update.Orbital.ArgOfPeriapsis,
-			update.Orbital.MeanAnomaly)
-	} else {
-		newBlock = fmt.Sprintf(`  ephemeris_info_ecef:
-    pos_x: %d
-    pos_y: %d
-    pos_z: %d
-    vel_x: %d
-    vel_y: %d
-    vel_z: %d`,
-			update.ECEF.PosX,
-			update.ECEF.PosY,
-			update.ECEF.PosZ,
-			update.ECEF.VelX,
-			update.ECEF.VelY,
-			update.ECEF.VelZ)
-	}
-
-	// Find and replace ephemeris_info_ecef or ephemeris_orbital block.
-	// Uses HasPrefix to tolerate inline comments on the key line.
 	lines := strings.Split(content, "\n")
 	var result []string
-	skip := false
 	found := false
-	for _, line := range lines {
+	for i := 0; i < len(lines); i++ {
+		line := lines[i]
 		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "ephemeris_info_ecef:") ||
-			strings.HasPrefix(trimmed, "ephemeris_orbital:") {
-			skip = true
+		if !found && (strings.HasPrefix(trimmed, "ephemeris_info_ecef:") ||
+			strings.HasPrefix(trimmed, "ephemeris_orbital:")) {
 			found = true
-			result = append(result, strings.Split(newBlock, "\n")...)
-			continue
-		}
-		if skip {
-			// Skip all lines more indented than the key (4+ spaces),
-			// including comments and blank lines within the block.
-			if strings.HasPrefix(line, "    ") || trimmed == "" {
-				continue
+			indent := leadingSpaces(line)
+			result = append(result, renderEphemerisBlock(update, indent)...)
+			// Drop the old block body: skip blank lines and lines indented
+			// strictly deeper than the key, stopping at the first non-blank
+			// sibling/parent key (indent <= key). Skipping blanks keeps an
+			// externally-introduced blank inside the body from orphaning the
+			// remaining block lines.
+			for i+1 < len(lines) {
+				next := lines[i+1]
+				if strings.TrimSpace(next) == "" || leadingSpaces(next) > indent {
+					i++
+					continue
+				}
+				break
 			}
-			skip = false
+			continue
 		}
 		result = append(result, line)
 	}

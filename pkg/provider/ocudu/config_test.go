@@ -174,8 +174,8 @@ func TestGenerateConfig_OrbitalEphemeris(t *testing.T) {
 	assertContains(t, yaml, "semi_major_axis: 6921000")
 	assertContains(t, yaml, "eccentricity: 1")
 	assertContains(t, yaml, "inclination: 879000")
-	assertContains(t, yaml, "right_ascension: 1000000")
-	assertContains(t, yaml, "arg_of_periapsis: 900000")
+	assertContains(t, yaml, "longitude: 1000000")
+	assertContains(t, yaml, "periapsis: 900000")
 	assertContains(t, yaml, "mean_anomaly: 2700000")
 }
 
@@ -266,7 +266,7 @@ func TestGenerateConfig_FeederLinkInfo(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	yaml := string(data)
-	assertContains(t, yaml, "feeder_link_info:")
+	assertContains(t, yaml, "feeder_link:")
 	assertContains(t, yaml, "enable_doppler_compensation: true")
 	assertContains(t, yaml, "dl_freq: 2680000000")
 	assertContains(t, yaml, "ul_freq: 2560000000")
@@ -288,7 +288,10 @@ func TestGenerateConfig_GatewayLocation(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	yaml := string(data)
-	assertContains(t, yaml, "ntn_gateway_location:")
+	assertContains(t, yaml, "gateway_location:")
+	// The serving-cell gateway key is "gateway_location"; "ntn_gateway_location"
+	// is only valid nested under sat_switch_with_resync and is rejected here.
+	assertNotContains(t, yaml, "ntn_gateway_location:")
 	assertContains(t, yaml, "latitude: 248500")
 	assertContains(t, yaml, "longitude: 1210000")
 	assertContains(t, yaml, "altitude: 100")
@@ -411,9 +414,13 @@ func TestGenerateConfig_PolarizationStringInjectionResistant(t *testing.T) {
 	if err := k8syaml.Unmarshal(data, &parsed); err != nil {
 		t.Fatalf("generated YAML did not unmarshal: %v\nYAML:\n%s", err, yaml)
 	}
-	ntn, ok := parsed["ntn"].(map[string]any)
+	cellCfg, ok := parsed["cell_cfg"].(map[string]any)
 	if !ok {
-		t.Fatalf("generated YAML missing ntn map: %#v", parsed["ntn"])
+		t.Fatalf("generated YAML missing cell_cfg map: %#v", parsed["cell_cfg"])
+	}
+	ntn, ok := cellCfg["ntn"].(map[string]any)
+	if !ok {
+		t.Fatalf("generated YAML missing cell_cfg.ntn map: %#v", cellCfg["ntn"])
 	}
 	if _, ok := ntn["injected_key"]; ok {
 		t.Fatalf("injection leaked: ntn.injected_key should not exist, got %#v", ntn["injected_key"])
@@ -521,6 +528,12 @@ func TestGenerateConfig_MovingRefLocation(t *testing.T) {
 }
 
 func TestGenerateConfig_SatSwitchWithResync(t *testing.T) {
+	// satSwitchWithResync is intentionally NOT emitted. The CRD's targetPCI/t304
+	// shape does not map to OCUDU's sat_switch_with_resync (a satellite switch
+	// carrying satellite_idx/ephemeris/gateway/t_service_start/ssb_time_offset and
+	// a nested ntn_cfg), so emitting it would inject unknown keys and fail the
+	// whole config parse (verified by booting the gNB). Setting the field must be
+	// a no-op, not a parse-breaker, until the CRD field is redesigned.
 	spec := &ntnv1alpha1.NTNCellConfigSpec{
 		NTN: ntnv1alpha1.NTNParams{
 			EphemerisECEF: &ntnv1alpha1.EphemerisECEF{PosX: 1, PosY: 2, PosZ: 3},
@@ -535,9 +548,9 @@ func TestGenerateConfig_SatSwitchWithResync(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	yaml := string(data)
-	assertContains(t, yaml, "sat_switch_with_resync:")
-	assertContains(t, yaml, "target_pci: 100")
-	assertContains(t, yaml, "t304: 150")
+	assertNotContains(t, yaml, "sat_switch_with_resync:")
+	assertNotContains(t, yaml, "target_pci:")
+	assertNotContains(t, yaml, "t304:")
 }
 
 func TestGenerateConfig_NilSpec(t *testing.T) {
@@ -548,8 +561,10 @@ func TestGenerateConfig_NilSpec(t *testing.T) {
 }
 
 func TestGenerateConfig_MatchesLiveGNBFormat(t *testing.T) {
-	// This test generates config and validates it matches the exact format
-	// that was verified to work with srsRAN gNB (commit 4bf1543).
+	// Golden structural test: the whole NTN block must live under cell_cfg.ntn
+	// (a top-level "ntn:" is rejected by the gNB at parse time,
+	// config_extras_mode::error). Verified by booting the OCUDU gNB with this
+	// exact output (Phase A/B).
 	spec := &ntnv1alpha1.NTNCellConfigSpec{
 		NTN: ntnv1alpha1.NTNParams{
 			CellSpecificKoffset: 150,
@@ -568,16 +583,15 @@ func TestGenerateConfig_MatchesLiveGNBFormat(t *testing.T) {
 
 	yaml := string(data)
 
-	// These exact strings were verified against a live srsRAN gNB that
-	// successfully started, connected to AMF, and broadcast NTN cell.
+	// Indentation is significant: keys under cell_cfg.ntn sit at 4 spaces.
 	requiredFragments := []string{
-		"ntn:",
-		"  cell_specific_koffset: 150",
-		"  ta_info:",
-		"    ta_common: 0",
-		"  ephemeris_info_ecef:",
-		"    pos_x: 20922195",
 		"cell_cfg:",
+		"  ntn:",
+		"    cell_specific_koffset: 150",
+		"    ta_info:",
+		"      ta_common: 0",
+		"    ephemeris_info_ecef:",
+		"      pos_x: 20922195",
 		"  sib:",
 		"    si_sched_info:",
 		"      - si_period: 16",
@@ -618,15 +632,15 @@ func TestGenerateConfig_NCells(t *testing.T) {
 
 	yaml := string(data)
 	assertContains(t, yaml, "ncells:")
-	assertContains(t, yaml, "phys_cell_id: 100")
-	assertContains(t, yaml, "frequency: 632628")
-	assertContains(t, yaml, "phys_cell_id: 200")
-	// Second cell has no frequency — must not emit frequency line.
-	// Count occurrences of "frequency:" — should be exactly 1.
-	if strings.Count(yaml, "frequency:") != 1 {
+	assertContains(t, yaml, "pci: 100")
+	assertContains(t, yaml, "carrier_freq: 632628")
+	assertContains(t, yaml, "pci: 200")
+	// Second cell has no frequency — must not emit carrier_freq line.
+	// Count occurrences of "carrier_freq:" — should be exactly 1.
+	if strings.Count(yaml, "carrier_freq:") != 1 {
 		t.Errorf(
-			"expected exactly 1 frequency line, got %d\n%s",
-			strings.Count(yaml, "frequency:"), yaml,
+			"expected exactly 1 carrier_freq line, got %d\n%s",
+			strings.Count(yaml, "carrier_freq:"), yaml,
 		)
 	}
 }
@@ -867,11 +881,12 @@ func TestGenerateConfig_YAMLRoundTrip(t *testing.T) {
 	if err := k8syaml.Unmarshal(data, &parsed); err != nil {
 		t.Fatalf("rendered output is not valid YAML: %v\n\n%s", err, data)
 	}
-	if _, ok := parsed["ntn"]; !ok {
-		t.Errorf("round-trip parse missing ntn key: %s", data)
+	cellCfg, ok := parsed["cell_cfg"].(map[string]any)
+	if !ok {
+		t.Errorf("round-trip parse missing cell_cfg map: %s", data)
 	}
-	if _, ok := parsed["cell_cfg"]; !ok {
-		t.Errorf("round-trip parse missing cell_cfg key: %s", data)
+	if _, ok := cellCfg["ntn"]; !ok {
+		t.Errorf("round-trip parse missing cell_cfg.ntn key: %s", data)
 	}
 }
 
