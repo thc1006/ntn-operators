@@ -59,6 +59,26 @@ spec:
           spec:
             description: NTNCellConfigSpec defines the desired NTN cell configuration.
             properties:
+              cellID:
+                description: |-
+                  cellID identifies the OCUDU cell (plmn + nci) that runtime remote commands
+                  target. Required when provider.remoteControl is set; the value must match
+                  the cell the gNB booted with. Unset ⇒ ConfigMap bootstrap path only.
+                properties:
+                  nci:
+                    description: nci is the 36-bit NR Cell Identity (0 to 2^36-1).
+                    format: int64
+                    maximum: 68719476735
+                    minimum: 0
+                    type: integer
+                  plmn:
+                    description: plmn is the cell's PLMN, 5 or 6 digits (e.g. "00101").
+                    pattern: ^[0-9]{5,6}$
+                    type: string
+                required:
+                - nci
+                - plmn
+                type: object
               cellOverrides:
                 description: cellOverrides allows fine-tuning PUCCH, PDSCH, PRACH,
                   and RRC parameters.
@@ -122,6 +142,12 @@ spec:
                         type: integer
                     type: object
                 type: object
+              ephemerisNoradID:
+                description: |-
+                  ephemerisNoradID selects which satellite's propagated state vector, from the
+                  referenced SatelliteEphemeris (ephemerisRef), to push at runtime (#176). When
+                  unset, the referenced ephemeris's first propagated state is used.
+                type: integer
               ephemerisRef:
                 description: |-
                   ephemerisRef is the name of a SatelliteEphemeris CR in the same namespace.
@@ -548,6 +574,20 @@ spec:
                     description: namespace where the provider resources (e.g., OCUDU
                       gNB) are deployed.
                     type: string
+                  remoteControl:
+                    description: |-
+                      remoteControl configures the gNB remote_control WebSocket for live NTN
+                      config push. When set together with spec.cellID, the operator pushes runtime
+                      ntn_config_update commands; otherwise it uses the ConfigMap path only.
+                    properties:
+                      endpoint:
+                        description: endpoint is host:port of the gNB remote_control
+                          server (e.g. "127.0.0.1:8001").
+                        minLength: 1
+                        type: string
+                    required:
+                    - endpoint
+                    type: object
                   type:
                     description: type is the provider type. Currently only "ocudu"
                       is supported.
@@ -561,6 +601,10 @@ spec:
             - ntn
             - provider
             type: object
+            x-kubernetes-validations:
+            - message: cellID is required when provider.remoteControl is set (runtime
+                push targets a cell by plmn+nci)
+              rule: '!has(self.provider.remoteControl) || has(self.cellID)'
           status:
             description: NTNCellConfigStatus defines the observed state of NTNCellConfig.
             properties:

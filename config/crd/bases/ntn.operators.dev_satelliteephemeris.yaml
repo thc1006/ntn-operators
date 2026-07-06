@@ -249,6 +249,87 @@ spec:
                   - satellite
                   type: object
                 type: array
+              propagatedStates:
+                description: |-
+                  propagatedStates holds SGP4-propagated ECEF state vectors (per satellite) at
+                  the last refresh epoch, consumed by NTNCellConfig runtime ephemeris push (#176).
+                items:
+                  description: |-
+                    PropagatedState is a satellite state vector propagated (SGP4) to a specific
+                    epoch, in the 3GPP ECEF codepoint form the runtime ephemeris push consumes.
+                  properties:
+                    ecef:
+                      description: |-
+                        ecef is the propagated position/velocity in 3GPP codepoints. The provider
+                        converts these to physical SI when pushing to OCUDU.
+                      properties:
+                        posX:
+                          description: |-
+                            posX is the X position in 1.3 m/LSB codepoints (3GPP positionX-r17,
+                            -33554432 to 33554431). The operator emits posX × 1.3 as metres to OCUDU.
+                          maximum: 33554430
+                          minimum: -33554432
+                          type: integer
+                        posY:
+                          description: posY is the Y position in 1.3 m/LSB codepoints
+                            (-33554432 to 33554431).
+                          maximum: 33554430
+                          minimum: -33554432
+                          type: integer
+                        posZ:
+                          description: posZ is the Z position in 1.3 m/LSB codepoints
+                            (-33554432 to 33554431).
+                          maximum: 33554430
+                          minimum: -33554432
+                          type: integer
+                        velX:
+                          default: 0
+                          description: |-
+                            velX is the X velocity in 0.06 m/s/LSB codepoints (3GPP velocityVX-r17,
+                            -131072 to 131071; 0 for GEO). The operator emits velX × 0.06 as m/s.
+                          maximum: 131071
+                          minimum: -131072
+                          type: integer
+                        velY:
+                          default: 0
+                          description: velY is the Y velocity in 0.06 m/s/LSB codepoints
+                            (-131072 to 131071; 0 for GEO).
+                          maximum: 131071
+                          minimum: -131072
+                          type: integer
+                        velZ:
+                          default: 0
+                          description: velZ is the Z velocity in 0.06 m/s/LSB codepoints
+                            (-131072 to 131071; 0 for GEO).
+                          maximum: 131071
+                          minimum: -131072
+                          type: integer
+                      required:
+                      - posX
+                      - posY
+                      - posZ
+                      type: object
+                    epochUnixMs:
+                      description: |-
+                        epochUnixMs is the propagation epoch in Unix milliseconds (in the future,
+                        as OCUDU's ntn_config_update requires).
+                      format: int64
+                      type: integer
+                    noradID:
+                      description: |-
+                        noradID is the satellite's NORAD catalog number, used by NTNCellConfig
+                        (spec.ephemerisNoradID) to select which state to push.
+                      type: integer
+                    satellite:
+                      description: satellite is the satellite name or object ID.
+                      type: string
+                  required:
+                  - ecef
+                  - epochUnixMs
+                  - noradID
+                  - satellite
+                  type: object
+                type: array
               satelliteCount:
                 description: satelliteCount is the number of satellites currently
                   tracked.

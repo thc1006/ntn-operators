@@ -122,6 +122,22 @@ type PassWindow struct {
 	MaxElevation string `json:"maxElevation"`
 }
 
+// PropagatedState is a satellite state vector propagated (SGP4) to a specific
+// epoch, in the 3GPP ECEF codepoint form the runtime ephemeris push consumes.
+type PropagatedState struct {
+	// satellite is the satellite name or object ID.
+	Satellite string `json:"satellite"`
+	// noradID is the satellite's NORAD catalog number, used by NTNCellConfig
+	// (spec.ephemerisNoradID) to select which state to push.
+	NoradID int `json:"noradID"`
+	// epochUnixMs is the propagation epoch in Unix milliseconds (in the future,
+	// as OCUDU's ntn_config_update requires).
+	EpochUnixMs int64 `json:"epochUnixMs"`
+	// ecef is the propagated position/velocity in 3GPP codepoints. The provider
+	// converts these to physical SI when pushing to OCUDU.
+	ECEF EphemerisECEF `json:"ecef"`
+}
+
 // SatelliteEphemerisStatus defines the observed state of SatelliteEphemeris.
 type SatelliteEphemerisStatus struct {
 	// lastUpdated is when the GP data was last successfully fetched.
@@ -135,6 +151,11 @@ type SatelliteEphemerisStatus struct {
 	// nextPassWindows contains upcoming contact opportunities.
 	// +optional
 	NextPassWindows []PassWindow `json:"nextPassWindows,omitempty"`
+
+	// propagatedStates holds SGP4-propagated ECEF state vectors (per satellite) at
+	// the last refresh epoch, consumed by NTNCellConfig runtime ephemeris push (#176).
+	// +optional
+	PropagatedStates []PropagatedState `json:"propagatedStates,omitempty"`
 
 	// conditions represent the current state of the resource.
 	// +listType=map

@@ -22,6 +22,7 @@ import (
 )
 
 // NTNCellConfigSpec defines the desired NTN cell configuration.
+// +kubebuilder:validation:XValidation:rule="!has(self.provider.remoteControl) || has(self.cellID)",message="cellID is required when provider.remoteControl is set (runtime push targets a cell by plmn+nci)"
 type NTNCellConfigSpec struct {
 	// provider specifies which NTN backend to configure.
 	// +required
@@ -43,6 +44,40 @@ type NTNCellConfigSpec struct {
 	// +kubebuilder:validation:MinLength=1
 	// +optional
 	EphemerisRef string `json:"ephemerisRef,omitempty"`
+
+	// cellID identifies the OCUDU cell (plmn + nci) that runtime remote commands
+	// target. Required when provider.remoteControl is set; the value must match
+	// the cell the gNB booted with. Unset ⇒ ConfigMap bootstrap path only.
+	// +optional
+	CellID *CellID `json:"cellID,omitempty"`
+
+	// ephemerisNoradID selects which satellite's propagated state vector, from the
+	// referenced SatelliteEphemeris (ephemerisRef), to push at runtime (#176). When
+	// unset, the referenced ephemeris's first propagated state is used.
+	// +optional
+	EphemerisNoradID *int `json:"ephemerisNoradID,omitempty"`
+}
+
+// CellID identifies an OCUDU cell for runtime remote commands (ntn_config_update,
+// cell_lock/unlock). It must match the cell the gNB booted with.
+type CellID struct {
+	// plmn is the cell's PLMN, 5 or 6 digits (e.g. "00101").
+	// +kubebuilder:validation:Pattern=`^[0-9]{5,6}$`
+	PLMN string `json:"plmn"`
+	// nci is the 36-bit NR Cell Identity (0 to 2^36-1).
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=68719476735
+	NCI int64 `json:"nci"`
+}
+
+// RemoteControlRef configures the gNB remote_control WebSocket for live NTN
+// config push (OCUDU ntn_config_update). OCUDU's remote_control server is
+// plaintext/unauthenticated (localhost by default), so the safe deployment is a
+// sidecar next to the gNB pod; cross-pod requires a NetworkPolicy.
+type RemoteControlRef struct {
+	// endpoint is host:port of the gNB remote_control server (e.g. "127.0.0.1:8001").
+	// +kubebuilder:validation:MinLength=1
+	Endpoint string `json:"endpoint"`
 }
 
 // ProviderRef identifies the NTN backend provider.
@@ -54,6 +89,12 @@ type ProviderRef struct {
 	// namespace where the provider resources (e.g., OCUDU gNB) are deployed.
 	// +optional
 	Namespace string `json:"namespace,omitempty"`
+
+	// remoteControl configures the gNB remote_control WebSocket for live NTN
+	// config push. When set together with spec.cellID, the operator pushes runtime
+	// ntn_config_update commands; otherwise it uses the ConfigMap path only.
+	// +optional
+	RemoteControl *RemoteControlRef `json:"remoteControl,omitempty"`
 
 	// endpoint is the provider-specific endpoint (e.g., O1 NETCONF address).
 	// +optional
