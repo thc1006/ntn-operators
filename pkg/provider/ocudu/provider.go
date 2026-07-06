@@ -20,6 +20,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -253,9 +254,17 @@ func (p *Provider) PushRuntimeUpdate(
 	}
 	env, err := buildNTNConfigUpdate(update)
 	if err != nil {
-		return err
+		// A malformed update can't succeed on retry — surface it as permanent.
+		return fmt.Errorf("%w: %v", provider.ErrRuntimePushRejected, err)
 	}
-	return pushNTNConfigUpdate(ctx, target.Endpoint, env)
+	err = pushNTNConfigUpdate(ctx, target.Endpoint, env)
+	// Classify: gNB rejection / oversized / marshal are permanent (no tight
+	// requeue); an unreachable endpoint is transient and returned as-is.
+	var we *wsError
+	if errors.As(err, &we) && !we.retryable() {
+		return fmt.Errorf("%w: %v", provider.ErrRuntimePushRejected, we)
+	}
+	return err
 }
 
 // leadingSpaces returns the number of leading ASCII space characters in s.

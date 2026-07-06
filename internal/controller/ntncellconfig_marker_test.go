@@ -107,11 +107,6 @@ func TestEphemerisPushConditionChanged(t *testing.T) {
 	})
 }
 
-func TestEphemerisPushShouldRequeue(t *testing.T) {
-	if ephemerisPushShouldRequeue(ephemerisReasonRefNotFound) {
-		t.Fatalf("expected EphemerisRefNotFound to avoid explicit requeue")
-	}
-	if !ephemerisPushShouldRequeue(ephemerisReasonProviderPushFailed) {
-		t.Fatalf("expected provider push failures to keep explicit retry requeue")
-	}
-}
+// TestEphemerisPushShouldRequeue lives in runtime_push_test.go; it covers the
+// full no-requeue set (RefNotFound, PayloadMissing, EphemerisStale,
+// ProviderPushRejected) plus the transient reasons that must requeue.

@@ -72,6 +72,12 @@ type RuntimeUpdate struct {
 // the ConfigMap bootstrap path.
 var ErrRuntimeUnsupported = errors.New("runtime NTN config push is not supported for this target")
 
+// ErrRuntimePushRejected wraps a PERMANENT runtime-push failure: the gNB rejected
+// the config, or the frame was malformed/oversized. Retrying without a config or
+// ephemeris change will not help, so callers should not tight-requeue on it
+// (unlike a transient unreachable-endpoint error). Test with errors.Is.
+var ErrRuntimePushRejected = errors.New("runtime NTN config push permanently rejected")
+
 // NTNProvider abstracts NTN backend interactions for cell configuration
 // and ephemeris updates. Ground station lifecycle is handled directly
 // by its respective controller.

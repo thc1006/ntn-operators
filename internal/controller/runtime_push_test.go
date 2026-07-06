@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -65,6 +66,27 @@ func ephWithPropagatedState(futureMs int64) *ntnv1alpha1.SatelliteEphemeris {
 	}
 }
 
+// ccWithRemoteControl builds an NTNCellConfig on the runtime-push path: remote
+// control + cellID + a noradID selector, plus a static spec.ntn ephemeris that
+// DIFFERS from the propagated state (to prove the runtime path ignores it).
+func ccWithRemoteControl() *ntnv1alpha1.NTNCellConfig {
+	return &ntnv1alpha1.NTNCellConfig{
+		ObjectMeta: metav1.ObjectMeta{Name: "cc1", Namespace: "ns", Generation: 1},
+		Spec: ntnv1alpha1.NTNCellConfigSpec{
+			Provider: ntnv1alpha1.ProviderRef{
+				Type:          "ocudu",
+				RemoteControl: &ntnv1alpha1.RemoteControlRef{Endpoint: "127.0.0.1:8001"},
+			},
+			CellID:           &ntnv1alpha1.CellID{PLMN: "00101", NCI: 6733824},
+			EphemerisRef:     "eph1",
+			EphemerisNoradID: ptrInt(25544),
+			NTN: ntnv1alpha1.NTNParams{
+				EphemerisECEF: &ntnv1alpha1.EphemerisECEF{PosX: 111, PosY: 222, PosZ: 333},
+			},
+		},
+	}
+}
+
 // Runtime path: with remoteControl + cellID, the reconciler must push via
 // PushRuntimeUpdate, targeting the configured endpoint + cell, and (closing #176)
 // sourcing the ephemeris from status.propagatedStates — NOT the CR's static
@@ -80,22 +102,7 @@ func TestPushEphemerisUpdateIfNeeded_RuntimePath_Closes176(t *testing.T) {
 	r := &NTNCellConfigReconciler{Client: c}
 	mock := &provider.MockProvider{}
 
-	cc := &ntnv1alpha1.NTNCellConfig{
-		ObjectMeta: metav1.ObjectMeta{Name: "cc1", Namespace: "ns", Generation: 1},
-		Spec: ntnv1alpha1.NTNCellConfigSpec{
-			Provider: ntnv1alpha1.ProviderRef{
-				Type:          "ocudu",
-				RemoteControl: &ntnv1alpha1.RemoteControlRef{Endpoint: "127.0.0.1:8001"},
-			},
-			CellID:           &ntnv1alpha1.CellID{PLMN: "00101", NCI: 6733824},
-			EphemerisRef:     "eph1",
-			EphemerisNoradID: ptrInt(25544),
-			NTN: ntnv1alpha1.NTNParams{
-				// Static ephemeris DIFFERENT from status — must be ignored on the runtime path.
-				EphemerisECEF: &ntnv1alpha1.EphemerisECEF{PosX: 111, PosY: 222, PosZ: 333},
-			},
-		},
-	}
+	cc := ccWithRemoteControl()
 
 	pushed, _, err := r.pushEphemerisUpdateIfNeeded(context.Background(), cc, &cc.Spec, mock)
 	if err != nil {
@@ -184,7 +191,7 @@ func TestPropagateStates_FillsStatus(t *testing.T) {
 		},
 	}
 	epoch := time.Now().Add(2 * time.Hour)
-	r.propagateStates(eph, ephemeris.GPFetchResult{OMMs: []sgp4.OMM{issOMMForTest()}}, epoch)
+	r.propagateStates(context.Background(), eph, ephemeris.GPFetchResult{OMMs: []sgp4.OMM{issOMMForTest()}}, epoch)
 
 	if len(eph.Status.PropagatedStates) != 1 {
 		t.Fatalf("expected 1 propagated state, got %d", len(eph.Status.PropagatedStates))
@@ -195,5 +202,79 @@ func TestPropagateStates_FillsStatus(t *testing.T) {
 	}
 	if s.ECEF.PosX == 0 && s.ECEF.PosY == 0 && s.ECEF.PosZ == 0 {
 		t.Fatalf("ECEF not populated by SGP4: %+v", s.ECEF)
+	}
+}
+
+// A past/stale epoch must be SKIPPED (not pushed), because OCUDU rejects past
+// epochs and re-labeling the state would corrupt it — and the skip must not
+// tight-requeue (it clears when the producer refreshes).
+func TestPushEphemerisUpdateIfNeeded_StaleEpochSkipped(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := ntnv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme: %v", err)
+	}
+	eph := ephWithPropagatedState(time.Now().Add(-time.Hour).UnixMilli()) // PAST
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(eph).Build()
+	r := &NTNCellConfigReconciler{Client: c}
+	mock := &provider.MockProvider{}
+	cc := ccWithRemoteControl()
+
+	pushed, _, err := r.pushEphemerisUpdateIfNeeded(context.Background(), cc, &cc.Spec, mock)
+	if pushed {
+		t.Fatal("a stale (past) epoch must not be pushed")
+	}
+	if mock.RuntimeCalls != 0 {
+		t.Fatalf("stale epoch must be skipped before the WS push, got RuntimeCalls=%d", mock.RuntimeCalls)
+	}
+	if got := ephemerisPushConditionReason(err); got != ephemerisReasonEphemerisStale {
+		t.Fatalf("expected EphemerisStale reason, got %q", got)
+	}
+	if ephemerisPushShouldRequeue(ephemerisReasonEphemerisStale) {
+		t.Fatal("a stale epoch must not tight-requeue")
+	}
+}
+
+// A permanent gNB rejection must be classified as ProviderPushRejected and must
+// NOT tight-requeue (retrying without a config change cannot help).
+func TestPushEphemerisUpdateIfNeeded_PermanentRejectionNoRequeue(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := ntnv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme: %v", err)
+	}
+	eph := ephWithPropagatedState(time.Now().Add(time.Hour).UnixMilli())
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(eph).Build()
+	r := &NTNCellConfigReconciler{Client: c}
+	mock := &provider.MockProvider{
+		RuntimeErr: fmt.Errorf("%w: bad cell config", provider.ErrRuntimePushRejected),
+	}
+	cc := ccWithRemoteControl()
+
+	pushed, _, err := r.pushEphemerisUpdateIfNeeded(context.Background(), cc, &cc.Spec, mock)
+	if pushed {
+		t.Fatal("expected pushed=false on rejection")
+	}
+	if got := ephemerisPushConditionReason(err); got != ephemerisReasonProviderPushRejected {
+		t.Fatalf("expected ProviderPushRejected reason, got %q", got)
+	}
+	if ephemerisPushShouldRequeue(ephemerisReasonProviderPushRejected) {
+		t.Fatal("a permanent rejection must not tight-requeue")
+	}
+}
+
+func TestEphemerisPushShouldRequeue(t *testing.T) {
+	for _, reason := range []string{
+		ephemerisReasonRefNotFound, ephemerisReasonPayloadMissing,
+		ephemerisReasonEphemerisStale, ephemerisReasonProviderPushRejected,
+	} {
+		if ephemerisPushShouldRequeue(reason) {
+			t.Errorf("%s should NOT tight-requeue", reason)
+		}
+	}
+	for _, reason := range []string{
+		ephemerisReasonGetFailed, ephemerisReasonProviderPushFailed, ephemerisReasonPushFailed,
+	} {
+		if !ephemerisPushShouldRequeue(reason) {
+			t.Errorf("%s SHOULD requeue (transient)", reason)
+		}
 	}
 }

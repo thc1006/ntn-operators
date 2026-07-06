@@ -200,7 +200,7 @@ func (r *SatelliteEphemerisReconciler) Reconcile(ctx context.Context, req ctrl.R
 	// ephemeris push (#176). Epoch = now + refresh interval so it stays in the
 	// future across the whole cycle (OCUDU's ntn_config_update requires a future
 	// epoch; its propagator tolerates propagating backward from it).
-	r.propagateStates(eph, result, time.Now().Add(effectiveInterval))
+	r.propagateStates(ctx, eph, result, time.Now().Add(effectiveInterval))
 
 	if err := r.Status().Update(ctx, eph); err != nil {
 		return ctrl.Result{}, err
@@ -222,6 +222,7 @@ const maxPropagatedStates = 128
 // downstream runtime ephemeris push (#176). The set is filtered by
 // spec.satellites.noradIDs and capped; un-propagatable satellites are skipped.
 func (r *SatelliteEphemerisReconciler) propagateStates(
+	ctx context.Context,
 	eph *ntnv1alpha1.SatelliteEphemeris,
 	result ephemeris.GPFetchResult,
 	epoch time.Time,
@@ -231,6 +232,14 @@ func (r *SatelliteEphemerisReconciler) propagateStates(
 		norad = eph.Spec.Satellites.NoradIDs
 	}
 	omms := ephemeris.FilterOMMs(result.OMMs, norad)
+	if len(omms) > maxPropagatedStates {
+		// No silent truncation: a satellite beyond the cap won't be pushable at
+		// runtime (its NoradID selector would miss). Tell the operator to narrow
+		// the set with spec.satellites.noradIDs.
+		logf.FromContext(ctx).Info("propagated-state list capped; some satellites omitted from runtime-push status",
+			"tracked", len(omms), "cap", maxPropagatedStates,
+			"hint", "set spec.satellites.noradIDs to the satellites pushed at runtime")
+	}
 	epochMs := epoch.UnixMilli()
 	states := make([]ntnv1alpha1.PropagatedState, 0, len(omms))
 	for i := range omms {

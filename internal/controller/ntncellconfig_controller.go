@@ -54,12 +54,21 @@ type NTNCellConfigReconciler struct {
 }
 
 const (
-	ephemerisReasonPushFailed         = "PushFailed"
-	ephemerisReasonRefNotFound        = "EphemerisRefNotFound"
-	ephemerisReasonGetFailed          = "EphemerisGetFailed"
-	ephemerisReasonPayloadMissing     = "EphemerisPayloadMissing"
-	ephemerisReasonProviderPushFailed = "ProviderPushFailed"
+	ephemerisReasonPushFailed           = "PushFailed"
+	ephemerisReasonRefNotFound          = "EphemerisRefNotFound"
+	ephemerisReasonGetFailed            = "EphemerisGetFailed"
+	ephemerisReasonPayloadMissing       = "EphemerisPayloadMissing"
+	ephemerisReasonProviderPushFailed   = "ProviderPushFailed"
+	ephemerisReasonProviderPushRejected = "ProviderPushRejected"
+	ephemerisReasonEphemerisStale       = "EphemerisStale"
 )
+
+// epochSkewMargin is how far in the future a propagated epoch must be to be worth
+// pushing. OCUDU's ntn_config_update rejects past epochs, and re-labeling a state
+// with a different epoch would corrupt it, so a state whose epoch is within this
+// margin of now is treated as stale and skipped (awaiting the SatelliteEphemeris
+// producer's refresh) rather than pushed and rejected in a tight loop.
+const epochSkewMargin = 10 * time.Second
 
 type ephemerisPushError struct {
 	reason string
@@ -108,7 +117,21 @@ func ephemerisPushConditionChanged(
 }
 
 func ephemerisPushShouldRequeue(reason string) bool {
-	return reason != ephemerisReasonRefNotFound
+	switch reason {
+	case ephemerisReasonRefNotFound,
+		ephemerisReasonPayloadMissing,
+		ephemerisReasonEphemerisStale,
+		ephemerisReasonProviderPushRejected:
+		// These clear only on an external change — a spec edit (generation bump)
+		// or a SatelliteEphemeris refresh (new marker) — both of which re-trigger
+		// reconcile via generation/watch. A tight requeue would just hammer a
+		// permanently-failing push (e.g. the gNB rejecting a bad config, or a
+		// stale/missing propagated state) until that external change happens.
+		return false
+	default:
+		// Transient failures (API GET error, gNB unreachable) — retry.
+		return true
+	}
 }
 
 // +kubebuilder:rbac:groups=ntn.operators.dev,resources=ntncellconfigs,verbs=get;list;watch;create;update;patch;delete
@@ -445,6 +468,18 @@ func (r *NTNCellConfigReconciler) pushRuntimeEphemeris(
 				eph.Name, spec.EphemerisNoradID),
 		)
 	}
+	// Skip a stale (past / about-to-expire) epoch rather than push a value OCUDU
+	// will reject. The state is only valid for its own epoch, so re-labeling it
+	// would corrupt the position; instead wait for the SatelliteEphemeris producer
+	// to re-propagate a fresh future epoch (which re-triggers this reconcile via
+	// the watch). This reason does not tight-requeue (see ephemerisPushShouldRequeue).
+	if state.EpochUnixMs <= time.Now().Add(epochSkewMargin).UnixMilli() {
+		return false, marker, newEphemerisPushError(
+			ephemerisReasonEphemerisStale,
+			fmt.Errorf("propagated epoch for %q (%d) is not sufficiently in the future; awaiting SatelliteEphemeris refresh",
+				eph.Name, state.EpochUnixMs),
+		)
+	}
 	ulSync := 5
 	if spec.NTN.NTNUlSyncValidityDur != nil {
 		ulSync = *spec.NTN.NTNUlSyncValidityDur
@@ -458,10 +493,13 @@ func (r *NTNCellConfigReconciler) pushRuntimeEphemeris(
 	}
 	target := provider.ResolvedRemoteControl{Endpoint: spec.Provider.RemoteControl.Endpoint}
 	if err := prov.PushRuntimeUpdate(ctx, target, update); err != nil {
-		return false, marker, newEphemerisPushError(
-			ephemerisReasonProviderPushFailed,
-			fmt.Errorf("provider PushRuntimeUpdate: %w", err),
-		)
+		// A permanent rejection (bad config / malformed frame) must not tight-loop;
+		// only a transient failure (gNB unreachable) is worth retrying.
+		reason := ephemerisReasonProviderPushFailed
+		if errors.Is(err, provider.ErrRuntimePushRejected) {
+			reason = ephemerisReasonProviderPushRejected
+		}
+		return false, marker, newEphemerisPushError(reason, fmt.Errorf("provider PushRuntimeUpdate: %w", err))
 	}
 	return true, marker, nil
 }
