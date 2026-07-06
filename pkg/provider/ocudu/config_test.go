@@ -67,8 +67,10 @@ func TestGenerateConfig_GEODefault(t *testing.T) {
 	assertContains(t, yaml, "vel_y: 0")
 	assertContains(t, yaml, "vel_z: 0")
 
-	// SIB19 — must have si_window_position (required by srsRAN).
-	assertContains(t, yaml, "sib_mapping: 19")
+	// SIB19 ([19], schedulingInfoList2) — must have si_window_position, and must
+	// be preceded by the mandatory SIB2 ([2], schedulingInfoList) entry.
+	assertContains(t, yaml, "sib_mapping: [2]")
+	assertContains(t, yaml, "sib_mapping: [19]")
 	assertContains(t, yaml, "si_window_position:")
 
 	// cell_cfg NTN defaults.
@@ -571,8 +573,11 @@ func TestGenerateConfig_NilSpec(t *testing.T) {
 func TestGenerateConfig_MatchesLiveGNBFormat(t *testing.T) {
 	// Golden structural test: the whole NTN block must live under cell_cfg.ntn
 	// (a top-level "ntn:" is rejected by the gNB at parse time,
-	// config_extras_mode::error). Verified by booting the OCUDU gNB with this
-	// exact output (Phase A/B).
+	// config_extras_mode::error), physical-SI values (pos_x = codepoint × 1.3),
+	// and a SIB2-before-SIB19 schedule (OCUDU rejects a SIB19-only schedule).
+	// Verified by booting the OCUDU gNB (commit 0b229d35) with this exact emitter
+	// output — it reaches "gNB started" and accepts a subsequent runtime
+	// ntn_config_update on the same cell.
 	spec := &ntnv1alpha1.NTNCellConfigSpec{
 		NTN: ntnv1alpha1.NTNParams{
 			CellSpecificKoffset: 150,
@@ -603,8 +608,9 @@ func TestGenerateConfig_MatchesLiveGNBFormat(t *testing.T) {
 		"  sib:",
 		"    si_sched_info:",
 		"      - si_period: 16",
-		"        sib_mapping: 19",
-		"        si_window_position: 1",
+		"        sib_mapping: [2]",      // mandatory SIB2 companion (schedulingInfoList)
+		"        sib_mapping: [19]",     // SIB19 (schedulingInfoList2)
+		"        si_window_position: 2", // > 1 preceding schedulingInfoList entry
 		"  pdsch:",
 		"    max_nof_harq_retxs: 0",
 		"cu_cp:",
@@ -775,7 +781,10 @@ func TestGenerateConfig_SIBScheduleDefaults(t *testing.T) {
 	yaml := string(data)
 	assertContains(t, yaml, "si_window_length: 5")
 	assertContains(t, yaml, "si_period: 16")
-	assertContains(t, yaml, "si_window_position: 1")
+	assertContains(t, yaml, "si_window_position: 2")
+	// SIB19 must be preceded by a SIB2 schedulingInfoList entry (OCUDU requires it).
+	assertContains(t, yaml, "sib_mapping: [2]")
+	assertContains(t, yaml, "sib_mapping: [19]")
 }
 
 func TestGenerateConfig_SIBScheduleFullOverride(t *testing.T) {
@@ -818,31 +827,32 @@ func TestGenerateConfig_SIBSchedulePartialOverride(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	yaml := string(data)
-	// Only siPeriod overridden; others keep defaults.
+	// Only siPeriod overridden; others keep defaults (position default is now 2).
 	assertContains(t, yaml, "si_window_length: 5")
 	assertContains(t, yaml, "si_period: 8")
-	assertContains(t, yaml, "si_window_position: 1")
+	assertContains(t, yaml, "si_window_position: 2")
 }
 
-func TestGenerateConfig_SIBScheduleZeroPositionRespected(t *testing.T) {
-	// Regression: position=0 is valid ("first slot") and must NOT fall
-	// back to the default 1. Pointer semantics in SIBSchedule guarantee
-	// this distinction.
-	zero := 0
+func TestGenerateConfig_SIBScheduleExplicitPositionRespected(t *testing.T) {
+	// An explicit position must be emitted verbatim, not overridden by the
+	// default (2). Pointer semantics in SIBSchedule guarantee the distinction.
+	// (Position 0/1 are invalid now: SIB19 must sit after the SIB2 entry, so the
+	// CRD enforces Minimum=2 — a value <2 never reaches the emitter.)
+	explicit := 7
 	spec := &ntnv1alpha1.NTNCellConfigSpec{
 		NTN: ntnv1alpha1.NTNParams{
 			CellSpecificKoffset: 150,
 			EphemerisECEF:       &ntnv1alpha1.EphemerisECEF{PosX: 1, PosY: 2, PosZ: 3},
 		},
 		CellOverrides: &ntnv1alpha1.CellOverrides{
-			SIBSchedule: &ntnv1alpha1.SIBSchedule{SIWindowPosition: &zero},
+			SIBSchedule: &ntnv1alpha1.SIBSchedule{SIWindowPosition: &explicit},
 		},
 	}
 	data, err := GenerateConfig(spec)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	assertContains(t, string(data), "si_window_position: 0")
+	assertContains(t, string(data), "si_window_position: 7")
 }
 
 // TestGenerateConfig_YAMLRoundTrip asserts the renderer emits structurally

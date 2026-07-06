@@ -579,10 +579,12 @@ type SIBSchedule struct {
 	// +optional
 	SIPeriod int `json:"siPeriod,omitempty"`
 
-	// siWindowPosition is the slot offset within the SI period. Adjust
-	// to avoid collision with SIB1/SIB2 scheduling windows. Pointer so 0
-	// (the first slot) can be distinguished from unset.
-	// +kubebuilder:validation:Minimum=0
+	// siWindowPosition is SIB19's slot offset within the SI period
+	// (schedulingInfoList2-r17). It must be strictly greater than the number of
+	// preceding schedulingInfoList entries; the emitter always schedules one SIB2
+	// (ID < 15) before SIB19, so the minimum is 2. Pointer so an explicit value is
+	// distinguished from unset (which defaults to 2).
+	// +kubebuilder:validation:Minimum=2
 	// +kubebuilder:validation:Maximum=79
 	// +optional
 	SIWindowPosition *int `json:"siWindowPosition,omitempty"`

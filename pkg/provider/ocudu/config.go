@@ -109,7 +109,9 @@ func sanitizeComment(s string) string {
 //   - the serving-cell gateway is "gateway_location" (the "ntn_gateway_location"
 //     key exists only nested under sat_switch_with_resync, not at cell_cfg.ntn)
 //   - reference_location / moving_ref_location are latitude/longitude only
-//   - sib_mapping is scalar 19 and si_window_position is set for SIB19
+//   - si_sched_info schedules SIB2 ([2], schedulingInfoList) BEFORE SIB19
+//     ([19], schedulingInfoList2 with si_window_position); a SIB19-only
+//     schedule is rejected by OCUDU ("requires at least one SIB with ID < 15")
 //
 // NOTE: satSwitchWithResync is intentionally NOT emitted into the static YAML.
 // It is a RUNTIME-only feature (pushed via the ntn_config_update remote command
@@ -205,8 +207,16 @@ cell_cfg:
   sib:
     si_window_length: {{ .SIWindowLength }}
     si_sched_info:
+      # SIB2 (ID < 15) uses schedulingInfoList and must precede SIB19: OCUDU
+      # rejects a SIB19-only schedule ("SIB19 requires at least one SIB with
+      # ID < 15"). SIB2 broadcasts with OCUDU defaults (no sib2 block needed).
       - si_period: {{ .SIPeriod }}
-        sib_mapping: 19
+        sib_mapping: [2]
+      # SIB19 (ID >= 15) uses schedulingInfoList2 and needs an si_window_position
+      # strictly greater than the number of preceding schedulingInfoList entries
+      # (1 here), so si_window_position >= 2.
+      - si_period: {{ .SIPeriod }}
+        sib_mapping: [19]
         si_window_position: {{ .SIWindowPosition }}
   pdsch:
     max_nof_harq_retxs: {{ .PdschMaxHarqRetxs }}
@@ -298,7 +308,9 @@ type configData struct {
 const (
 	defaultSIWindowLength   = 5
 	defaultSIPeriod         = 16
-	defaultSIWindowPosition = 1
+	// defaultSIWindowPosition is 2: SIB19 (schedulingInfoList2) must sit strictly
+	// after the single SIB2 (schedulingInfoList) entry the emitter always adds.
+	defaultSIWindowPosition = 2
 )
 
 // GenerateConfig produces OCUDU-compatible NTN configuration YAML
