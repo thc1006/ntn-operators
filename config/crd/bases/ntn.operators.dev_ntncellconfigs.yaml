@@ -719,6 +719,10 @@ spec:
                         - message: ephemerisECEF and ephemerisOrbital are mutually
                             exclusive
                           rule: '!(has(self.ephemerisECEF) && has(self.ephemerisOrbital))'
+                        - message: ephemerisECEF position must not be all zeros
+                          rule: '!has(self.ephemerisECEF) || self.ephemerisECEF.posX
+                            != 0 || self.ephemerisECEF.posY != 0 || self.ephemerisECEF.posZ
+                            != 0'
                       ssbTimeOffsetSubframes:
                         description: |-
                           ssbTimeOffsetSubframes is the SSB time offset in subframes (0-159), mapping
@@ -816,9 +820,14 @@ spec:
                       ntn_config_update commands; otherwise it uses the ConfigMap path only.
                     properties:
                       endpoint:
-                        description: endpoint is host:port of the gNB remote_control
-                          server (e.g. "127.0.0.1:8001").
+                        description: |-
+                          endpoint is host:port of the gNB remote_control server (e.g. "127.0.0.1:8001").
+                          The provider prepends ws://, so include NEITHER a scheme nor a path — a value
+                          like "ws://host:8001" would dial "ws://ws://host:8001" and fail. The pattern
+                          enforces bare host:port (a permanent admission error beats a silent
+                          tight-requeue on a mistyped endpoint).
                         minLength: 1
+                        pattern: ^[a-zA-Z0-9._-]+:[0-9]{1,5}$
                         type: string
                     required:
                     - endpoint

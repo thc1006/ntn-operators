@@ -319,6 +319,22 @@ func TestPushEphemerisUpdateIfNeeded_PermanentRejectionNoRequeue(t *testing.T) {
 	}
 }
 
+// The producer stamps propagated epochs at now+propagationEpochLead; the consumer
+// skips epochs at/before now+epochSkewMargin. The lead must exceed the margin (with
+// headroom) so a freshly propagated state is pushed, not skipped — and it must stay
+// small so OCUDU's internal propagation from the epoch is short (guards against a
+// regression back to now+refreshInterval, which back-propagated hours).
+func TestPropagationEpochLeadVsSkewMargin(t *testing.T) {
+	if propagationEpochLead <= epochSkewMargin {
+		t.Fatalf("propagationEpochLead (%v) must exceed epochSkewMargin (%v) so a fresh state is not stale-skipped",
+			propagationEpochLead, epochSkewMargin)
+	}
+	if propagationEpochLead > 30*time.Minute {
+		t.Fatalf("propagationEpochLead (%v) is too large; a near-now epoch keeps OCUDU's internal propagation short",
+			propagationEpochLead)
+	}
+}
+
 func TestEphemerisPushShouldRequeue(t *testing.T) {
 	for _, reason := range []string{
 		ephemerisReasonRefNotFound, ephemerisReasonPayloadMissing,

@@ -76,7 +76,12 @@ type CellID struct {
 // sidecar next to the gNB pod; cross-pod requires a NetworkPolicy.
 type RemoteControlRef struct {
 	// endpoint is host:port of the gNB remote_control server (e.g. "127.0.0.1:8001").
+	// The provider prepends ws://, so include NEITHER a scheme nor a path — a value
+	// like "ws://host:8001" would dial "ws://ws://host:8001" and fail. The pattern
+	// enforces bare host:port (a permanent admission error beats a silent
+	// tight-requeue on a mistyped endpoint).
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:Pattern=`^[a-zA-Z0-9._-]+:[0-9]{1,5}$`
 	Endpoint string `json:"endpoint"`
 }
 
@@ -367,6 +372,7 @@ type SatSwitchWithResync struct {
 // meaningless.
 // +kubebuilder:validation:XValidation:rule="has(self.ephemerisECEF) || has(self.ephemerisOrbital)",message="exactly one of ephemerisECEF or ephemerisOrbital must be set"
 // +kubebuilder:validation:XValidation:rule="!(has(self.ephemerisECEF) && has(self.ephemerisOrbital))",message="ephemerisECEF and ephemerisOrbital are mutually exclusive"
+// +kubebuilder:validation:XValidation:rule="!has(self.ephemerisECEF) || self.ephemerisECEF.posX != 0 || self.ephemerisECEF.posY != 0 || self.ephemerisECEF.posZ != 0",message="ephemerisECEF position must not be all zeros"
 type SatSwitchNTNConfig struct {
 	// ephemerisECEF is the target satellite's ECEF state vector.
 	// Mutually exclusive with ephemerisOrbital.

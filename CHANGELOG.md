@@ -29,6 +29,12 @@ real OCUDU gNB (commit `0b229d35`).
   (`DeletePartialMatch`) in the finalizers on CR deletion.
 - **Runtime-push stale-epoch tight loop:** a past/expired ephemeris epoch is now
   skipped (not pushed) and permanent gNB rejections no longer tight-requeue.
+- **Runtime-push epoch accuracy:** the pushed ephemeris epoch is now stamped
+  near-now (not up to a refresh-interval ahead). OCUDU internally re-propagates
+  the state vector from its epoch, so a far-future epoch forced a long backward
+  propagation and compounded LEO error; a near-now epoch keeps it short/forward.
+- An unparseable gNB WebSocket reply is now a retryable failure instead of a
+  silent success.
 
 ### Added
 
@@ -52,6 +58,9 @@ real OCUDU gNB (commit `0b229d35`).
 - **BREAKING (v1alpha1) — `sibSchedule.siWindowPosition` minimum is now 2** (was 0):
   SIB19 must be scheduled after the mandatory SIB2 entry, so 0/1 produced an
   unbootable config.
+- `provider.remoteControl.endpoint` now validates a bare `host:port` (no scheme
+  or path): a value like `ws://host:8001` is rejected at admission instead of
+  failing to dial and requeuing forever.
 
 ### Notes
 

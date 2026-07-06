@@ -305,10 +305,16 @@ func pushNTNConfigUpdate(ctx context.Context, endpoint string, env ntnConfigUpda
 	}
 
 	// Success reply is {"cmd":...,"timestamp":...}; failure is {"error":"..."}.
+	// OCUDU always replies with a JSON object, so an unparseable reply means we
+	// cannot confirm the push landed — treat it as a retryable failure (the push
+	// is idempotent, so re-pushing is safe) rather than silently reporting success.
 	var r struct {
 		Error string `json:"error"`
 	}
-	if err := json.Unmarshal(reply, &r); err == nil && r.Error != "" {
+	if err := json.Unmarshal(reply, &r); err != nil {
+		return &wsError{wsUnreachable, fmt.Sprintf("unparseable reply from %s: %q", endpoint, reply[:min(len(reply), 200)])}
+	}
+	if r.Error != "" {
 		return &wsError{wsRejected, fmt.Sprintf("gNB rejected ntn_config_update: %s", r.Error)}
 	}
 

@@ -196,11 +196,17 @@ func (r *SatelliteEphemerisReconciler) Reconcile(ctx context.Context, req ctrl.R
 		meta.RemoveStatusCondition(&eph.Status.Conditions, ntnv1alpha1.ConditionPassesPredicted)
 	}
 
-	// Step 7b: Propagate tracked satellites to a future epoch for runtime
-	// ephemeris push (#176). Epoch = now + refresh interval so it stays in the
-	// future across the whole cycle (OCUDU's ntn_config_update requires a future
-	// epoch; its propagator tolerates propagating backward from it).
-	r.propagateStates(ctx, eph, result, time.Now().Add(effectiveInterval))
+	// Step 7b: Propagate tracked satellites to a NEAR-now epoch for the runtime
+	// ephemeris push (#176). The epoch is only a small lead ahead of now — enough
+	// to satisfy OCUDU's "epoch must be in the future" check and the consumer's
+	// stale-epoch guard plus reconcile/delivery latency. OCUDU internally
+	// re-propagates this state vector from the epoch to each SIB19 Tx time
+	// (ntn_assistance_info_generator: propagate(SIB19_Tx - epoch)), so the epoch
+	// must be the true reference time of the ECEF. Using now+refreshInterval (as
+	// an earlier version did) made OCUDU back-propagate hours from a position that
+	// was itself SGP4-propagated hours forward, compounding LEO error; a near-now
+	// epoch keeps OCUDU's internal propagation short and forward.
+	r.propagateStates(ctx, eph, result, time.Now().Add(propagationEpochLead))
 
 	if err := r.Status().Update(ctx, eph); err != nil {
 		return ctrl.Result{}, err
@@ -216,6 +222,14 @@ func (r *SatelliteEphemerisReconciler) Reconcile(ctx context.Context, req ctrl.R
 // maxPropagatedStates caps how many per-satellite propagated states are stored
 // in status, to respect etcd object-size limits (~1.5 MB).
 const maxPropagatedStates = 128
+
+// propagationEpochLead is how far ahead of now the runtime-push epoch is stamped.
+// It must exceed the consumer's epochSkewMargin (10s) with room for reconcile +
+// WebSocket delivery latency, yet stay small so OCUDU's internal propagation from
+// this epoch is short (a few minutes of SGP4/RK4 divergence is negligible for
+// LEO). The push happens on the watch-triggered reconcile right after this
+// propagation, so the epoch is fresh at push time.
+const propagationEpochLead = 5 * time.Minute
 
 // propagateStates propagates the tracked satellites' orbits (SGP4) to the given
 // future epoch and records the ECEF state vectors in status.propagatedStates for

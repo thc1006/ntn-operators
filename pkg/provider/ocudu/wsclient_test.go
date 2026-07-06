@@ -287,6 +287,21 @@ func TestPushNTNConfigUpdate_Rejected(t *testing.T) {
 	}
 }
 
+// A non-JSON reply must NOT be reported as success (it would mask a failed push).
+// It is treated as retryable (the idempotent push is safe to retry).
+func TestPushNTNConfigUpdate_UnparseableReply(t *testing.T) {
+	endpoint, _ := wsTestServer(t, `not json at all`)
+	env, _ := buildNTNConfigUpdate(ecefRuntimeUpdate())
+	err := pushNTNConfigUpdate(context.Background(), endpoint, env)
+	var we *wsError
+	if !errors.As(err, &we) {
+		t.Fatalf("expected a *wsError for an unparseable reply, got %v", err)
+	}
+	if !we.retryable() {
+		t.Error("an unparseable reply should be retryable, not a silent success")
+	}
+}
+
 func TestPushNTNConfigUpdate_Unreachable(t *testing.T) {
 	env, _ := buildNTNConfigUpdate(ecefRuntimeUpdate())
 	// 127.0.0.1:1 is reserved/closed — dial fails.
