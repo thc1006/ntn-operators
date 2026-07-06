@@ -101,6 +101,10 @@ func (r *GroundStationLifecycleReconciler) Reconcile(ctx context.Context, req ct
 	// Step 1: Fetch the CR.
 	gs := &ntnv1alpha1.GroundStationLifecycle{}
 	if err := r.Get(ctx, req.NamespacedName, gs); err != nil {
+		if apierrors.IsNotFound(err) {
+			// CR deleted — release its per-CR metric series (all conditions).
+			ntnmetrics.GroundStationHealth.DeletePartialMatch(prometheus.Labels{"station": req.Name})
+		}
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 

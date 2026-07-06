@@ -309,6 +309,9 @@ func (r *NTNCellConfigReconciler) handleFinalizer(
 	finalizerName := "ntn.operators.dev/configmap-cleanup"
 
 	if cc.DeletionTimestamp != nil {
+		// Release the CR's per-CR metric series on deletion so /metrics does not
+		// accumulate dead series across create/delete churn (idempotent).
+		ntnmetrics.ConfigApplyErrorsTotal.DeletePartialMatch(prometheus.Labels{"config": cc.Name})
 		if controllerutil.ContainsFinalizer(cc, finalizerName) {
 			if prov == nil {
 				// Best-effort cleanup using Status.ConfigMapRef when provider is missing.

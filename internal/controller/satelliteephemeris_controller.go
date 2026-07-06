@@ -24,6 +24,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -74,6 +75,11 @@ func (r *SatelliteEphemerisReconciler) Reconcile(ctx context.Context, req ctrl.R
 	// Step 1: Get the SatelliteEphemeris resource.
 	eph := &ntnv1alpha1.SatelliteEphemeris{}
 	if err := r.Get(ctx, req.NamespacedName, eph); err != nil {
+		if apierrors.IsNotFound(err) {
+			// CR deleted — release its per-CR metric series so /metrics does not
+			// accumulate dead series across create/delete churn.
+			ntnmetrics.GPSatelliteCount.DeletePartialMatch(prometheus.Labels{"ephemeris": req.Name})
+		}
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
