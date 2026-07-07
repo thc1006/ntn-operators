@@ -26,7 +26,9 @@ real OCUDU gNB (commit `0b229d35`).
 - **Pass-window failover blindness (#C1):** a global propagation cap could starve
   some satellites of predicted passes; the cap is now per-satellite.
 - **Prometheus series leak (#C3):** per-CR metric series are now cleaned up
-  (`DeletePartialMatch`) in the finalizers on CR deletion.
+  (`DeletePartialMatch`) in the finalizers on CR deletion for NTNCellConfig,
+  SatelliteEphemeris, and GroundStationLifecycle. (NTNSlice's series are not yet
+  covered — see Notes.)
 - **Runtime-push stale-epoch tight loop:** a past/expired ephemeris epoch is now
   skipped (not pushed) and permanent gNB rejections no longer tight-requeue.
 - **Runtime-push epoch accuracy:** the pushed ephemeris epoch is now stamped
@@ -66,6 +68,13 @@ real OCUDU gNB (commit `0b229d35`).
 
 - Issue #53 (`ta-CommonDriftCorrection`, Rel-18) remains tracked-only: OCUDU still
   exposes no parser hook (YAML or runtime) as of this change.
+- Known follow-ups (tracked, out of scope here): (1) the NTNSlice reconciler has
+  no finalizer and its `SatellitePassAvailable` series is keyed by ephemeris
+  (shared across slices), so per-CR metric cleanup there needs a finalizer +
+  refcounting; (2) the runtime-push epoch is stamped near-now (~5 min) while the
+  ephemeris refresh interval is ≥2 h (GP-source rate limits), so a consumer
+  reconcile landing >5 min after the last propagation skips the push until the
+  next refresh (the cell keeps serving the last-pushed / bootstrap ephemeris).
 
 ## [0.5.0] - 2026-05-27
 

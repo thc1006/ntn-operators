@@ -29,18 +29,16 @@ import (
 
 // OCUDU physical-unit conversion factors.
 //
-// The CRD carries 3GPP raw codepoints (the SIB19 IE representation), but OCUDU's
-// gNB config parser expects PHYSICAL SI values (metres, m/s, radians, µs,
-// degrees) and converts them back to codepoints internally for SIB19 ASN.1
-// encoding. Emitting `codepoint × factor` therefore round-trips to exactly the
-// intended SIB19 value. Factors are the inverse of OCUDU's own divisors, taken
-// from lib/du/du_high/du_manager/converters/asn1_ntn_config_helpers.cpp:
-//
-//	ta_common / 0.004072, ta_common_drift / 0.0002, ta_common_drift_variant /
-//	0.00002, position / 1.3, velocity / 0.06, eccentricity / 1.431e-8,
-//	inclination|longitude|periapsis|mean_anomaly / 2.341e-8 (radians),
-//	geodetic degrees. (ECEF position/velocity steps reuse the CRD's 3GPP
-//	constants ntnv1alpha1.ECEFPositionStep / ECEFVelocityStep.)
+// OCUDU's gNB config INPUT layer (CLI/YAML and the ntn_config_update command)
+// takes PHYSICAL SI — metres, m/s, radians, µs, degrees — and does its own
+// physical→ASN.1 codepoint encoding downstream (in asn1_ntn_config_helpers.cpp,
+// which is NOT the layer these factors target). This operator's CRD does NOT
+// store physical SI: some fields are 3GPP raw codepoints (ECEF position/velocity,
+// ta_common family) and some are custom-scaled (eccentricity ×1e6; orbital angles
+// and geodetic lat/long in units of 1e-4 degree). Each factor below converts the
+// CRD's stored unit to the physical SI value OCUDU's input layer expects; the
+// ranges are cross-checked against the CLI schema (e.g. --inclination [rad]
+// Range(-1.571,1.571), --eccentricity Range(0,0.0150051), --latitude [degree]).
 const (
 	// taCommonStepUs is µs per ta_common / ta_common_offset codepoint.
 	taCommonStepUs = 0.004072

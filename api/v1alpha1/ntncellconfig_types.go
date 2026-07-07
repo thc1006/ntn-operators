@@ -70,6 +70,7 @@ type CellID struct {
 	NCI int64 `json:"nci"`
 }
 
+// +kubebuilder:validation:XValidation:rule="int(self.endpoint.split(':')[1]) >= 1 && int(self.endpoint.split(':')[1]) <= 65535",message="endpoint port must be in 1-65535"
 // RemoteControlRef configures the gNB remote_control WebSocket for live NTN
 // config push (OCUDU ntn_config_update). OCUDU's remote_control server is
 // plaintext/unauthenticated (localhost by default), so the safe deployment is a
@@ -81,6 +82,7 @@ type RemoteControlRef struct {
 	// enforces bare host:port (a permanent admission error beats a silent
 	// tight-requeue on a mistyped endpoint).
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=261
 	// +kubebuilder:validation:Pattern=`^[a-zA-Z0-9._-]+:[0-9]{1,5}$`
 	Endpoint string `json:"endpoint"`
 }
@@ -564,7 +566,7 @@ type CellOverrides struct {
 
 	// sibSchedule tunes SIB19 broadcast scheduling. Any unset sub-field
 	// falls back to the defaults (siWindowLength=5, siPeriod=16,
-	// siWindowPosition=1). Tune when PDCCH capacity is tight or when
+	// siWindowPosition=2). Tune when PDCCH capacity is tight or when
 	// SIB19 broadcast cadence needs to track short ntn-UlSyncValidityDur.
 	// +optional
 	SIBSchedule *SIBSchedule `json:"sibSchedule,omitempty"`

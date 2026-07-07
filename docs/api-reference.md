@@ -1291,7 +1291,7 @@ satellite-to-satellite transitions. 3GPP Release 18 SIB19 field.
           ntnConfig is the target satellite's NTN configuration after the switch.
 Required: OCUDU rejects a sat_switch_with_resync that has no ntn_cfg.<br/>
           <br/>
-            <i>Validations</i>:<li>has(self.ephemerisECEF) || has(self.ephemerisOrbital): exactly one of ephemerisECEF or ephemerisOrbital must be set</li><li>!(has(self.ephemerisECEF) && has(self.ephemerisOrbital)): ephemerisECEF and ephemerisOrbital are mutually exclusive</li>
+            <i>Validations</i>:<li>has(self.ephemerisECEF) || has(self.ephemerisOrbital): exactly one of ephemerisECEF or ephemerisOrbital must be set</li><li>!(has(self.ephemerisECEF) && has(self.ephemerisOrbital)): ephemerisECEF and ephemerisOrbital are mutually exclusive</li><li>!has(self.ephemerisECEF) || self.ephemerisECEF.posX != 0 || self.ephemerisECEF.posY != 0 || self.ephemerisECEF.posZ != 0: ephemerisECEF position must not be all zeros</li>
         </td>
         <td>true</td>
       </tr><tr>
@@ -1840,6 +1840,8 @@ provider specifies which NTN backend to configure.
           remoteControl configures the gNB remote_control WebSocket for live NTN
 config push. When set together with spec.cellID, the operator pushes runtime
 ntn_config_update commands; otherwise it uses the ConfigMap path only.<br/>
+          <br/>
+            <i>Validations</i>:<li>int(self.endpoint.split(':')[1]) >= 1 && int(self.endpoint.split(':')[1]) <= 65535: endpoint port must be in 1-65535</li>
         </td>
         <td>false</td>
       </tr></tbody>
@@ -1868,7 +1870,11 @@ ntn_config_update commands; otherwise it uses the ConfigMap path only.
         <td><b>endpoint</b></td>
         <td>string</td>
         <td>
-          endpoint is host:port of the gNB remote_control server (e.g. "127.0.0.1:8001").<br/>
+          endpoint is host:port of the gNB remote_control server (e.g. "127.0.0.1:8001").
+The provider prepends ws://, so include NEITHER a scheme nor a path — a value
+like "ws://host:8001" would dial "ws://ws://host:8001" and fail. The pattern
+enforces bare host:port (a permanent admission error beats a silent
+tight-requeue on a mistyped endpoint).<br/>
         </td>
         <td>true</td>
       </tr></tbody>
@@ -1964,7 +1970,7 @@ cellOverrides allows fine-tuning PUCCH, PDSCH, PRACH, and RRC parameters.
         <td>
           sibSchedule tunes SIB19 broadcast scheduling. Any unset sub-field
 falls back to the defaults (siWindowLength=5, siPeriod=16,
-siWindowPosition=1). Tune when PDCCH capacity is tight or when
+siWindowPosition=2). Tune when PDCCH capacity is tight or when
 SIB19 broadcast cadence needs to track short ntn-UlSyncValidityDur.<br/>
         </td>
         <td>false</td>
@@ -1979,7 +1985,7 @@ SIB19 broadcast cadence needs to track short ntn-UlSyncValidityDur.<br/>
 
 sibSchedule tunes SIB19 broadcast scheduling. Any unset sub-field
 falls back to the defaults (siWindowLength=5, siPeriod=16,
-siWindowPosition=1). Tune when PDCCH capacity is tight or when
+siWindowPosition=2). Tune when PDCCH capacity is tight or when
 SIB19 broadcast cadence needs to track short ntn-UlSyncValidityDur.
 
 <table>
@@ -3176,7 +3182,9 @@ SatelliteEphemerisStatus defines the observed state of SatelliteEphemeris.
         <td>[]object</td>
         <td>
           propagatedStates holds SGP4-propagated ECEF state vectors (per satellite) at
-the last refresh epoch, consumed by NTNCellConfig runtime ephemeris push (#176).<br/>
+the last refresh epoch, consumed by NTNCellConfig runtime ephemeris push (#176).
+Capped (maxItems) to match the controller's maxPropagatedStates and stay well
+under the etcd object-size limit.<br/>
         </td>
         <td>false</td>
       </tr><tr>
@@ -3373,7 +3381,8 @@ as OCUDU's ntn_config_update requires).<br/>
         <td><b>satellite</b></td>
         <td>string</td>
         <td>
-          satellite is the satellite name or object ID.<br/>
+          satellite is the satellite name or object ID (bounded; the controller
+truncates the externally-sourced name to this length).<br/>
         </td>
         <td>true</td>
       </tr></tbody>

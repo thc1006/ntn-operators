@@ -256,6 +256,8 @@ spec:
                 description: |-
                   propagatedStates holds SGP4-propagated ECEF state vectors (per satellite) at
                   the last refresh epoch, consumed by NTNCellConfig runtime ephemeris push (#176).
+                  Capped (maxItems) to match the controller's maxPropagatedStates and stay well
+                  under the etcd object-size limit.
                 items:
                   description: |-
                     PropagatedState is a satellite state vector propagated (SGP4) to a specific
@@ -324,7 +326,10 @@ spec:
                         (spec.ephemerisNoradID) to select which state to push.
                       type: integer
                     satellite:
-                      description: satellite is the satellite name or object ID.
+                      description: |-
+                        satellite is the satellite name or object ID (bounded; the controller
+                        truncates the externally-sourced name to this length).
+                      maxLength: 64
                       type: string
                   required:
                   - ecef
@@ -332,6 +337,7 @@ spec:
                   - noradID
                   - satellite
                   type: object
+                maxItems: 128
                 type: array
               satelliteCount:
                 description: satelliteCount is the number of satellites currently

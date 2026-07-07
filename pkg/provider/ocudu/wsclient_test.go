@@ -315,6 +315,35 @@ func TestPushNTNConfigUpdate_Unreachable(t *testing.T) {
 	}
 }
 
+// A frame exceeding OCUDU's 16 KB cap must be rejected BEFORE dialing, as a
+// permanent (non-retryable) error.
+func TestPushNTNConfigUpdate_PayloadTooLarge(t *testing.T) {
+	env := ntnConfigUpdateEnvelope{
+		Cmd:   ntnConfigUpdateCmd,
+		Cells: []ntnConfigCellJSON{{PLMN: strings.Repeat("x", wsMaxPayload+1), NCI: 1}},
+	}
+	// Endpoint is never dialed — the cap is checked before the dial.
+	err := pushNTNConfigUpdate(context.Background(), "127.0.0.1:1", env)
+	var we *wsError
+	if !errors.As(err, &we) || we.kind != wsPayloadTooLarge {
+		t.Fatalf("expected wsPayloadTooLarge, got %v", err)
+	}
+	if we.retryable() {
+		t.Error("an oversized frame is a permanent error, not retryable")
+	}
+}
+
+// A reply exceeding the client read limit must fail (not hang, not succeed).
+func TestPushNTNConfigUpdate_OversizedReply(t *testing.T) {
+	endpoint, _ := wsTestServer(t, strings.Repeat("A", wsMaxPayload+1))
+	env, _ := buildNTNConfigUpdate(ecefRuntimeUpdate())
+	err := pushNTNConfigUpdate(context.Background(), endpoint, env)
+	var we *wsError
+	if !errors.As(err, &we) || we.kind != wsUnreachable {
+		t.Fatalf("expected wsUnreachable on an oversized reply, got %v", err)
+	}
+}
+
 func TestProviderPushRuntimeUpdate_UnsupportedWhenNoEndpoint(t *testing.T) {
 	p := &Provider{}
 	err := p.PushRuntimeUpdate(context.Background(), provider.ResolvedRemoteControl{}, ecefRuntimeUpdate())

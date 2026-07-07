@@ -295,7 +295,11 @@ func pushNTNConfigUpdate(ctx context.Context, endpoint string, env ntnConfigUpda
 	if err != nil {
 		return &wsError{wsUnreachable, fmt.Sprintf("dial %s: %v", endpoint, err)}
 	}
-	defer conn.CloseNow() //nolint:errcheck // best-effort close; Close below is the graceful path
+	// CloseNow (not the graceful Close) on every path: the single request/reply
+	// exchange is already complete by the time we return, and coder/websocket's
+	// graceful Close blocks up to ~10s waiting for the peer's close handshake —
+	// a stalling gNB could otherwise tie up a reconcile worker well past dialCtx.
+	defer conn.CloseNow() //nolint:errcheck // best-effort immediate close
 	conn.SetReadLimit(wsMaxPayload)
 
 	if err := conn.Write(dialCtx, websocket.MessageText, payload); err != nil {
@@ -321,6 +325,5 @@ func pushNTNConfigUpdate(ctx context.Context, endpoint string, env ntnConfigUpda
 		return &wsError{wsRejected, fmt.Sprintf("gNB rejected ntn_config_update: %s", r.Error)}
 	}
 
-	_ = conn.Close(websocket.StatusNormalClosure, "")
 	return nil
 }

@@ -231,6 +231,10 @@ const maxPropagatedStates = 128
 // propagation, so the epoch is fresh at push time.
 const propagationEpochLead = 5 * time.Minute
 
+// maxSatelliteNameLen bounds the externally-sourced OMM ObjectName stored per
+// propagated state, so a malformed GP feed cannot bloat the status object.
+const maxSatelliteNameLen = 64
+
 // propagateStates propagates the tracked satellites' orbits (SGP4) to the given
 // future epoch and records the ECEF state vectors in status.propagatedStates for
 // downstream runtime ephemeris push (#176). The set is filtered by
@@ -264,8 +268,14 @@ func (r *SatelliteEphemerisReconciler) propagateStates(
 		if err != nil {
 			continue // skip satellites whose SGP4 propagation fails / goes out of range
 		}
+		// ObjectName comes from external GP data; bound it so a malformed/huge
+		// name can't bloat the status object past the etcd size limit.
+		name := omms[i].ObjectName
+		if len(name) > maxSatelliteNameLen {
+			name = name[:maxSatelliteNameLen]
+		}
 		states = append(states, ntnv1alpha1.PropagatedState{
-			Satellite:   omms[i].ObjectName,
+			Satellite:   name,
 			NoradID:     omms[i].NoradCatID,
 			EpochUnixMs: epochMs,
 			ECEF:        *ecef,

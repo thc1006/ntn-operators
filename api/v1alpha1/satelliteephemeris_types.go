@@ -125,7 +125,9 @@ type PassWindow struct {
 // PropagatedState is a satellite state vector propagated (SGP4) to a specific
 // epoch, in the 3GPP ECEF codepoint form the runtime ephemeris push consumes.
 type PropagatedState struct {
-	// satellite is the satellite name or object ID.
+	// satellite is the satellite name or object ID (bounded; the controller
+	// truncates the externally-sourced name to this length).
+	// +kubebuilder:validation:MaxLength=64
 	Satellite string `json:"satellite"`
 	// noradID is the satellite's NORAD catalog number, used by NTNCellConfig
 	// (spec.ephemerisNoradID) to select which state to push.
@@ -154,6 +156,9 @@ type SatelliteEphemerisStatus struct {
 
 	// propagatedStates holds SGP4-propagated ECEF state vectors (per satellite) at
 	// the last refresh epoch, consumed by NTNCellConfig runtime ephemeris push (#176).
+	// Capped (maxItems) to match the controller's maxPropagatedStates and stay well
+	// under the etcd object-size limit.
+	// +kubebuilder:validation:MaxItems=128
 	// +optional
 	PropagatedStates []PropagatedState `json:"propagatedStates,omitempty"`
 

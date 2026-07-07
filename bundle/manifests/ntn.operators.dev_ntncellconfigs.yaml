@@ -98,7 +98,7 @@ spec:
                     description: |-
                       sibSchedule tunes SIB19 broadcast scheduling. Any unset sub-field
                       falls back to the defaults (siWindowLength=5, siPeriod=16,
-                      siWindowPosition=1). Tune when PDCCH capacity is tight or when
+                      siWindowPosition=2). Tune when PDCCH capacity is tight or when
                       SIB19 broadcast cadence needs to track short ntn-UlSyncValidityDur.
                     properties:
                       siPeriod:
@@ -826,12 +826,17 @@ spec:
                           like "ws://host:8001" would dial "ws://ws://host:8001" and fail. The pattern
                           enforces bare host:port (a permanent admission error beats a silent
                           tight-requeue on a mistyped endpoint).
+                        maxLength: 261
                         minLength: 1
                         pattern: ^[a-zA-Z0-9._-]+:[0-9]{1,5}$
                         type: string
                     required:
                     - endpoint
                     type: object
+                    x-kubernetes-validations:
+                    - message: endpoint port must be in 1-65535
+                      rule: int(self.endpoint.split(':')[1]) >= 1 && int(self.endpoint.split(':')[1])
+                        <= 65535
                   type:
                     description: type is the provider type. Currently only "ocudu"
                       is supported.
