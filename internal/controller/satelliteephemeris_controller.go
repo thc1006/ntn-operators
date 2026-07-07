@@ -78,7 +78,7 @@ func (r *SatelliteEphemerisReconciler) Reconcile(ctx context.Context, req ctrl.R
 		if apierrors.IsNotFound(err) {
 			// CR deleted — release its per-CR metric series so /metrics does not
 			// accumulate dead series across create/delete churn.
-			ntnmetrics.GPSatelliteCount.DeletePartialMatch(prometheus.Labels{"ephemeris": req.Name})
+			ntnmetrics.GPSatelliteCount.DeletePartialMatch(prometheus.Labels{"namespace": req.Namespace, "ephemeris": req.Name})
 		}
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
@@ -138,7 +138,7 @@ func (r *SatelliteEphemerisReconciler) Reconcile(ctx context.Context, req ctrl.R
 	// second reconcile.
 	eph.Status.SatelliteCount = result.SatelliteCount
 	eph.Status.LastUpdated = &metav1.Time{Time: result.FetchedAt}
-	ntnmetrics.GPSatelliteCount.With(prometheus.Labels{"ephemeris": eph.Name}).Set(float64(result.SatelliteCount))
+	ntnmetrics.GPSatelliteCount.With(prometheus.Labels{"namespace": eph.Namespace, "ephemeris": eph.Name}).Set(float64(result.SatelliteCount))
 
 	if result.NotModified {
 		log.Info("GP data unchanged (304 Not Modified)", "satelliteCount", result.SatelliteCount)
