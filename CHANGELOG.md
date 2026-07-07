@@ -80,6 +80,18 @@ real OCUDU gNB (commit `0b229d35`).
   CRs across namespaces and, on delete, the NotFound cleanup wiped the other
   namespace's series (self-healing only at the next ≥2 h GP refresh). The Grafana
   dashboard legend is now `{{namespace}}/{{ephemeris}}`.
+- `ntn_operators_ground_station_health` and `ntn_operators_config_apply_errors_total`
+  gain a `namespace` label (#183) — both CRDs are namespaced, so keying by
+  `station`/`config` (the CR name) alone conflated same-named CRs across
+  namespaces. **GroundStationHealth additionally leaked a series on every
+  GroundStation deletion**: the write used a composite `station="<ns>.<name>"`
+  whose bare-`name` delete never matched — now fixed (plain `station` + a real
+  `namespace` label, so the delete matches). Grafana legends/queries updated to
+  include `{{namespace}}`.
+- `ntn_operators_reader_stale_value_used_total` is now released on NTNSlice
+  deletion even when the reconciler falls back to the lazily-built default metrics
+  provider — the NotFound evict was previously guarded on the explicit
+  `ReaderProvider` field and leaked the series in that (non-production) config (#183).
 
 ### Notes
 
@@ -93,11 +105,6 @@ real OCUDU gNB (commit `0b229d35`).
 - The NTNSlice `metrics-cleanup` finalizer means `kubectl delete ntnslice` now
   completes only after the operator reconciles the deletion; a slice stays
   `Terminating` while the operator is down (standard finalizer behavior).
-- Known follow-up (tracked, #183): `ntn_operators_config_apply_errors_total`
-  (NTNCellConfig) and `ntn_operators_ground_station_health`
-  (GroundStationLifecycle) still key per-CR series by name only and have the same
-  cross-namespace conflation #180 fixed for `gp_satellite_count`; deferred as
-  separate controllers/scope.
 
 ## [0.5.0] - 2026-05-27
 

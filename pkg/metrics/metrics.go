@@ -48,21 +48,28 @@ var (
 	)
 
 	// GroundStationHealth reports ground station condition status (1=True, 0=False, -1=Unknown).
+	// Keyed by namespace+station: GroundStationLifecycle is namespaced, so the same
+	// CR name in two namespaces is two distinct resources and must not share a
+	// series. (#183; supersedes the earlier namespace+"."+name composite `station`
+	// value, whose bare-name delete never matched → a permanent series leak.)
 	GroundStationHealth = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "ntn_operators_ground_station_health",
 			Help: "Ground station condition status (1=True, 0=False, -1=Unknown).",
 		},
-		[]string{"station", "condition"},
+		[]string{"namespace", "station", "condition"},
 	)
 
 	// ConfigApplyErrorsTotal counts NTN cell config application failures.
+	// Keyed by namespace+config: NTNCellConfig is namespaced, so keying by config
+	// name alone conflated same-named CRs across namespaces (and wiped them on
+	// delete). Mirrors the #178/#184 namespace fix (#183).
 	ConfigApplyErrorsTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "ntn_operators_config_apply_errors_total",
 			Help: "Total number of NTN cell config apply errors.",
 		},
-		[]string{"config", "provider"},
+		[]string{"namespace", "config", "provider"},
 	)
 
 	// GPFetchDuration tracks GP data fetch duration in seconds.

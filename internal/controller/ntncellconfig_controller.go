@@ -214,7 +214,7 @@ func (r *NTNCellConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	if err := prov.ApplyCellConfig(ctx, cc.Name, spec); err != nil {
 		log.Error(err, "Failed to apply cell config")
 		ntnmetrics.ConfigApplyErrorsTotal.With(prometheus.Labels{
-			"config": cc.Name, "provider": spec.Provider.Type,
+			"namespace": cc.Namespace, "config": cc.Name, "provider": spec.Provider.Type,
 		}).Inc()
 		cc.Status.AppliedKoffset = 0
 		// Preserve existing ConfigMapRef for best-effort finalizer cleanup.
@@ -334,7 +334,7 @@ func (r *NTNCellConfigReconciler) handleFinalizer(
 	if cc.DeletionTimestamp != nil {
 		// Release the CR's per-CR metric series on deletion so /metrics does not
 		// accumulate dead series across create/delete churn (idempotent).
-		ntnmetrics.ConfigApplyErrorsTotal.DeletePartialMatch(prometheus.Labels{"config": cc.Name})
+		ntnmetrics.ConfigApplyErrorsTotal.DeletePartialMatch(prometheus.Labels{"namespace": cc.Namespace, "config": cc.Name})
 		if controllerutil.ContainsFinalizer(cc, finalizerName) {
 			if prov == nil {
 				// Best-effort cleanup using Status.ConfigMapRef when provider is missing.
