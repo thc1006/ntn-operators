@@ -31,7 +31,7 @@ func TestMetricsRegistered(t *testing.T) {
 	GroundStationHealth.With(prometheus.Labels{"station": "_", "condition": "_"}).Set(0)
 	ConfigApplyErrorsTotal.With(prometheus.Labels{"config": "_", "provider": "_"}).Add(0)
 	GPFetchDuration.With(prometheus.Labels{"source_type": "_", "status": "_"}).Observe(0)
-	GPSatelliteCount.With(prometheus.Labels{"ephemeris": "_"}).Set(0)
+	GPSatelliteCount.With(prometheus.Labels{"namespace": "_", "ephemeris": "_"}).Set(0)
 	ReaderQueryDuration.With(prometheus.Labels{"source": "_", "outcome": "_"}).Observe(0)
 	ReaderErrorsTotal.With(prometheus.Labels{"source": "_", "reason": "_"}).Add(0)
 	ReaderStaleUsedTotal.With(prometheus.Labels{"namespace": "_", "name": "_"}).Add(0)
@@ -80,10 +80,11 @@ func TestFailoverTotalIncrement(t *testing.T) {
 }
 
 func TestGPSatelliteCountGauge(t *testing.T) {
-	GPSatelliteCount.With(prometheus.Labels{"ephemeris": "oneweb"}).Set(651)
+	labels := prometheus.Labels{"namespace": "test-ns", "ephemeris": "oneweb"}
+	GPSatelliteCount.With(labels).Set(651)
 
 	m := &dto.Metric{}
-	if err := GPSatelliteCount.With(prometheus.Labels{"ephemeris": "oneweb"}).Write(m); err != nil {
+	if err := GPSatelliteCount.With(labels).Write(m); err != nil {
 		t.Fatal(err)
 	}
 	if m.GetGauge().GetValue() != 651 {

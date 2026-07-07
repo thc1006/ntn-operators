@@ -128,7 +128,7 @@
       "targets": [
         {
           "expr": "ntn_operators_gp_satellite_count",
-          "legendFormat": "{{ephemeris}}"
+          "legendFormat": "{{namespace}}/{{ephemeris}}"
         }
       ]
     },

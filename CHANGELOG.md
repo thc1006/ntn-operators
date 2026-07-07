@@ -74,6 +74,12 @@ real OCUDU gNB (commit `0b229d35`).
   same-named CRs/refs across namespaces (and, for the counter, wiped them on
   delete). PromQL that groups by the existing labels still works; add `namespace`
   to dashboards for per-CR accuracy.
+- `ntn_operators_gp_satellite_count` gains a `namespace` label (#180), mirroring
+  the #178 fix for the SatelliteEphemeris controller. SatelliteEphemeris is
+  namespaced, so keying by `ephemeris` (the CR name) alone conflated same-named
+  CRs across namespaces and, on delete, the NotFound cleanup wiped the other
+  namespace's series (self-healing only at the next ≥2 h GP refresh). The Grafana
+  dashboard legend is now `{{namespace}}/{{ephemeris}}`.
 
 ### Notes
 
@@ -87,9 +93,11 @@ real OCUDU gNB (commit `0b229d35`).
 - The NTNSlice `metrics-cleanup` finalizer means `kubectl delete ntnslice` now
   completes only after the operator reconciles the deletion; a slice stays
   `Terminating` while the operator is down (standard finalizer behavior).
-- Known follow-up (tracked, #180): `ntn_operators_gp_satellite_count`
-  (SatelliteEphemeris controller) has the same cross-namespace conflation #178
-  fixed for the NTNSlice metrics; deferred as a separate controller/scope.
+- Known follow-up (tracked, #183): `ntn_operators_config_apply_errors_total`
+  (NTNCellConfig) and `ntn_operators_ground_station_health`
+  (GroundStationLifecycle) still key per-CR series by name only and have the same
+  cross-namespace conflation #180 fixed for `gp_satellite_count`; deferred as
+  separate controllers/scope.
 
 ## [0.5.0] - 2026-05-27
 

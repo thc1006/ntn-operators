@@ -76,12 +76,15 @@ var (
 	)
 
 	// GPSatelliteCount reports the number of satellites in the latest GP fetch.
+	// Keyed by namespace+ephemeris: SatelliteEphemeris is namespaced, so the same
+	// CR name in two namespaces is two distinct resources and must not share a
+	// series (nor wipe each other's on delete). Mirrors the #178 namespace fix.
 	GPSatelliteCount = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "ntn_operators_gp_satellite_count",
 			Help: "Number of satellites from the latest GP fetch.",
 		},
-		[]string{"ephemeris"},
+		[]string{"namespace", "ephemeris"},
 	)
 
 	// ReaderQueryDuration measures how long a single PromQL fetch made
