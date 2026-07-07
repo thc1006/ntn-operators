@@ -54,12 +54,21 @@ type NTNCellConfigReconciler struct {
 }
 
 const (
-	ephemerisReasonPushFailed         = "PushFailed"
-	ephemerisReasonRefNotFound        = "EphemerisRefNotFound"
-	ephemerisReasonGetFailed          = "EphemerisGetFailed"
-	ephemerisReasonPayloadMissing     = "EphemerisPayloadMissing"
-	ephemerisReasonProviderPushFailed = "ProviderPushFailed"
+	ephemerisReasonPushFailed           = "PushFailed"
+	ephemerisReasonRefNotFound          = "EphemerisRefNotFound"
+	ephemerisReasonGetFailed            = "EphemerisGetFailed"
+	ephemerisReasonPayloadMissing       = "EphemerisPayloadMissing"
+	ephemerisReasonProviderPushFailed   = "ProviderPushFailed"
+	ephemerisReasonProviderPushRejected = "ProviderPushRejected"
+	ephemerisReasonEphemerisStale       = "EphemerisStale"
 )
+
+// epochSkewMargin is how far in the future a propagated epoch must be to be worth
+// pushing. OCUDU's ntn_config_update rejects past epochs, and re-labeling a state
+// with a different epoch would corrupt it, so a state whose epoch is within this
+// margin of now is treated as stale and skipped (awaiting the SatelliteEphemeris
+// producer's refresh) rather than pushed and rejected in a tight loop.
+const epochSkewMargin = 10 * time.Second
 
 type ephemerisPushError struct {
 	reason string
@@ -108,7 +117,21 @@ func ephemerisPushConditionChanged(
 }
 
 func ephemerisPushShouldRequeue(reason string) bool {
-	return reason != ephemerisReasonRefNotFound
+	switch reason {
+	case ephemerisReasonRefNotFound,
+		ephemerisReasonPayloadMissing,
+		ephemerisReasonEphemerisStale,
+		ephemerisReasonProviderPushRejected:
+		// These clear only on an external change — a spec edit (generation bump)
+		// or a SatelliteEphemeris refresh (new marker) — both of which re-trigger
+		// reconcile via generation/watch. A tight requeue would just hammer a
+		// permanently-failing push (e.g. the gNB rejecting a bad config, or a
+		// stale/missing propagated state) until that external change happens.
+		return false
+	default:
+		// Transient failures (API GET error, gNB unreachable) — retry.
+		return true
+	}
 }
 
 // +kubebuilder:rbac:groups=ntn.operators.dev,resources=ntncellconfigs,verbs=get;list;watch;create;update;patch;delete
@@ -309,6 +332,9 @@ func (r *NTNCellConfigReconciler) handleFinalizer(
 	finalizerName := "ntn.operators.dev/configmap-cleanup"
 
 	if cc.DeletionTimestamp != nil {
+		// Release the CR's per-CR metric series on deletion so /metrics does not
+		// accumulate dead series across create/delete churn (idempotent).
+		ntnmetrics.ConfigApplyErrorsTotal.DeletePartialMatch(prometheus.Labels{"config": cc.Name})
 		if controllerutil.ContainsFinalizer(cc, finalizerName) {
 			if prov == nil {
 				// Best-effort cleanup using Status.ConfigMapRef when provider is missing.
@@ -390,6 +416,29 @@ func (r *NTNCellConfigReconciler) pushEphemerisUpdateIfNeeded(
 		return false, marker, nil
 	}
 
+	// Runtime push path: when a remote-control endpoint + cellID are configured,
+	// push the SGP4-propagated ephemeris live via ntn_config_update (#176) instead
+	// of rewriting the bootstrap ConfigMap with the CR's static ephemeris.
+	if spec.Provider.RemoteControl != nil && spec.CellID != nil {
+		return r.pushRuntimeEphemeris(ctx, spec, eph, prov, marker)
+	}
+
+	// A satSwitchWithResync is runtime-only (its k_mac has no bootstrap-YAML
+	// surface, issue #52). On the ConfigMap path it cannot be delivered, so make
+	// that observable instead of silently dropping it — a cell that sets a switch
+	// without remoteControl+cellID is misconfigured.
+	if spec.NTN.SatSwitchWithResync != nil {
+		logf.FromContext(ctx).Info(
+			"satSwitchWithResync is set but ignored: it requires spec.provider.remoteControl and spec.cellID (runtime push); the ConfigMap path cannot deliver it",
+			"cell", cc.Name)
+		if r.Recorder != nil {
+			r.Recorder.Eventf(cc, nil, "Warning", "SatSwitchIgnored", "SatSwitchIgnored",
+				"%s", "satSwitchWithResync (incl. k_mac) requires remoteControl+cellID; ignored on the ConfigMap path")
+		}
+	}
+
+	// ConfigMap bootstrap path (backward compatible): push the CR's static
+	// spec.ntn ephemeris by rewriting the ConfigMap; the gNB reloads it.
 	update := provider.EphemerisUpdate{}
 	switch {
 	case spec.NTN.EphemerisOrbital != nil:
@@ -411,6 +460,85 @@ func (r *NTNCellConfigReconciler) pushEphemerisUpdateIfNeeded(
 	}
 
 	return true, marker, nil
+}
+
+// pushRuntimeEphemeris pushes the SGP4-propagated ephemeris (from the referenced
+// SatelliteEphemeris status) to the gNB via the runtime ntn_config_update path.
+// This closes #176: the operator consumes the propagated state vector instead of
+// discarding it and re-emitting the CR's static ephemeris.
+func (r *NTNCellConfigReconciler) pushRuntimeEphemeris(
+	ctx context.Context,
+	spec *ntnv1alpha1.NTNCellConfigSpec,
+	eph *ntnv1alpha1.SatelliteEphemeris,
+	prov provider.NTNProvider,
+	marker string,
+) (bool, string, error) {
+	state := selectPropagatedState(eph.Status.PropagatedStates, spec.EphemerisNoradID)
+	if state == nil {
+		return false, marker, newEphemerisPushError(
+			ephemerisReasonPayloadMissing,
+			fmt.Errorf("no propagated state in SatelliteEphemeris %q for noradID selector %v",
+				eph.Name, spec.EphemerisNoradID),
+		)
+	}
+	// Skip a stale (past / about-to-expire) epoch rather than push a value OCUDU
+	// will reject. The state is only valid for its own epoch, so re-labeling it
+	// would corrupt the position; instead wait for the SatelliteEphemeris producer
+	// to re-propagate a fresh future epoch (which re-triggers this reconcile via
+	// the watch). This reason does not tight-requeue (see ephemerisPushShouldRequeue).
+	if state.EpochUnixMs <= time.Now().Add(epochSkewMargin).UnixMilli() {
+		return false, marker, newEphemerisPushError(
+			ephemerisReasonEphemerisStale,
+			fmt.Errorf("propagated epoch for %q (%d) is not sufficiently in the future; awaiting SatelliteEphemeris refresh",
+				eph.Name, state.EpochUnixMs),
+		)
+	}
+	ulSync := 5
+	if spec.NTN.NTNUlSyncValidityDur != nil {
+		ulSync = *spec.NTN.NTNUlSyncValidityDur
+	}
+	ecef := state.ECEF // copy out of the slice before taking its address
+	update := provider.RuntimeUpdate{
+		Cell:              provider.CellIdentity{PLMN: spec.CellID.PLMN, NCI: uint64(spec.CellID.NCI)},
+		EpochUnixMs:       state.EpochUnixMs,
+		UlSyncValidityDur: ulSync,
+		Ephemeris:         provider.EphemerisUpdate{ECEF: &ecef},
+	}
+	// Attach a pending satellite switch (issue #52 / #49 mechanism): it rides in
+	// the same per-cell frame as the serving ephemeris. This is the only surface
+	// that carries k_mac. The switch only reaches the gNB when a fresh serving
+	// ephemeris push happens (OCUDU requires the cell's ephemeris_info anyway).
+	if spec.NTN.SatSwitchWithResync != nil {
+		update.SatSwitch = spec.NTN.SatSwitchWithResync
+	}
+	target := provider.ResolvedRemoteControl{Endpoint: spec.Provider.RemoteControl.Endpoint}
+	if err := prov.PushRuntimeUpdate(ctx, target, update); err != nil {
+		// A permanent rejection (bad config / malformed frame) must not tight-loop;
+		// only a transient failure (gNB unreachable) is worth retrying.
+		reason := ephemerisReasonProviderPushFailed
+		if errors.Is(err, provider.ErrRuntimePushRejected) {
+			reason = ephemerisReasonProviderPushRejected
+		}
+		return false, marker, newEphemerisPushError(reason, fmt.Errorf("provider PushRuntimeUpdate: %w", err))
+	}
+	return true, marker, nil
+}
+
+// selectPropagatedState picks the propagated state matching noradID, or the first
+// available when noradID is nil. Returns nil when none match.
+func selectPropagatedState(states []ntnv1alpha1.PropagatedState, noradID *int) *ntnv1alpha1.PropagatedState {
+	if len(states) == 0 {
+		return nil
+	}
+	if noradID == nil {
+		return &states[0]
+	}
+	for i := range states {
+		if states[i].NoradID == *noradID {
+			return &states[i]
+		}
+	}
+	return nil
 }
 
 func isEphemerisPushUpToDate(cc *ntnv1alpha1.NTNCellConfig, marker string) bool {

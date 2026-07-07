@@ -59,15 +59,18 @@ func TestGenerateConfig_GEODefault(t *testing.T) {
 	// Ephemeris MUST use ephemeris_info_ecef (not ephemeris_info).
 	assertContains(t, yaml, "ephemeris_info_ecef:")
 	assertNotContains(t, yaml, "ephemeris_info:")
-	assertContains(t, yaml, "pos_x: 20922195")
-	assertContains(t, yaml, "pos_y: 1967783")
-	assertContains(t, yaml, "pos_z: 19770302")
+	// Emitted as physical metres = codepoint × 1.3 (20922195×1.3, 1967783×1.3, …).
+	assertContains(t, yaml, "pos_x: 27198853.5")
+	assertContains(t, yaml, "pos_y: 2558117.9")
+	assertContains(t, yaml, "pos_z: 25701392.6")
 	assertContains(t, yaml, "vel_x: 0")
 	assertContains(t, yaml, "vel_y: 0")
 	assertContains(t, yaml, "vel_z: 0")
 
-	// SIB19 — must have si_window_position (required by srsRAN).
-	assertContains(t, yaml, "sib_mapping: 19")
+	// SIB19 ([19], schedulingInfoList2) — must have si_window_position, and must
+	// be preceded by the mandatory SIB2 ([2], schedulingInfoList) entry.
+	assertContains(t, yaml, "sib_mapping: [2]")
+	assertContains(t, yaml, "sib_mapping: [19]")
 	assertContains(t, yaml, "si_window_position:")
 
 	// cell_cfg NTN defaults.
@@ -95,7 +98,7 @@ func TestGenerateConfig_CustomKoffset(t *testing.T) {
 	yaml := string(data)
 	assertContains(t, yaml, "cell_specific_koffset: 500")
 	// ta_common under ta_info subsection
-	assertContains(t, yaml, "ta_common: 1000")
+	assertContains(t, yaml, "ta_common: 4.072") // 1000 × 0.004072 µs
 }
 
 func TestGenerateConfig_CustomCellOverrides(t *testing.T) {
@@ -139,9 +142,10 @@ func TestGenerateConfig_LEOWithVelocity(t *testing.T) {
 	}
 
 	yaml := string(data)
-	assertContains(t, yaml, "vel_x: 100")
-	assertContains(t, yaml, "vel_y: -200")
-	assertContains(t, yaml, "vel_z: 50")
+	// Emitted as physical m/s = codepoint × 0.06 (100×0.06=6, -200×0.06=-12, …).
+	assertContains(t, yaml, "vel_x: 6")
+	assertContains(t, yaml, "vel_y: -12")
+	assertContains(t, yaml, "vel_z: 3")
 }
 
 func TestGenerateConfig_OrbitalEphemeris(t *testing.T) {
@@ -172,11 +176,12 @@ func TestGenerateConfig_OrbitalEphemeris(t *testing.T) {
 	assertNotContains(t, yaml, "ephemeris_info_ecef:")
 
 	assertContains(t, yaml, "semi_major_axis: 6921000")
-	assertContains(t, yaml, "eccentricity: 1")
-	assertContains(t, yaml, "inclination: 879000")
-	assertContains(t, yaml, "right_ascension: 1000000")
-	assertContains(t, yaml, "arg_of_periapsis: 900000")
-	assertContains(t, yaml, "mean_anomaly: 2700000")
+	// Physical: eccentricity × 1e-6; angles × π/1.8e6 (1e-4° → radians).
+	assertContains(t, yaml, "eccentricity: 0.000001")
+	assertContains(t, yaml, "inclination: 1.5341444125030157")
+	assertContains(t, yaml, "longitude: 1.7453292519943295")
+	assertContains(t, yaml, "periapsis: 1.5707963267948966")
+	assertContains(t, yaml, "mean_anomaly: 4.71238898038469")
 }
 
 func TestGenerateConfig_BothEphemerisSet(t *testing.T) {
@@ -224,10 +229,11 @@ func TestGenerateConfig_TAInfoExtended(t *testing.T) {
 	}
 	yaml := string(data)
 	assertContains(t, yaml, "ta_info:")
-	assertContains(t, yaml, "ta_common: 1000")
-	assertContains(t, yaml, "ta_common_drift: 50")
-	assertContains(t, yaml, "ta_common_drift_variant: 10")
-	assertContains(t, yaml, "ta_common_offset: 200")
+	assertContains(t, yaml, "ta_common: 4.072") // 1000 × 0.004072 µs
+	// Physical µs family: drift × 2e-4, variant × 2e-5, offset × 0.004072.
+	assertContains(t, yaml, "ta_common_drift: 0.01")
+	assertContains(t, yaml, "ta_common_drift_variant: 0.0002")
+	assertContains(t, yaml, "ta_common_offset: 0.8144")
 }
 
 func TestGenerateConfig_EpochTime(t *testing.T) {
@@ -266,7 +272,7 @@ func TestGenerateConfig_FeederLinkInfo(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	yaml := string(data)
-	assertContains(t, yaml, "feeder_link_info:")
+	assertContains(t, yaml, "feeder_link:")
 	assertContains(t, yaml, "enable_doppler_compensation: true")
 	assertContains(t, yaml, "dl_freq: 2680000000")
 	assertContains(t, yaml, "ul_freq: 2560000000")
@@ -288,9 +294,13 @@ func TestGenerateConfig_GatewayLocation(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	yaml := string(data)
-	assertContains(t, yaml, "ntn_gateway_location:")
-	assertContains(t, yaml, "latitude: 248500")
-	assertContains(t, yaml, "longitude: 1210000")
+	assertContains(t, yaml, "gateway_location:")
+	// The serving-cell gateway key is "gateway_location"; "ntn_gateway_location"
+	// is only valid nested under sat_switch_with_resync and is rejected here.
+	assertNotContains(t, yaml, "ntn_gateway_location:")
+	// Emitted as degrees = codepoint × 1e-4 (248500 → 24.85, 1210000 → 121).
+	assertContains(t, yaml, "latitude: 24.85")
+	assertContains(t, yaml, "longitude: 121")
 	assertContains(t, yaml, "altitude: 100")
 }
 
@@ -411,9 +421,13 @@ func TestGenerateConfig_PolarizationStringInjectionResistant(t *testing.T) {
 	if err := k8syaml.Unmarshal(data, &parsed); err != nil {
 		t.Fatalf("generated YAML did not unmarshal: %v\nYAML:\n%s", err, yaml)
 	}
-	ntn, ok := parsed["ntn"].(map[string]any)
+	cellCfg, ok := parsed["cell_cfg"].(map[string]any)
 	if !ok {
-		t.Fatalf("generated YAML missing ntn map: %#v", parsed["ntn"])
+		t.Fatalf("generated YAML missing cell_cfg map: %#v", parsed["cell_cfg"])
+	}
+	ntn, ok := cellCfg["ntn"].(map[string]any)
+	if !ok {
+		t.Fatalf("generated YAML missing cell_cfg.ntn map: %#v", cellCfg["ntn"])
 	}
 	if _, ok := ntn["injected_key"]; ok {
 		t.Fatalf("injection leaked: ntn.injected_key should not exist, got %#v", ntn["injected_key"])
@@ -516,17 +530,26 @@ func TestGenerateConfig_MovingRefLocation(t *testing.T) {
 	}
 	yaml := string(data)
 	assertContains(t, yaml, "moving_ref_location:")
-	assertContains(t, yaml, "latitude: 248500")
-	assertContains(t, yaml, "longitude: 1210000")
+	assertContains(t, yaml, "latitude: 24.85")
+	assertContains(t, yaml, "longitude: 121")
 }
 
 func TestGenerateConfig_SatSwitchWithResync(t *testing.T) {
+	// satSwitchWithResync is a RUNTIME-only feature: it must NEVER appear in the
+	// static YAML. It is delivered via the ntn_config_update remote command (the
+	// only OCUDU surface carrying its k_mac field). Setting it must be a no-op for
+	// the static emitter, not a parse-breaker (emitting it would inject unknown
+	// keys and fail the whole config parse — verified by booting the gNB).
+	kmac := 300
 	spec := &ntnv1alpha1.NTNCellConfigSpec{
 		NTN: ntnv1alpha1.NTNParams{
 			EphemerisECEF: &ntnv1alpha1.EphemerisECEF{PosX: 1, PosY: 2, PosZ: 3},
 			SatSwitchWithResync: &ntnv1alpha1.SatSwitchWithResync{
-				TargetPCI: 100,
-				T304:      150,
+				SSBTimeOffsetSubframes: 4,
+				NTNConfig: ntnv1alpha1.SatSwitchNTNConfig{
+					EphemerisECEF: &ntnv1alpha1.EphemerisECEF{PosX: 10, PosY: 20, PosZ: 30},
+					KMac:          &kmac,
+				},
 			},
 		},
 	}
@@ -535,9 +558,9 @@ func TestGenerateConfig_SatSwitchWithResync(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	yaml := string(data)
-	assertContains(t, yaml, "sat_switch_with_resync:")
-	assertContains(t, yaml, "target_pci: 100")
-	assertContains(t, yaml, "t304: 150")
+	assertNotContains(t, yaml, "sat_switch_with_resync:")
+	assertNotContains(t, yaml, "k_mac:")
+	assertNotContains(t, yaml, "t_service_start:")
 }
 
 func TestGenerateConfig_NilSpec(t *testing.T) {
@@ -548,8 +571,13 @@ func TestGenerateConfig_NilSpec(t *testing.T) {
 }
 
 func TestGenerateConfig_MatchesLiveGNBFormat(t *testing.T) {
-	// This test generates config and validates it matches the exact format
-	// that was verified to work with srsRAN gNB (commit 4bf1543).
+	// Golden structural test: the whole NTN block must live under cell_cfg.ntn
+	// (a top-level "ntn:" is rejected by the gNB at parse time,
+	// config_extras_mode::error), physical-SI values (pos_x = codepoint × 1.3),
+	// and a SIB2-before-SIB19 schedule (OCUDU rejects a SIB19-only schedule).
+	// Verified by booting the OCUDU gNB (commit 0b229d35) with this exact emitter
+	// output — it reaches "gNB started" and accepts a subsequent runtime
+	// ntn_config_update on the same cell.
 	spec := &ntnv1alpha1.NTNCellConfigSpec{
 		NTN: ntnv1alpha1.NTNParams{
 			CellSpecificKoffset: 150,
@@ -568,21 +596,21 @@ func TestGenerateConfig_MatchesLiveGNBFormat(t *testing.T) {
 
 	yaml := string(data)
 
-	// These exact strings were verified against a live srsRAN gNB that
-	// successfully started, connected to AMF, and broadcast NTN cell.
+	// Indentation is significant: keys under cell_cfg.ntn sit at 4 spaces.
 	requiredFragments := []string{
-		"ntn:",
-		"  cell_specific_koffset: 150",
-		"  ta_info:",
-		"    ta_common: 0",
-		"  ephemeris_info_ecef:",
-		"    pos_x: 20922195",
 		"cell_cfg:",
+		"  ntn:",
+		"    cell_specific_koffset: 150",
+		"    ta_info:",
+		"      ta_common: 0",
+		"    ephemeris_info_ecef:",
+		"      pos_x: 27198853.5", // 20922195 codepoint × 1.3 m
 		"  sib:",
 		"    si_sched_info:",
 		"      - si_period: 16",
-		"        sib_mapping: 19",
-		"        si_window_position: 1",
+		"        sib_mapping: [2]",      // mandatory SIB2 companion (schedulingInfoList)
+		"        sib_mapping: [19]",     // SIB19 (schedulingInfoList2)
+		"        si_window_position: 2", // > 1 preceding schedulingInfoList entry
 		"  pdsch:",
 		"    max_nof_harq_retxs: 0",
 		"cu_cp:",
@@ -618,15 +646,15 @@ func TestGenerateConfig_NCells(t *testing.T) {
 
 	yaml := string(data)
 	assertContains(t, yaml, "ncells:")
-	assertContains(t, yaml, "phys_cell_id: 100")
-	assertContains(t, yaml, "frequency: 632628")
-	assertContains(t, yaml, "phys_cell_id: 200")
-	// Second cell has no frequency — must not emit frequency line.
-	// Count occurrences of "frequency:" — should be exactly 1.
-	if strings.Count(yaml, "frequency:") != 1 {
+	assertContains(t, yaml, "pci: 100")
+	assertContains(t, yaml, "carrier_freq: 632628")
+	assertContains(t, yaml, "pci: 200")
+	// Second cell has no frequency — must not emit carrier_freq line.
+	// Count occurrences of "carrier_freq:" — should be exactly 1.
+	if strings.Count(yaml, "carrier_freq:") != 1 {
 		t.Errorf(
-			"expected exactly 1 frequency line, got %d\n%s",
-			strings.Count(yaml, "frequency:"), yaml,
+			"expected exactly 1 carrier_freq line, got %d\n%s",
+			strings.Count(yaml, "carrier_freq:"), yaml,
 		)
 	}
 }
@@ -670,8 +698,8 @@ func TestGenerateConfig_ReferenceLocation(t *testing.T) {
 
 	yaml := string(data)
 	assertContains(t, yaml, "reference_location:")
-	assertContains(t, yaml, "latitude: 248500")
-	assertContains(t, yaml, "longitude: 1210000")
+	assertContains(t, yaml, "latitude: 24.85")
+	assertContains(t, yaml, "longitude: 121")
 }
 
 func TestGenerateConfig_ReferenceLocationOmittedWhenNil(t *testing.T) {
@@ -712,8 +740,11 @@ func TestGenerateConfig_DistanceThresholdAndTService(t *testing.T) {
 	}
 
 	yaml := string(data)
-	assertContains(t, yaml, "distance_threshold: 5000")
-	assertContains(t, yaml, "t_service: 600")
+	assertContains(t, yaml, "distance_threshold: 5000") // metres, passthrough
+	// t_service is intentionally NOT emitted: the CRD models a duration in
+	// seconds but OCUDU's t_service is an absolute Unix-ms/UTC timestamp, so
+	// emitting the duration would be wrong. Setting it must be a no-op.
+	assertNotContains(t, yaml, "t_service:")
 }
 
 func TestGenerateConfig_DistanceThresholdAndTServiceOmitted(t *testing.T) {
@@ -750,7 +781,10 @@ func TestGenerateConfig_SIBScheduleDefaults(t *testing.T) {
 	yaml := string(data)
 	assertContains(t, yaml, "si_window_length: 5")
 	assertContains(t, yaml, "si_period: 16")
-	assertContains(t, yaml, "si_window_position: 1")
+	assertContains(t, yaml, "si_window_position: 2")
+	// SIB19 must be preceded by a SIB2 schedulingInfoList entry (OCUDU requires it).
+	assertContains(t, yaml, "sib_mapping: [2]")
+	assertContains(t, yaml, "sib_mapping: [19]")
 }
 
 func TestGenerateConfig_SIBScheduleFullOverride(t *testing.T) {
@@ -793,31 +827,32 @@ func TestGenerateConfig_SIBSchedulePartialOverride(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	yaml := string(data)
-	// Only siPeriod overridden; others keep defaults.
+	// Only siPeriod overridden; others keep defaults (position default is now 2).
 	assertContains(t, yaml, "si_window_length: 5")
 	assertContains(t, yaml, "si_period: 8")
-	assertContains(t, yaml, "si_window_position: 1")
+	assertContains(t, yaml, "si_window_position: 2")
 }
 
-func TestGenerateConfig_SIBScheduleZeroPositionRespected(t *testing.T) {
-	// Regression: position=0 is valid ("first slot") and must NOT fall
-	// back to the default 1. Pointer semantics in SIBSchedule guarantee
-	// this distinction.
-	zero := 0
+func TestGenerateConfig_SIBScheduleExplicitPositionRespected(t *testing.T) {
+	// An explicit position must be emitted verbatim, not overridden by the
+	// default (2). Pointer semantics in SIBSchedule guarantee the distinction.
+	// (Position 0/1 are invalid now: SIB19 must sit after the SIB2 entry, so the
+	// CRD enforces Minimum=2 — a value <2 never reaches the emitter.)
+	explicit := 7
 	spec := &ntnv1alpha1.NTNCellConfigSpec{
 		NTN: ntnv1alpha1.NTNParams{
 			CellSpecificKoffset: 150,
 			EphemerisECEF:       &ntnv1alpha1.EphemerisECEF{PosX: 1, PosY: 2, PosZ: 3},
 		},
 		CellOverrides: &ntnv1alpha1.CellOverrides{
-			SIBSchedule: &ntnv1alpha1.SIBSchedule{SIWindowPosition: &zero},
+			SIBSchedule: &ntnv1alpha1.SIBSchedule{SIWindowPosition: &explicit},
 		},
 	}
 	data, err := GenerateConfig(spec)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	assertContains(t, string(data), "si_window_position: 0")
+	assertContains(t, string(data), "si_window_position: 7")
 }
 
 // TestGenerateConfig_YAMLRoundTrip asserts the renderer emits structurally
@@ -839,10 +874,14 @@ func TestGenerateConfig_YAMLRoundTrip(t *testing.T) {
 				TACommonDriftVariant: 10,
 				TACommonOffset:       200,
 			},
-			EpochTime:           &ntnv1alpha1.EpochTime{SFN: 512, SubframeNumber: 5},
-			EphemerisECEF:       &ntnv1alpha1.EphemerisECEF{PosX: 1, PosY: 2, PosZ: 3, VelX: 10, VelY: 20, VelZ: 30},
-			MovingRefLocation:   &ntnv1alpha1.MovingRefLocation{Latitude: 248500, Longitude: 1210000},
-			SatSwitchWithResync: &ntnv1alpha1.SatSwitchWithResync{TargetPCI: 1, T304: 100},
+			EpochTime:         &ntnv1alpha1.EpochTime{SFN: 512, SubframeNumber: 5},
+			EphemerisECEF:     &ntnv1alpha1.EphemerisECEF{PosX: 1, PosY: 2, PosZ: 3, VelX: 10, VelY: 20, VelZ: 30},
+			MovingRefLocation: &ntnv1alpha1.MovingRefLocation{Latitude: 248500, Longitude: 1210000},
+			SatSwitchWithResync: &ntnv1alpha1.SatSwitchWithResync{
+				NTNConfig: ntnv1alpha1.SatSwitchNTNConfig{
+					EphemerisECEF: &ntnv1alpha1.EphemerisECEF{PosX: 1, PosY: 2, PosZ: 3},
+				},
+			},
 			NeighborCells: []ntnv1alpha1.NTNNeighborCell{
 				{PhysicalCellID: 7, Frequency: 632628},
 				{PhysicalCellID: 42},
@@ -867,11 +906,12 @@ func TestGenerateConfig_YAMLRoundTrip(t *testing.T) {
 	if err := k8syaml.Unmarshal(data, &parsed); err != nil {
 		t.Fatalf("rendered output is not valid YAML: %v\n\n%s", err, data)
 	}
-	if _, ok := parsed["ntn"]; !ok {
-		t.Errorf("round-trip parse missing ntn key: %s", data)
+	cellCfg, ok := parsed["cell_cfg"].(map[string]any)
+	if !ok {
+		t.Errorf("round-trip parse missing cell_cfg map: %s", data)
 	}
-	if _, ok := parsed["cell_cfg"]; !ok {
-		t.Errorf("round-trip parse missing cell_cfg key: %s", data)
+	if _, ok := cellCfg["ntn"]; !ok {
+		t.Errorf("round-trip parse missing cell_cfg.ntn key: %s", data)
 	}
 }
 

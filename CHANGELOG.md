@@ -5,6 +5,77 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+Config-emitter correctness and runtime NTN push, verified end-to-end against a
+real OCUDU gNB (commit `0b229d35`).
+
+### Fixed
+
+- **OCUDU config never parsed on a real gNB.** The generated `ntn:` block sat at
+  the top level; OCUDU (`config_extras_mode::error`) rejects unknown top-level
+  keys. It is now nested under `cell_cfg.ntn` with the exact keys OCUDU expects
+  (`pci`/`carrier_freq`, `feeder_link`, `gateway_location`, `ncells`, …).
+- **Systematic value-unit mismatch.** The emitter wrote raw 3GPP codepoints where
+  OCUDU expects physical SI. Positions/velocities/TA/angles/eccentricity are now
+  converted (e.g. `pos_x = codepoint × 1.3 m`, angles → radians), with CRD ranges
+  tightened so a codepoint can never exceed OCUDU's accepted physical range.
+- **SIB19-only schedule was rejected by the gNB.** OCUDU requires a SIB with
+  ID < 15 alongside SIB19; the emitter now schedules SIB2 (`schedulingInfoList`)
+  before SIB19 (`schedulingInfoList2`), so the config boots and broadcasts SIB19.
+- **Pass-window failover blindness (#C1):** a global propagation cap could starve
+  some satellites of predicted passes; the cap is now per-satellite.
+- **Prometheus series leak (#C3):** per-CR metric series are now cleaned up
+  (`DeletePartialMatch`) in the finalizers on CR deletion for NTNCellConfig,
+  SatelliteEphemeris, and GroundStationLifecycle. (NTNSlice's series are not yet
+  covered — see Notes.)
+- **Runtime-push stale-epoch tight loop:** a past/expired ephemeris epoch is now
+  skipped (not pushed) and permanent gNB rejections no longer tight-requeue.
+- **Runtime-push epoch accuracy:** the pushed ephemeris epoch is now stamped
+  near-now (not up to a refresh-interval ahead). OCUDU internally re-propagates
+  the state vector from its epoch, so a far-future epoch forced a long backward
+  propagation and compounded LEO error; a near-now epoch keeps it short/forward.
+- An unparseable gNB WebSocket reply is now a retryable failure instead of a
+  silent success.
+
+### Added
+
+- **Runtime NTN config push (#176).** SGP4-propagated ECEF now flows to the gNB
+  live via OCUDU's `ntn_config_update` remote-control WebSocket (MR !798) instead
+  of being discarded: `SatelliteEphemeris.status.propagatedStates`,
+  `NTNCellConfig.spec.cellID` + `spec.provider.remoteControl`, and the provider
+  `PushRuntimeUpdate` transport.
+- **`k_mac` (3GPP `kmac-r17`, #52)** via the runtime `sat_switch_with_resync`
+  block — the only OCUDU surface that accepts it. `SatSwitchNTNConfig.kMac`
+  (1..512) is delivered by the runtime push.
+- **ECEF velocity range validation (#C2)** on propagated/emitted state vectors.
+
+### Changed
+
+- **BREAKING (v1alpha1) — `NTNCellConfig.spec.ntn.satSwitchWithResync` redesigned.**
+  Replaced the inert `{targetPCI, t304}` (which mapped to nothing in OCUDU and was
+  silently dropped) with OCUDU's `sat_switch_with_resync` structure
+  (`ntnConfig`, `epochUnixMs`, `tServiceStartUnixMs`, `ssbTimeOffsetSubframes`,
+  `gatewayLocation`). It is delivered at runtime, never emitted to static YAML.
+- **BREAKING (v1alpha1) — `sibSchedule.siWindowPosition` minimum is now 2** (was 0):
+  SIB19 must be scheduled after the mandatory SIB2 entry, so 0/1 produced an
+  unbootable config.
+- `provider.remoteControl.endpoint` now validates a bare `host:port` (no scheme
+  or path): a value like `ws://host:8001` is rejected at admission instead of
+  failing to dial and requeuing forever.
+
+### Notes
+
+- Issue #53 (`ta-CommonDriftCorrection`, Rel-18) remains tracked-only: OCUDU still
+  exposes no parser hook (YAML or runtime) as of this change.
+- Known follow-ups (tracked, out of scope here): (1) the NTNSlice reconciler has
+  no finalizer and its `SatellitePassAvailable` series is keyed by ephemeris
+  (shared across slices), so per-CR metric cleanup there needs a finalizer +
+  refcounting; (2) the runtime-push epoch is stamped near-now (~5 min) while the
+  ephemeris refresh interval is ≥2 h (GP-source rate limits), so a consumer
+  reconcile landing >5 min after the last propagation skips the push until the
+  next refresh (the cell keeps serving the last-pushed / bootstrap ephemeris).
+
 ## [0.5.0] - 2026-05-27
 
 Promotion of `0.5.0-rc.1` after a short soak. No CRD, controller, or

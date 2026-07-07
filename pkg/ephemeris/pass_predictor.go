@@ -66,7 +66,7 @@ func PredictPasses(
 	}
 
 	// Apply NORAD ID filter if specified.
-	filtered := filterOMMs(omms, noradFilter)
+	filtered := FilterOMMs(omms, noradFilter)
 	if len(filtered) == 0 {
 		return nil, nil
 	}
@@ -127,12 +127,55 @@ func PredictPasses(
 		return allPasses[i].AOS.Before(allPasses[j].AOS)
 	})
 
-	// Cap results to MaxPassWindows.
-	if len(allPasses) > MaxPassWindows {
-		allPasses = allPasses[:MaxPassWindows]
-	}
+	// Cap to MaxPassWindows (etcd object-size limit) while keeping each
+	// satellite's EARLIEST windows first. A naive earliest-N-overall truncation
+	// drops later satellites' current/next passes once enough passes exist, which
+	// blinds NTNSlice.checkSatelliteAvailability into reporting a satellite
+	// unavailable while it is actually overhead. capPerSatellite guarantees fair
+	// per-satellite representation instead.
+	allPasses = capPerSatellite(allPasses, MaxPassWindows)
 
 	return allPasses, nil
+}
+
+// capPerSatellite bounds passes to limit while preserving each satellite's
+// earliest windows first, so availability checks never lose a satellite's
+// current/next pass to a global earliest-N cut. Input must be AOS-sorted; the
+// result is returned AOS-sorted. When there are more satellites than the limit,
+// it keeps the earliest `limit` passes (one per satellite, by AOS).
+func capPerSatellite(passes []PassResult, limit int) []PassResult {
+	if len(passes) <= limit {
+		return passes
+	}
+	nSat := 0
+	seen := make(map[string]bool)
+	for i := range passes {
+		if !seen[passes[i].Satellite] {
+			seen[passes[i].Satellite] = true
+			nSat++
+		}
+	}
+	quota := max(limit/nSat, 1)
+	kept := make([]PassResult, 0, limit)
+	leftover := make([]PassResult, 0)
+	count := make(map[string]int)
+	for _, p := range passes {
+		if len(kept) < limit && count[p.Satellite] < quota {
+			kept = append(kept, p)
+			count[p.Satellite]++
+		} else {
+			leftover = append(leftover, p)
+		}
+	}
+	// Fill any remaining budget with the earliest leftover passes (AOS-sorted).
+	for _, p := range leftover {
+		if len(kept) >= limit {
+			break
+		}
+		kept = append(kept, p)
+	}
+	sort.Slice(kept, func(i, j int) bool { return kept[i].AOS.Before(kept[j].AOS) })
+	return kept
 }
 
 // predictSingle computes pass windows for a single satellite over a single ground station.
@@ -173,8 +216,8 @@ func predictSingle(
 	return results, nil
 }
 
-// filterOMMs returns OMMs matching the NORAD ID filter. If filter is empty, returns all.
-func filterOMMs(omms []sgp4.OMM, noradFilter []int) []sgp4.OMM {
+// FilterOMMs returns OMMs matching the NORAD ID filter. If filter is empty, returns all.
+func FilterOMMs(omms []sgp4.OMM, noradFilter []int) []sgp4.OMM {
 	if len(noradFilter) == 0 {
 		return omms
 	}

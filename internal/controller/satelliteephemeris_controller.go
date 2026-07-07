@@ -24,6 +24,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -74,6 +75,11 @@ func (r *SatelliteEphemerisReconciler) Reconcile(ctx context.Context, req ctrl.R
 	// Step 1: Get the SatelliteEphemeris resource.
 	eph := &ntnv1alpha1.SatelliteEphemeris{}
 	if err := r.Get(ctx, req.NamespacedName, eph); err != nil {
+		if apierrors.IsNotFound(err) {
+			// CR deleted — release its per-CR metric series so /metrics does not
+			// accumulate dead series across create/delete churn.
+			ntnmetrics.GPSatelliteCount.DeletePartialMatch(prometheus.Labels{"ephemeris": req.Name})
+		}
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
@@ -190,6 +196,18 @@ func (r *SatelliteEphemerisReconciler) Reconcile(ctx context.Context, req ctrl.R
 		meta.RemoveStatusCondition(&eph.Status.Conditions, ntnv1alpha1.ConditionPassesPredicted)
 	}
 
+	// Step 7b: Propagate tracked satellites to a NEAR-now epoch for the runtime
+	// ephemeris push (#176). The epoch is only a small lead ahead of now — enough
+	// to satisfy OCUDU's "epoch must be in the future" check and the consumer's
+	// stale-epoch guard plus reconcile/delivery latency. OCUDU internally
+	// re-propagates this state vector from the epoch to each SIB19 Tx time
+	// (ntn_assistance_info_generator: propagate(SIB19_Tx - epoch)), so the epoch
+	// must be the true reference time of the ECEF. Using now+refreshInterval (as
+	// an earlier version did) made OCUDU back-propagate hours from a position that
+	// was itself SGP4-propagated hours forward, compounding LEO error; a near-now
+	// epoch keeps OCUDU's internal propagation short and forward.
+	r.propagateStates(ctx, eph, result, time.Now().Add(propagationEpochLead))
+
 	if err := r.Status().Update(ctx, eph); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -199,6 +217,71 @@ func (r *SatelliteEphemerisReconciler) Reconcile(ctx context.Context, req ctrl.R
 	}
 
 	return ctrl.Result{RequeueAfter: effectiveInterval}, nil
+}
+
+// maxPropagatedStates caps how many per-satellite propagated states are stored
+// in status, to respect etcd object-size limits (~1.5 MB).
+const maxPropagatedStates = 128
+
+// propagationEpochLead is how far ahead of now the runtime-push epoch is stamped.
+// It must exceed the consumer's epochSkewMargin (10s) with room for reconcile +
+// WebSocket delivery latency, yet stay small so OCUDU's internal propagation from
+// this epoch is short (a few minutes of SGP4/RK4 divergence is negligible for
+// LEO). The push happens on the watch-triggered reconcile right after this
+// propagation, so the epoch is fresh at push time.
+const propagationEpochLead = 5 * time.Minute
+
+// maxSatelliteNameLen bounds the externally-sourced OMM ObjectName stored per
+// propagated state, so a malformed GP feed cannot bloat the status object.
+const maxSatelliteNameLen = 64
+
+// propagateStates propagates the tracked satellites' orbits (SGP4) to the given
+// future epoch and records the ECEF state vectors in status.propagatedStates for
+// downstream runtime ephemeris push (#176). The set is filtered by
+// spec.satellites.noradIDs and capped; un-propagatable satellites are skipped.
+func (r *SatelliteEphemerisReconciler) propagateStates(
+	ctx context.Context,
+	eph *ntnv1alpha1.SatelliteEphemeris,
+	result ephemeris.GPFetchResult,
+	epoch time.Time,
+) {
+	var norad []int
+	if eph.Spec.Satellites != nil {
+		norad = eph.Spec.Satellites.NoradIDs
+	}
+	omms := ephemeris.FilterOMMs(result.OMMs, norad)
+	if len(omms) > maxPropagatedStates {
+		// No silent truncation: a satellite beyond the cap won't be pushable at
+		// runtime (its NoradID selector would miss). Tell the operator to narrow
+		// the set with spec.satellites.noradIDs.
+		logf.FromContext(ctx).Info("propagated-state list capped; some satellites omitted from runtime-push status",
+			"tracked", len(omms), "cap", maxPropagatedStates,
+			"hint", "set spec.satellites.noradIDs to the satellites pushed at runtime")
+	}
+	epochMs := epoch.UnixMilli()
+	states := make([]ntnv1alpha1.PropagatedState, 0, len(omms))
+	for i := range omms {
+		if len(states) >= maxPropagatedStates {
+			break
+		}
+		ecef, err := ephemeris.PropagateToECEF(omms[i], epoch)
+		if err != nil {
+			continue // skip satellites whose SGP4 propagation fails / goes out of range
+		}
+		// ObjectName comes from external GP data; bound it so a malformed/huge
+		// name can't bloat the status object past the etcd size limit.
+		name := omms[i].ObjectName
+		if len(name) > maxSatelliteNameLen {
+			name = name[:maxSatelliteNameLen]
+		}
+		states = append(states, ntnv1alpha1.PropagatedState{
+			Satellite:   name,
+			NoradID:     omms[i].NoradCatID,
+			EpochUnixMs: epochMs,
+			ECEF:        *ecef,
+		})
+	}
+	eph.Status.PropagatedStates = states
 }
 
 // predictPasses resolves ground stations and computes pass windows.

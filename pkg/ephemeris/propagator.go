@@ -65,17 +65,24 @@ func PropagateToECEF(omm sgp4.OMM, t time.Time) (*ntnv1alpha1.EphemerisECEF, err
 		VelZ: kmsToVel(ecefVZ),
 	}
 
-	// Validate against 3GPP range.
+	// Validate against 3GPP ranges. Position and velocity have different bounds
+	// (positionX/Y/Z-r17 = ±2^25 codepoints; velocityVX/VY/VZ-r17 = ±2^17).
 	for _, v := range []struct {
-		name string
-		val  int
+		name     string
+		val      int
+		min, max int
 	}{
-		{"posX", result.PosX}, {"posY", result.PosY}, {"posZ", result.PosZ},
+		{"posX", result.PosX, ntnv1alpha1.ECEFPosMin, ntnv1alpha1.ECEFPosMax},
+		{"posY", result.PosY, ntnv1alpha1.ECEFPosMin, ntnv1alpha1.ECEFPosMax},
+		{"posZ", result.PosZ, ntnv1alpha1.ECEFPosMin, ntnv1alpha1.ECEFPosMax},
+		{"velX", result.VelX, ntnv1alpha1.ECEFVelMin, ntnv1alpha1.ECEFVelMax},
+		{"velY", result.VelY, ntnv1alpha1.ECEFVelMin, ntnv1alpha1.ECEFVelMax},
+		{"velZ", result.VelZ, ntnv1alpha1.ECEFVelMin, ntnv1alpha1.ECEFVelMax},
 	} {
-		if v.val < ntnv1alpha1.ECEFPosMin || v.val > ntnv1alpha1.ECEFPosMax {
+		if v.val < v.min || v.val > v.max {
 			return nil, fmt.Errorf(
 				"ECEF %s = %d exceeds 3GPP range [%d, %d]",
-				v.name, v.val, ntnv1alpha1.ECEFPosMin, ntnv1alpha1.ECEFPosMax,
+				v.name, v.val, v.min, v.max,
 			)
 		}
 	}

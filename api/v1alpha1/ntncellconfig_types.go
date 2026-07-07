@@ -22,6 +22,7 @@ import (
 )
 
 // NTNCellConfigSpec defines the desired NTN cell configuration.
+// +kubebuilder:validation:XValidation:rule="!has(self.provider.remoteControl) || has(self.cellID)",message="cellID is required when provider.remoteControl is set (runtime push targets a cell by plmn+nci)"
 type NTNCellConfigSpec struct {
 	// provider specifies which NTN backend to configure.
 	// +required
@@ -43,6 +44,47 @@ type NTNCellConfigSpec struct {
 	// +kubebuilder:validation:MinLength=1
 	// +optional
 	EphemerisRef string `json:"ephemerisRef,omitempty"`
+
+	// cellID identifies the OCUDU cell (plmn + nci) that runtime remote commands
+	// target. Required when provider.remoteControl is set; the value must match
+	// the cell the gNB booted with. Unset ⇒ ConfigMap bootstrap path only.
+	// +optional
+	CellID *CellID `json:"cellID,omitempty"`
+
+	// ephemerisNoradID selects which satellite's propagated state vector, from the
+	// referenced SatelliteEphemeris (ephemerisRef), to push at runtime (#176). When
+	// unset, the referenced ephemeris's first propagated state is used.
+	// +optional
+	EphemerisNoradID *int `json:"ephemerisNoradID,omitempty"`
+}
+
+// CellID identifies an OCUDU cell for runtime remote commands (ntn_config_update,
+// cell_lock/unlock). It must match the cell the gNB booted with.
+type CellID struct {
+	// plmn is the cell's PLMN, 5 or 6 digits (e.g. "00101").
+	// +kubebuilder:validation:Pattern=`^[0-9]{5,6}$`
+	PLMN string `json:"plmn"`
+	// nci is the 36-bit NR Cell Identity (0 to 2^36-1).
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=68719476735
+	NCI int64 `json:"nci"`
+}
+
+// +kubebuilder:validation:XValidation:rule="int(self.endpoint.split(':')[1]) >= 1 && int(self.endpoint.split(':')[1]) <= 65535",message="endpoint port must be in 1-65535"
+// RemoteControlRef configures the gNB remote_control WebSocket for live NTN
+// config push (OCUDU ntn_config_update). OCUDU's remote_control server is
+// plaintext/unauthenticated (localhost by default), so the safe deployment is a
+// sidecar next to the gNB pod; cross-pod requires a NetworkPolicy.
+type RemoteControlRef struct {
+	// endpoint is host:port of the gNB remote_control server (e.g. "127.0.0.1:8001").
+	// The provider prepends ws://, so include NEITHER a scheme nor a path — a value
+	// like "ws://host:8001" would dial "ws://ws://host:8001" and fail. The pattern
+	// enforces bare host:port (a permanent admission error beats a silent
+	// tight-requeue on a mistyped endpoint).
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=261
+	// +kubebuilder:validation:Pattern=`^[a-zA-Z0-9._-]+:[0-9]{1,5}$`
+	Endpoint string `json:"endpoint"`
 }
 
 // ProviderRef identifies the NTN backend provider.
@@ -54,6 +96,12 @@ type ProviderRef struct {
 	// namespace where the provider resources (e.g., OCUDU gNB) are deployed.
 	// +optional
 	Namespace string `json:"namespace,omitempty"`
+
+	// remoteControl configures the gNB remote_control WebSocket for live NTN
+	// config push. When set together with spec.cellID, the operator pushes runtime
+	// ntn_config_update commands; otherwise it uses the ConfigMap path only.
+	// +optional
+	RemoteControl *RemoteControlRef `json:"remoteControl,omitempty"`
 
 	// endpoint is the provider-specific endpoint (e.g., O1 NETCONF address).
 	// +optional
@@ -83,7 +131,7 @@ type NTNParams struct {
 
 	// taCommon sets the common Timing Advance value (0-66485757).
 	// +kubebuilder:validation:Minimum=0
-	// +kubebuilder:validation:Maximum=66485757
+	// +kubebuilder:validation:Maximum=66485756
 	// +kubebuilder:default=0
 	TACommon int `json:"taCommon,omitempty"`
 
@@ -172,18 +220,29 @@ type TAInfo struct {
 	// taCommon is the common Timing Advance value (0-66485757). Required when
 	// taInfo is set — explicitly provide 0 for GEO satellites.
 	// +kubebuilder:validation:Minimum=0
-	// +kubebuilder:validation:Maximum=66485757
+	// +kubebuilder:validation:Maximum=66485756
 	TACommon int `json:"taCommon"`
 
-	// taCommonDrift is the TA drift rate.
+	// taCommonDrift is the TA drift rate in 3GPP codepoints (ta-CommonDrift-r17,
+	// -257303 to 257303). The operator emits taCommonDrift × 2e-4 as µs/s
+	// (OCUDU accepts ±51.4606 µs/s).
+	// +kubebuilder:validation:Minimum=-257303
+	// +kubebuilder:validation:Maximum=257303
 	// +optional
 	TACommonDrift int `json:"taCommonDrift,omitempty"`
 
-	// taCommonDriftVariant is the TA drift rate variant.
+	// taCommonDriftVariant is the TA drift-rate variant in codepoints
+	// (ta-CommonDriftVariant-r17, 0 to 28949). Emitted × 2e-5 as µs/s²
+	// (OCUDU accepts 0-0.57898 µs/s²).
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=28949
 	// +optional
 	TACommonDriftVariant int `json:"taCommonDriftVariant,omitempty"`
 
-	// taCommonOffset is an additional TA offset.
+	// taCommonOffset is an additional common-TA offset in codepoints (same
+	// 0.004072 µs granularity as taCommon; 0 to 2455796 maps to OCUDU's 0-10000 µs).
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=2455795
 	// +optional
 	TACommonOffset int `json:"taCommonOffset,omitempty"`
 }
@@ -263,34 +322,136 @@ type NTNPolarization struct {
 	UL string `json:"ul,omitempty"`
 }
 
-// SatSwitchWithResync provides handover hints for satellite-to-satellite transitions.
-// 3GPP Release 18 SIB19. Allows UEs to prepare for serving cell change when
-// the current satellite leaves coverage.
+// SatSwitchWithResync describes a scheduled satellite-to-satellite switch
+// (3GPP Release 18 SIB19 sat-SwitchWithReSync), mirroring OCUDU's
+// sat_switch_with_resync_t. It carries the NEXT satellite's assistance info so
+// the cell can pre-announce the switch before the serving satellite leaves
+// coverage.
+//
+// Delivery is RUNTIME-ONLY: the operator pushes it via OCUDU's ntn_config_update
+// remote command as the per-cell `sat_switch_with_resync` block. That is the one
+// OCUDU surface that accepts k_mac (issue #52) — OCUDU's bootstrap YAML exposes
+// no k_mac handle on any cell, so this field is never emitted into the static
+// ConfigMap (a boot-time "next satellite" would also be meaningless, the switch
+// target is inherently dynamic). Requires spec.provider.remoteControl +
+// spec.cellID; without them the field is inert.
+//
+// This is the switch MECHANISM only. Deciding WHEN to switch (autonomous
+// multi-satellite failover) is issue #49 and remains out of scope here — the
+// operator pushes whatever switch the spec declares.
 type SatSwitchWithResync struct {
-	// targetPCI is the Physical Cell Identity of the target cell after switch (0-1007).
-	// +kubebuilder:validation:Minimum=0
-	// +kubebuilder:validation:Maximum=1007
-	TargetPCI int `json:"targetPCI"`
+	// ntnConfig is the target satellite's NTN configuration after the switch.
+	// Required: OCUDU rejects a sat_switch_with_resync that has no ntn_cfg.
+	NTNConfig SatSwitchNTNConfig `json:"ntnConfig"`
 
-	// t304 is the handover timer value in milliseconds per 3GPP TS 38.331.
-	// +kubebuilder:validation:Enum=50;100;150;200;500;1000;2000;10000
-	T304 int `json:"t304"`
+	// epochUnixMs is the reference epoch for the target assistance info, in Unix
+	// milliseconds. 0 omits the field. Unlike the serving-cell epoch, OCUDU does
+	// not require the sat-switch epoch to be in the future.
+	// +optional
+	EpochUnixMs int64 `json:"epochUnixMs,omitempty"`
+
+	// tServiceStartUnixMs is when the target satellite starts serving, in Unix
+	// milliseconds. 0 omits the field.
+	// +optional
+	TServiceStartUnixMs int64 `json:"tServiceStartUnixMs,omitempty"`
+
+	// ssbTimeOffsetSubframes is the SSB time offset in subframes (0-159), mapping
+	// to OCUDU's ssb_time_offset_sf.
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=159
+	// +optional
+	SSBTimeOffsetSubframes int `json:"ssbTimeOffsetSubframes,omitempty"`
+
+	// gatewayLocation is the target satellite's NTN gateway (feeder) location,
+	// emitted as OCUDU's ntn_gateway_location geodetic coordinates.
+	// +optional
+	GatewayLocation *NTNGatewayLocation `json:"gatewayLocation,omitempty"`
+}
+
+// SatSwitchNTNConfig is the target satellite's assistance info carried inside a
+// satellite switch (OCUDU sat_switch_with_resync.ntn_cfg). Exactly one ephemeris
+// representation must be set — switching to a satellite with no ephemeris is
+// meaningless.
+// +kubebuilder:validation:XValidation:rule="has(self.ephemerisECEF) || has(self.ephemerisOrbital)",message="exactly one of ephemerisECEF or ephemerisOrbital must be set"
+// +kubebuilder:validation:XValidation:rule="!(has(self.ephemerisECEF) && has(self.ephemerisOrbital))",message="ephemerisECEF and ephemerisOrbital are mutually exclusive"
+// +kubebuilder:validation:XValidation:rule="!has(self.ephemerisECEF) || self.ephemerisECEF.posX != 0 || self.ephemerisECEF.posY != 0 || self.ephemerisECEF.posZ != 0",message="ephemerisECEF position must not be all zeros"
+type SatSwitchNTNConfig struct {
+	// ephemerisECEF is the target satellite's ECEF state vector.
+	// Mutually exclusive with ephemerisOrbital.
+	// +optional
+	EphemerisECEF *EphemerisECEF `json:"ephemerisECEF,omitempty"`
+
+	// ephemerisOrbital is the target satellite's Keplerian elements.
+	// Mutually exclusive with ephemerisECEF.
+	// +optional
+	EphemerisOrbital *EphemerisOrbital `json:"ephemerisOrbital,omitempty"`
+
+	// kMac is the MAC-CE scheduling offset k_mac (3GPP kmac-r17, INTEGER 1..512).
+	// It tunes the k-offset applied to MAC CE contention-based resolution so UE
+	// MAC feedback stays time-aligned with the satellite round-trip; distinct from
+	// cellSpecificKoffset (PUSCH/PDSCH offset).
+	//
+	// This is the ONLY OCUDU surface that accepts k_mac (issue #52): the runtime
+	// ntn_config_update command's sat_switch_with_resync.ntn_cfg. k_mac is NOT in
+	// OCUDU's bootstrap YAML on any cell (serving, neighbor, or satswitch), so the
+	// serving-cell static config remains 7/8 on the ntn_config field set by design.
+	//
+	// The 1..512 bound here is LOAD-BEARING: OCUDU's runtime update path does not
+	// range-check k_mac (verified against a live gNB — it accepts out-of-range
+	// values that would then violate the ASN.1 kmac-r17 constraint), so this CRD
+	// validation is the only guard keeping a 3GPP-invalid k_mac off the wire.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=512
+	// +optional
+	KMac *int `json:"kMac,omitempty"`
+
+	// cellSpecificKoffset is the target cell-specific K_offset in milliseconds
+	// (1-1023), same semantics as NTNParams.cellSpecificKoffset. 0 omits it.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=1023
+	// +optional
+	CellSpecificKoffset int `json:"cellSpecificKoffset,omitempty"`
+
+	// ntnUlSyncValidityDur is the target UL-sync validity duration in seconds.
+	// OCUDU keys this ntn_ul_sync_validity_dur inside ntn_cfg — deliberately
+	// distinct from the serving-cell ntn_ul_sync_validity_duration key.
+	// +kubebuilder:validation:Enum=5;10;15;20;25;30;35;40;45;50;55;60;120;180;240;900
+	// +optional
+	NTNUlSyncValidityDur *int `json:"ntnUlSyncValidityDur,omitempty"`
+
+	// taInfo provides the target satellite's timing-advance parameters. The
+	// runtime ntn_cfg accepts only ta_common / ta_common_drift /
+	// ta_common_drift_variant — NOT ta_common_offset (that key is YAML-only), so
+	// taInfo.taCommonOffset is ignored when pushed here.
+	// +optional
+	TAInfo *TAInfo `json:"taInfo,omitempty"`
+
+	// taReport enables UE TA reporting for the target satellite.
+	// +optional
+	TAReport *bool `json:"taReport,omitempty"`
 }
 
 // EphemerisOrbital defines the satellite orbit using Keplerian elements,
 // matching OCUDU's orbital_coordinates_t representation.
 // All angular values are in units of 1e-4 degrees (per 3GPP TS 38.331).
 type EphemerisOrbital struct {
-	// semiMajorAxis is the semi-major axis in metres.
-	// +kubebuilder:validation:Minimum=6370000
+	// semiMajorAxis is the semi-major axis in metres, emitted as-is to OCUDU
+	// (which accepts 6500000-42998632 m).
+	// +kubebuilder:validation:Minimum=6500000
+	// +kubebuilder:validation:Maximum=42998632
 	SemiMajorAxis int `json:"semiMajorAxis"`
-	// eccentricity is the orbital eccentricity scaled by 1e6 (0-999999 for e < 1.0).
+	// eccentricity is the orbital eccentricity scaled by 1e6 (0-15005). The
+	// operator emits eccentricity × 1e-6; OCUDU accepts e ≤ 0.01500510825.
 	// +kubebuilder:validation:Minimum=0
-	// +kubebuilder:validation:Maximum=999999
+	// +kubebuilder:validation:Maximum=15005
 	Eccentricity int `json:"eccentricity"`
-	// inclination is the orbital inclination in 1e-4 degrees (0-1800000 = 0°-180°).
+	// inclination is the orbital inclination in 1e-4 degrees; the operator emits
+	// inclination × π/1.8e6 as radians. OCUDU's orbital ephemeris accepts only
+	// [0°, 90°] (0 to +π/2 rad), so inclinations above 90° (e.g. sun-synchronous
+	// ~98°, retrograde) are NOT representable via the orbital path — use
+	// ephemerisECEF (SGP4 state vector) for those. Max is 900000 (90°).
 	// +kubebuilder:validation:Minimum=0
-	// +kubebuilder:validation:Maximum=1800000
+	// +kubebuilder:validation:Maximum=900000
 	Inclination int `json:"inclination"`
 	// rightAscension is the right ascension of the ascending node in 1e-4 degrees (0-3600000).
 	// +kubebuilder:validation:Minimum=0
@@ -312,34 +473,51 @@ const (
 	ECEFPositionStep = 1.3
 	// ECEFVelocityStep is the velocity quantization step in m/s (0.06 m/s per LSB).
 	ECEFVelocityStep = 0.06
-	// ECEFPosMax is the maximum ECEF position value (2^26 - 1).
-	ECEFPosMax = 67108863
-	// ECEFPosMin is the minimum ECEF position value (-2^26).
-	ECEFPosMin = -67108864
+	// ECEFPosMin is the 3GPP positionX/Y/Z-r17 lower bound -2^25; × ECEFPositionStep
+	// (1.3 m) = -43620761.6 m, exactly OCUDU's accepted floor.
+	ECEFPosMin = -33554432
+	// ECEFPosMax is 33554430, one below the 3GPP upper bound 2^25-1 (33554431):
+	// OCUDU's CLI range tops out at 43620759.3 m = 33554430.2 codepoints, so
+	// 33554431 (→ 43620760.3 m) would be rejected. (Previously this was ±2^26,
+	// twice the spec, which let the emitter produce out-of-range metres.)
+	ECEFPosMax = 33554430
+	// ECEFVelMax/ECEFVelMin are the 3GPP velocityVX/VY/VZ-r17 bounds,
+	// INTEGER(-2^17 .. 2^17-1). × ECEFVelocityStep (0.06 m/s) this maps to
+	// OCUDU's accepted physical range ±7864.32 m/s.
+	ECEFVelMax = 131071
+	ECEFVelMin = -131072
 )
 
 // EphemerisECEF defines the satellite position and velocity in Earth-Centered
 // Earth-Fixed coordinates. For GEO satellites, velocity fields should be 0.
 type EphemerisECEF struct {
-	// posX is the X position of the satellite (-67108864 to 67108863).
-	// +kubebuilder:validation:Minimum=-67108864
-	// +kubebuilder:validation:Maximum=67108863
+	// posX is the X position in 1.3 m/LSB codepoints (3GPP positionX-r17,
+	// -33554432 to 33554431). The operator emits posX × 1.3 as metres to OCUDU.
+	// +kubebuilder:validation:Minimum=-33554432
+	// +kubebuilder:validation:Maximum=33554430
 	PosX int `json:"posX"`
-	// posY is the Y position of the satellite (-67108864 to 67108863).
-	// +kubebuilder:validation:Minimum=-67108864
-	// +kubebuilder:validation:Maximum=67108863
+	// posY is the Y position in 1.3 m/LSB codepoints (-33554432 to 33554431).
+	// +kubebuilder:validation:Minimum=-33554432
+	// +kubebuilder:validation:Maximum=33554430
 	PosY int `json:"posY"`
-	// posZ is the Z position of the satellite (-67108864 to 67108863).
-	// +kubebuilder:validation:Minimum=-67108864
-	// +kubebuilder:validation:Maximum=67108863
+	// posZ is the Z position in 1.3 m/LSB codepoints (-33554432 to 33554431).
+	// +kubebuilder:validation:Minimum=-33554432
+	// +kubebuilder:validation:Maximum=33554430
 	PosZ int `json:"posZ"`
-	// velX is the X velocity of the satellite (0 for GEO).
+	// velX is the X velocity in 0.06 m/s/LSB codepoints (3GPP velocityVX-r17,
+	// -131072 to 131071; 0 for GEO). The operator emits velX × 0.06 as m/s.
+	// +kubebuilder:validation:Minimum=-131072
+	// +kubebuilder:validation:Maximum=131071
 	// +kubebuilder:default=0
 	VelX int `json:"velX,omitempty"`
-	// velY is the Y velocity of the satellite (0 for GEO).
+	// velY is the Y velocity in 0.06 m/s/LSB codepoints (-131072 to 131071; 0 for GEO).
+	// +kubebuilder:validation:Minimum=-131072
+	// +kubebuilder:validation:Maximum=131071
 	// +kubebuilder:default=0
 	VelY int `json:"velY,omitempty"`
-	// velZ is the Z velocity of the satellite (0 for GEO).
+	// velZ is the Z velocity in 0.06 m/s/LSB codepoints (-131072 to 131071; 0 for GEO).
+	// +kubebuilder:validation:Minimum=-131072
+	// +kubebuilder:validation:Maximum=131071
 	// +kubebuilder:default=0
 	VelZ int `json:"velZ,omitempty"`
 }
@@ -388,7 +566,7 @@ type CellOverrides struct {
 
 	// sibSchedule tunes SIB19 broadcast scheduling. Any unset sub-field
 	// falls back to the defaults (siWindowLength=5, siPeriod=16,
-	// siWindowPosition=1). Tune when PDCCH capacity is tight or when
+	// siWindowPosition=2). Tune when PDCCH capacity is tight or when
 	// SIB19 broadcast cadence needs to track short ntn-UlSyncValidityDur.
 	// +optional
 	SIBSchedule *SIBSchedule `json:"sibSchedule,omitempty"`
@@ -409,10 +587,12 @@ type SIBSchedule struct {
 	// +optional
 	SIPeriod int `json:"siPeriod,omitempty"`
 
-	// siWindowPosition is the slot offset within the SI period. Adjust
-	// to avoid collision with SIB1/SIB2 scheduling windows. Pointer so 0
-	// (the first slot) can be distinguished from unset.
-	// +kubebuilder:validation:Minimum=0
+	// siWindowPosition is SIB19's slot offset within the SI period
+	// (schedulingInfoList2-r17). It must be strictly greater than the number of
+	// preceding schedulingInfoList entries; the emitter always schedules one SIB2
+	// (ID < 15) before SIB19, so the minimum is 2. Pointer so an explicit value is
+	// distinguished from unset (which defaults to 2).
+	// +kubebuilder:validation:Minimum=2
 	// +kubebuilder:validation:Maximum=79
 	// +optional
 	SIWindowPosition *int `json:"siWindowPosition,omitempty"`

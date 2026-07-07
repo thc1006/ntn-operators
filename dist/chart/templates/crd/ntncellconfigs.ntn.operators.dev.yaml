@@ -59,6 +59,26 @@ spec:
           spec:
             description: NTNCellConfigSpec defines the desired NTN cell configuration.
             properties:
+              cellID:
+                description: |-
+                  cellID identifies the OCUDU cell (plmn + nci) that runtime remote commands
+                  target. Required when provider.remoteControl is set; the value must match
+                  the cell the gNB booted with. Unset ⇒ ConfigMap bootstrap path only.
+                properties:
+                  nci:
+                    description: nci is the 36-bit NR Cell Identity (0 to 2^36-1).
+                    format: int64
+                    maximum: 68719476735
+                    minimum: 0
+                    type: integer
+                  plmn:
+                    description: plmn is the cell's PLMN, 5 or 6 digits (e.g. "00101").
+                    pattern: ^[0-9]{5,6}$
+                    type: string
+                required:
+                - nci
+                - plmn
+                type: object
               cellOverrides:
                 description: cellOverrides allows fine-tuning PUCCH, PDSCH, PRACH,
                   and RRC parameters.
@@ -81,7 +101,7 @@ spec:
                     description: |-
                       sibSchedule tunes SIB19 broadcast scheduling. Any unset sub-field
                       falls back to the defaults (siWindowLength=5, siPeriod=16,
-                      siWindowPosition=1). Tune when PDCCH capacity is tight or when
+                      siWindowPosition=2). Tune when PDCCH capacity is tight or when
                       SIB19 broadcast cadence needs to track short ntn-UlSyncValidityDur.
                     properties:
                       siPeriod:
@@ -114,14 +134,22 @@ spec:
                         type: integer
                       siWindowPosition:
                         description: |-
-                          siWindowPosition is the slot offset within the SI period. Adjust
-                          to avoid collision with SIB1/SIB2 scheduling windows. Pointer so 0
-                          (the first slot) can be distinguished from unset.
+                          siWindowPosition is SIB19's slot offset within the SI period
+                          (schedulingInfoList2-r17). It must be strictly greater than the number of
+                          preceding schedulingInfoList entries; the emitter always schedules one SIB2
+                          (ID < 15) before SIB19, so the minimum is 2. Pointer so an explicit value is
+                          distinguished from unset (which defaults to 2).
                         maximum: 79
-                        minimum: 0
+                        minimum: 2
                         type: integer
                     type: object
                 type: object
+              ephemerisNoradID:
+                description: |-
+                  ephemerisNoradID selects which satellite's propagated state vector, from the
+                  referenced SatelliteEphemeris (ephemerisRef), to push at runtime (#176). When
+                  unset, the referenced ephemeris's first propagated state is used.
+                type: integer
               ephemerisRef:
                 description: |-
                   ephemerisRef is the name of a SatelliteEphemeris CR in the same namespace.
@@ -163,37 +191,45 @@ spec:
                       Mutually exclusive with ephemerisOrbital.
                     properties:
                       posX:
-                        description: posX is the X position of the satellite (-67108864
-                          to 67108863).
-                        maximum: 67108863
-                        minimum: -67108864
+                        description: |-
+                          posX is the X position in 1.3 m/LSB codepoints (3GPP positionX-r17,
+                          -33554432 to 33554431). The operator emits posX × 1.3 as metres to OCUDU.
+                        maximum: 33554430
+                        minimum: -33554432
                         type: integer
                       posY:
-                        description: posY is the Y position of the satellite (-67108864
-                          to 67108863).
-                        maximum: 67108863
-                        minimum: -67108864
+                        description: posY is the Y position in 1.3 m/LSB codepoints
+                          (-33554432 to 33554431).
+                        maximum: 33554430
+                        minimum: -33554432
                         type: integer
                       posZ:
-                        description: posZ is the Z position of the satellite (-67108864
-                          to 67108863).
-                        maximum: 67108863
-                        minimum: -67108864
+                        description: posZ is the Z position in 1.3 m/LSB codepoints
+                          (-33554432 to 33554431).
+                        maximum: 33554430
+                        minimum: -33554432
                         type: integer
                       velX:
                         default: 0
-                        description: velX is the X velocity of the satellite (0 for
-                          GEO).
+                        description: |-
+                          velX is the X velocity in 0.06 m/s/LSB codepoints (3GPP velocityVX-r17,
+                          -131072 to 131071; 0 for GEO). The operator emits velX × 0.06 as m/s.
+                        maximum: 131071
+                        minimum: -131072
                         type: integer
                       velY:
                         default: 0
-                        description: velY is the Y velocity of the satellite (0 for
-                          GEO).
+                        description: velY is the Y velocity in 0.06 m/s/LSB codepoints
+                          (-131072 to 131071; 0 for GEO).
+                        maximum: 131071
+                        minimum: -131072
                         type: integer
                       velZ:
                         default: 0
-                        description: velZ is the Z velocity of the satellite (0 for
-                          GEO).
+                        description: velZ is the Z velocity in 0.06 m/s/LSB codepoints
+                          (-131072 to 131071; 0 for GEO).
+                        maximum: 131071
+                        minimum: -131072
                         type: integer
                     required:
                     - posX
@@ -213,15 +249,20 @@ spec:
                         minimum: 0
                         type: integer
                       eccentricity:
-                        description: eccentricity is the orbital eccentricity scaled
-                          by 1e6 (0-999999 for e < 1.0).
-                        maximum: 999999
+                        description: |-
+                          eccentricity is the orbital eccentricity scaled by 1e6 (0-15005). The
+                          operator emits eccentricity × 1e-6; OCUDU accepts e ≤ 0.01500510825.
+                        maximum: 15005
                         minimum: 0
                         type: integer
                       inclination:
-                        description: inclination is the orbital inclination in 1e-4
-                          degrees (0-1800000 = 0°-180°).
-                        maximum: 1800000
+                        description: |-
+                          inclination is the orbital inclination in 1e-4 degrees; the operator emits
+                          inclination × π/1.8e6 as radians. OCUDU's orbital ephemeris accepts only
+                          [0°, 90°] (0 to +π/2 rad), so inclinations above 90° (e.g. sun-synchronous
+                          ~98°, retrograde) are NOT representable via the orbital path — use
+                          ephemerisECEF (SGP4 state vector) for those. Max is 900000 (90°).
+                        maximum: 900000
                         minimum: 0
                         type: integer
                       meanAnomaly:
@@ -237,8 +278,11 @@ spec:
                         minimum: 0
                         type: integer
                       semiMajorAxis:
-                        description: semiMajorAxis is the semi-major axis in metres.
-                        minimum: 6370000
+                        description: |-
+                          semiMajorAxis is the semi-major axis in metres, emitted as-is to OCUDU
+                          (which accepts 6500000-42998632 m).
+                        maximum: 42998632
+                        minimum: 6500000
                         type: integer
                     required:
                     - argOfPeriapsis
@@ -435,28 +479,268 @@ spec:
                       satSwitchWithResync provides satellite switch handover hints to UEs during
                       satellite-to-satellite transitions. 3GPP Release 18 SIB19 field.
                     properties:
-                      t304:
-                        description: t304 is the handover timer value in milliseconds
-                          per 3GPP TS 38.331.
-                        enum:
-                        - 50
-                        - 100
-                        - 150
-                        - 200
-                        - 500
-                        - 1000
-                        - 2000
-                        - 10000
+                      epochUnixMs:
+                        description: |-
+                          epochUnixMs is the reference epoch for the target assistance info, in Unix
+                          milliseconds. 0 omits the field. Unlike the serving-cell epoch, OCUDU does
+                          not require the sat-switch epoch to be in the future.
+                        format: int64
                         type: integer
-                      targetPCI:
-                        description: targetPCI is the Physical Cell Identity of the
-                          target cell after switch (0-1007).
-                        maximum: 1007
+                      gatewayLocation:
+                        description: |-
+                          gatewayLocation is the target satellite's NTN gateway (feeder) location,
+                          emitted as OCUDU's ntn_gateway_location geodetic coordinates.
+                        properties:
+                          altitude:
+                            description: altitude in metres above sea level. Required
+                              when ntnGatewayLocation is set.
+                            type: integer
+                          latitude:
+                            description: latitude in 1e-4 degrees (-900000 to 900000).
+                            maximum: 900000
+                            minimum: -900000
+                            type: integer
+                          longitude:
+                            description: longitude in 1e-4 degrees (-1800000 to 1800000).
+                            maximum: 1800000
+                            minimum: -1800000
+                            type: integer
+                        required:
+                        - altitude
+                        - latitude
+                        - longitude
+                        type: object
+                      ntnConfig:
+                        description: |-
+                          ntnConfig is the target satellite's NTN configuration after the switch.
+                          Required: OCUDU rejects a sat_switch_with_resync that has no ntn_cfg.
+                        properties:
+                          cellSpecificKoffset:
+                            description: |-
+                              cellSpecificKoffset is the target cell-specific K_offset in milliseconds
+                              (1-1023), same semantics as NTNParams.cellSpecificKoffset. 0 omits it.
+                            maximum: 1023
+                            minimum: 1
+                            type: integer
+                          ephemerisECEF:
+                            description: |-
+                              ephemerisECEF is the target satellite's ECEF state vector.
+                              Mutually exclusive with ephemerisOrbital.
+                            properties:
+                              posX:
+                                description: |-
+                                  posX is the X position in 1.3 m/LSB codepoints (3GPP positionX-r17,
+                                  -33554432 to 33554431). The operator emits posX × 1.3 as metres to OCUDU.
+                                maximum: 33554430
+                                minimum: -33554432
+                                type: integer
+                              posY:
+                                description: posY is the Y position in 1.3 m/LSB codepoints
+                                  (-33554432 to 33554431).
+                                maximum: 33554430
+                                minimum: -33554432
+                                type: integer
+                              posZ:
+                                description: posZ is the Z position in 1.3 m/LSB codepoints
+                                  (-33554432 to 33554431).
+                                maximum: 33554430
+                                minimum: -33554432
+                                type: integer
+                              velX:
+                                default: 0
+                                description: |-
+                                  velX is the X velocity in 0.06 m/s/LSB codepoints (3GPP velocityVX-r17,
+                                  -131072 to 131071; 0 for GEO). The operator emits velX × 0.06 as m/s.
+                                maximum: 131071
+                                minimum: -131072
+                                type: integer
+                              velY:
+                                default: 0
+                                description: velY is the Y velocity in 0.06 m/s/LSB
+                                  codepoints (-131072 to 131071; 0 for GEO).
+                                maximum: 131071
+                                minimum: -131072
+                                type: integer
+                              velZ:
+                                default: 0
+                                description: velZ is the Z velocity in 0.06 m/s/LSB
+                                  codepoints (-131072 to 131071; 0 for GEO).
+                                maximum: 131071
+                                minimum: -131072
+                                type: integer
+                            required:
+                            - posX
+                            - posY
+                            - posZ
+                            type: object
+                          ephemerisOrbital:
+                            description: |-
+                              ephemerisOrbital is the target satellite's Keplerian elements.
+                              Mutually exclusive with ephemerisECEF.
+                            properties:
+                              argOfPeriapsis:
+                                description: argOfPeriapsis is the argument of periapsis
+                                  in 1e-4 degrees (0-3600000).
+                                maximum: 3600000
+                                minimum: 0
+                                type: integer
+                              eccentricity:
+                                description: |-
+                                  eccentricity is the orbital eccentricity scaled by 1e6 (0-15005). The
+                                  operator emits eccentricity × 1e-6; OCUDU accepts e ≤ 0.01500510825.
+                                maximum: 15005
+                                minimum: 0
+                                type: integer
+                              inclination:
+                                description: |-
+                                  inclination is the orbital inclination in 1e-4 degrees; the operator emits
+                                  inclination × π/1.8e6 as radians. OCUDU's orbital ephemeris accepts only
+                                  [0°, 90°] (0 to +π/2 rad), so inclinations above 90° (e.g. sun-synchronous
+                                  ~98°, retrograde) are NOT representable via the orbital path — use
+                                  ephemerisECEF (SGP4 state vector) for those. Max is 900000 (90°).
+                                maximum: 900000
+                                minimum: 0
+                                type: integer
+                              meanAnomaly:
+                                description: meanAnomaly is the mean anomaly in 1e-4
+                                  degrees (0-3600000).
+                                maximum: 3600000
+                                minimum: 0
+                                type: integer
+                              rightAscension:
+                                description: rightAscension is the right ascension
+                                  of the ascending node in 1e-4 degrees (0-3600000).
+                                maximum: 3600000
+                                minimum: 0
+                                type: integer
+                              semiMajorAxis:
+                                description: |-
+                                  semiMajorAxis is the semi-major axis in metres, emitted as-is to OCUDU
+                                  (which accepts 6500000-42998632 m).
+                                maximum: 42998632
+                                minimum: 6500000
+                                type: integer
+                            required:
+                            - argOfPeriapsis
+                            - eccentricity
+                            - inclination
+                            - meanAnomaly
+                            - rightAscension
+                            - semiMajorAxis
+                            type: object
+                          kMac:
+                            description: |-
+                              kMac is the MAC-CE scheduling offset k_mac (3GPP kmac-r17, INTEGER 1..512).
+                              It tunes the k-offset applied to MAC CE contention-based resolution so UE
+                              MAC feedback stays time-aligned with the satellite round-trip; distinct from
+                              cellSpecificKoffset (PUSCH/PDSCH offset).
+
+                              This is the ONLY OCUDU surface that accepts k_mac (issue #52): the runtime
+                              ntn_config_update command's sat_switch_with_resync.ntn_cfg. k_mac is NOT in
+                              OCUDU's bootstrap YAML on any cell (serving, neighbor, or satswitch), so the
+                              serving-cell static config remains 7/8 on the ntn_config field set by design.
+
+                              The 1..512 bound here is LOAD-BEARING: OCUDU's runtime update path does not
+                              range-check k_mac (verified against a live gNB — it accepts out-of-range
+                              values that would then violate the ASN.1 kmac-r17 constraint), so this CRD
+                              validation is the only guard keeping a 3GPP-invalid k_mac off the wire.
+                            maximum: 512
+                            minimum: 1
+                            type: integer
+                          ntnUlSyncValidityDur:
+                            description: |-
+                              ntnUlSyncValidityDur is the target UL-sync validity duration in seconds.
+                              OCUDU keys this ntn_ul_sync_validity_dur inside ntn_cfg — deliberately
+                              distinct from the serving-cell ntn_ul_sync_validity_duration key.
+                            enum:
+                            - 5
+                            - 10
+                            - 15
+                            - 20
+                            - 25
+                            - 30
+                            - 35
+                            - 40
+                            - 45
+                            - 50
+                            - 55
+                            - 60
+                            - 120
+                            - 180
+                            - 240
+                            - 900
+                            type: integer
+                          taInfo:
+                            description: |-
+                              taInfo provides the target satellite's timing-advance parameters. The
+                              runtime ntn_cfg accepts only ta_common / ta_common_drift /
+                              ta_common_drift_variant — NOT ta_common_offset (that key is YAML-only), so
+                              taInfo.taCommonOffset is ignored when pushed here.
+                            properties:
+                              taCommon:
+                                description: |-
+                                  taCommon is the common Timing Advance value (0-66485757). Required when
+                                  taInfo is set — explicitly provide 0 for GEO satellites.
+                                maximum: 66485756
+                                minimum: 0
+                                type: integer
+                              taCommonDrift:
+                                description: |-
+                                  taCommonDrift is the TA drift rate in 3GPP codepoints (ta-CommonDrift-r17,
+                                  -257303 to 257303). The operator emits taCommonDrift × 2e-4 as µs/s
+                                  (OCUDU accepts ±51.4606 µs/s).
+                                maximum: 257303
+                                minimum: -257303
+                                type: integer
+                              taCommonDriftVariant:
+                                description: |-
+                                  taCommonDriftVariant is the TA drift-rate variant in codepoints
+                                  (ta-CommonDriftVariant-r17, 0 to 28949). Emitted × 2e-5 as µs/s²
+                                  (OCUDU accepts 0-0.57898 µs/s²).
+                                maximum: 28949
+                                minimum: 0
+                                type: integer
+                              taCommonOffset:
+                                description: |-
+                                  taCommonOffset is an additional common-TA offset in codepoints (same
+                                  0.004072 µs granularity as taCommon; 0 to 2455796 maps to OCUDU's 0-10000 µs).
+                                maximum: 2455795
+                                minimum: 0
+                                type: integer
+                            required:
+                            - taCommon
+                            type: object
+                          taReport:
+                            description: taReport enables UE TA reporting for the
+                              target satellite.
+                            type: boolean
+                        type: object
+                        x-kubernetes-validations:
+                        - message: exactly one of ephemerisECEF or ephemerisOrbital
+                            must be set
+                          rule: has(self.ephemerisECEF) || has(self.ephemerisOrbital)
+                        - message: ephemerisECEF and ephemerisOrbital are mutually
+                            exclusive
+                          rule: '!(has(self.ephemerisECEF) && has(self.ephemerisOrbital))'
+                        - message: ephemerisECEF position must not be all zeros
+                          rule: '!has(self.ephemerisECEF) || self.ephemerisECEF.posX
+                            != 0 || self.ephemerisECEF.posY != 0 || self.ephemerisECEF.posZ
+                            != 0'
+                      ssbTimeOffsetSubframes:
+                        description: |-
+                          ssbTimeOffsetSubframes is the SSB time offset in subframes (0-159), mapping
+                          to OCUDU's ssb_time_offset_sf.
+                        maximum: 159
                         minimum: 0
                         type: integer
+                      tServiceStartUnixMs:
+                        description: |-
+                          tServiceStartUnixMs is when the target satellite starts serving, in Unix
+                          milliseconds. 0 omits the field.
+                        format: int64
+                        type: integer
                     required:
-                    - t304
-                    - targetPCI
+                    - ntnConfig
                     type: object
                   tService:
                     description: tService sets the expected NTN service duration in
@@ -466,7 +750,7 @@ spec:
                   taCommon:
                     default: 0
                     description: taCommon sets the common Timing Advance value (0-66485757).
-                    maximum: 66485757
+                    maximum: 66485756
                     minimum: 0
                     type: integer
                   taInfo:
@@ -478,17 +762,31 @@ spec:
                         description: |-
                           taCommon is the common Timing Advance value (0-66485757). Required when
                           taInfo is set — explicitly provide 0 for GEO satellites.
-                        maximum: 66485757
+                        maximum: 66485756
                         minimum: 0
                         type: integer
                       taCommonDrift:
-                        description: taCommonDrift is the TA drift rate.
+                        description: |-
+                          taCommonDrift is the TA drift rate in 3GPP codepoints (ta-CommonDrift-r17,
+                          -257303 to 257303). The operator emits taCommonDrift × 2e-4 as µs/s
+                          (OCUDU accepts ±51.4606 µs/s).
+                        maximum: 257303
+                        minimum: -257303
                         type: integer
                       taCommonDriftVariant:
-                        description: taCommonDriftVariant is the TA drift rate variant.
+                        description: |-
+                          taCommonDriftVariant is the TA drift-rate variant in codepoints
+                          (ta-CommonDriftVariant-r17, 0 to 28949). Emitted × 2e-5 as µs/s²
+                          (OCUDU accepts 0-0.57898 µs/s²).
+                        maximum: 28949
+                        minimum: 0
                         type: integer
                       taCommonOffset:
-                        description: taCommonOffset is an additional TA offset.
+                        description: |-
+                          taCommonOffset is an additional common-TA offset in codepoints (same
+                          0.004072 µs granularity as taCommon; 0 to 2455796 maps to OCUDU's 0-10000 µs).
+                        maximum: 2455795
+                        minimum: 0
                         type: integer
                     required:
                     - taCommon
@@ -518,6 +816,30 @@ spec:
                     description: namespace where the provider resources (e.g., OCUDU
                       gNB) are deployed.
                     type: string
+                  remoteControl:
+                    description: |-
+                      remoteControl configures the gNB remote_control WebSocket for live NTN
+                      config push. When set together with spec.cellID, the operator pushes runtime
+                      ntn_config_update commands; otherwise it uses the ConfigMap path only.
+                    properties:
+                      endpoint:
+                        description: |-
+                          endpoint is host:port of the gNB remote_control server (e.g. "127.0.0.1:8001").
+                          The provider prepends ws://, so include NEITHER a scheme nor a path — a value
+                          like "ws://host:8001" would dial "ws://ws://host:8001" and fail. The pattern
+                          enforces bare host:port (a permanent admission error beats a silent
+                          tight-requeue on a mistyped endpoint).
+                        maxLength: 261
+                        minLength: 1
+                        pattern: ^[a-zA-Z0-9._-]+:[0-9]{1,5}$
+                        type: string
+                    required:
+                    - endpoint
+                    type: object
+                    x-kubernetes-validations:
+                    - message: endpoint port must be in 1-65535
+                      rule: int(self.endpoint.split(':')[1]) >= 1 && int(self.endpoint.split(':')[1])
+                        <= 65535
                   type:
                     description: type is the provider type. Currently only "ocudu"
                       is supported.
@@ -531,6 +853,10 @@ spec:
             - ntn
             - provider
             type: object
+            x-kubernetes-validations:
+            - message: cellID is required when provider.remoteControl is set (runtime
+                push targets a cell by plmn+nci)
+              rule: '!has(self.provider.remoteControl) || has(self.cellID)'
           status:
             description: NTNCellConfigStatus defines the observed state of NTNCellConfig.
             properties:

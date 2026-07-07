@@ -526,6 +526,8 @@ delegating configuration to the specified NTN backend provider.
         <td>object</td>
         <td>
           NTNCellConfigSpec defines the desired NTN cell configuration.<br/>
+          <br/>
+            <i>Validations</i>:<li>!has(self.provider.remoteControl) || has(self.cellID): cellID is required when provider.remoteControl is set (runtime push targets a cell by plmn+nci)</li>
         </td>
         <td>true</td>
       </tr><tr>
@@ -572,10 +574,28 @@ NTNCellConfigSpec defines the desired NTN cell configuration.
         </td>
         <td>true</td>
       </tr><tr>
+        <td><b><a href="#ntncellconfigspeccellid">cellID</a></b></td>
+        <td>object</td>
+        <td>
+          cellID identifies the OCUDU cell (plmn + nci) that runtime remote commands
+target. Required when provider.remoteControl is set; the value must match
+the cell the gNB booted with. Unset ⇒ ConfigMap bootstrap path only.<br/>
+        </td>
+        <td>false</td>
+      </tr><tr>
         <td><b><a href="#ntncellconfigspeccelloverrides">cellOverrides</a></b></td>
         <td>object</td>
         <td>
           cellOverrides allows fine-tuning PUCCH, PDSCH, PRACH, and RRC parameters.<br/>
+        </td>
+        <td>false</td>
+      </tr><tr>
+        <td><b>ephemerisNoradID</b></td>
+        <td>integer</td>
+        <td>
+          ephemerisNoradID selects which satellite's propagated state vector, from the
+referenced SatelliteEphemeris (ephemerisRef), to push at runtime (#176). When
+unset, the referenced ephemeris's first propagated state is used.<br/>
         </td>
         <td>false</td>
       </tr><tr>
@@ -756,7 +776,7 @@ satellite-to-satellite transitions. 3GPP Release 18 SIB19 field.<br/>
           <br/>
             <i>Default</i>: 0<br/>
             <i>Minimum</i>: 0<br/>
-            <i>Maximum</i>: 6.6485757e+07<br/>
+            <i>Maximum</i>: 6.6485756e+07<br/>
         </td>
         <td>false</td>
       </tr><tr>
@@ -799,57 +819,65 @@ Mutually exclusive with ephemerisOrbital.
         <td><b>posX</b></td>
         <td>integer</td>
         <td>
-          posX is the X position of the satellite (-67108864 to 67108863).<br/>
+          posX is the X position in 1.3 m/LSB codepoints (3GPP positionX-r17,
+-33554432 to 33554431). The operator emits posX × 1.3 as metres to OCUDU.<br/>
           <br/>
-            <i>Minimum</i>: -6.7108864e+07<br/>
-            <i>Maximum</i>: 6.7108863e+07<br/>
+            <i>Minimum</i>: -3.3554432e+07<br/>
+            <i>Maximum</i>: 3.355443e+07<br/>
         </td>
         <td>true</td>
       </tr><tr>
         <td><b>posY</b></td>
         <td>integer</td>
         <td>
-          posY is the Y position of the satellite (-67108864 to 67108863).<br/>
+          posY is the Y position in 1.3 m/LSB codepoints (-33554432 to 33554431).<br/>
           <br/>
-            <i>Minimum</i>: -6.7108864e+07<br/>
-            <i>Maximum</i>: 6.7108863e+07<br/>
+            <i>Minimum</i>: -3.3554432e+07<br/>
+            <i>Maximum</i>: 3.355443e+07<br/>
         </td>
         <td>true</td>
       </tr><tr>
         <td><b>posZ</b></td>
         <td>integer</td>
         <td>
-          posZ is the Z position of the satellite (-67108864 to 67108863).<br/>
+          posZ is the Z position in 1.3 m/LSB codepoints (-33554432 to 33554431).<br/>
           <br/>
-            <i>Minimum</i>: -6.7108864e+07<br/>
-            <i>Maximum</i>: 6.7108863e+07<br/>
+            <i>Minimum</i>: -3.3554432e+07<br/>
+            <i>Maximum</i>: 3.355443e+07<br/>
         </td>
         <td>true</td>
       </tr><tr>
         <td><b>velX</b></td>
         <td>integer</td>
         <td>
-          velX is the X velocity of the satellite (0 for GEO).<br/>
+          velX is the X velocity in 0.06 m/s/LSB codepoints (3GPP velocityVX-r17,
+-131072 to 131071; 0 for GEO). The operator emits velX × 0.06 as m/s.<br/>
           <br/>
             <i>Default</i>: 0<br/>
+            <i>Minimum</i>: -131072<br/>
+            <i>Maximum</i>: 131071<br/>
         </td>
         <td>false</td>
       </tr><tr>
         <td><b>velY</b></td>
         <td>integer</td>
         <td>
-          velY is the Y velocity of the satellite (0 for GEO).<br/>
+          velY is the Y velocity in 0.06 m/s/LSB codepoints (-131072 to 131071; 0 for GEO).<br/>
           <br/>
             <i>Default</i>: 0<br/>
+            <i>Minimum</i>: -131072<br/>
+            <i>Maximum</i>: 131071<br/>
         </td>
         <td>false</td>
       </tr><tr>
         <td><b>velZ</b></td>
         <td>integer</td>
         <td>
-          velZ is the Z velocity of the satellite (0 for GEO).<br/>
+          velZ is the Z velocity in 0.06 m/s/LSB codepoints (-131072 to 131071; 0 for GEO).<br/>
           <br/>
             <i>Default</i>: 0<br/>
+            <i>Minimum</i>: -131072<br/>
+            <i>Maximum</i>: 131071<br/>
         </td>
         <td>false</td>
       </tr></tbody>
@@ -888,20 +916,25 @@ where source data is in OMM/TLE form (CelesTrak, SpaceTrack).
         <td><b>eccentricity</b></td>
         <td>integer</td>
         <td>
-          eccentricity is the orbital eccentricity scaled by 1e6 (0-999999 for e < 1.0).<br/>
+          eccentricity is the orbital eccentricity scaled by 1e6 (0-15005). The
+operator emits eccentricity × 1e-6; OCUDU accepts e ≤ 0.01500510825.<br/>
           <br/>
             <i>Minimum</i>: 0<br/>
-            <i>Maximum</i>: 999999<br/>
+            <i>Maximum</i>: 15005<br/>
         </td>
         <td>true</td>
       </tr><tr>
         <td><b>inclination</b></td>
         <td>integer</td>
         <td>
-          inclination is the orbital inclination in 1e-4 degrees (0-1800000 = 0°-180°).<br/>
+          inclination is the orbital inclination in 1e-4 degrees; the operator emits
+inclination × π/1.8e6 as radians. OCUDU's orbital ephemeris accepts only
+[0°, 90°] (0 to +π/2 rad), so inclinations above 90° (e.g. sun-synchronous
+~98°, retrograde) are NOT representable via the orbital path — use
+ephemerisECEF (SGP4 state vector) for those. Max is 900000 (90°).<br/>
           <br/>
             <i>Minimum</i>: 0<br/>
-            <i>Maximum</i>: 1.8e+06<br/>
+            <i>Maximum</i>: 900000<br/>
         </td>
         <td>true</td>
       </tr><tr>
@@ -928,9 +961,11 @@ where source data is in OMM/TLE form (CelesTrak, SpaceTrack).
         <td><b>semiMajorAxis</b></td>
         <td>integer</td>
         <td>
-          semiMajorAxis is the semi-major axis in metres.<br/>
+          semiMajorAxis is the semi-major axis in metres, emitted as-is to OCUDU
+(which accepts 6500000-42998632 m).<br/>
           <br/>
-            <i>Minimum</i>: 6.37e+06<br/>
+            <i>Minimum</i>: 6.5e+06<br/>
+            <i>Maximum</i>: 4.2998632e+07<br/>
         </td>
         <td>true</td>
       </tr></tbody>
@@ -1250,22 +1285,442 @@ satellite-to-satellite transitions. 3GPP Release 18 SIB19 field.
         </tr>
     </thead>
     <tbody><tr>
-        <td><b>t304</b></td>
-        <td>integer</td>
+        <td><b><a href="#ntncellconfigspecntnsatswitchwithresyncntnconfig">ntnConfig</a></b></td>
+        <td>object</td>
         <td>
-          t304 is the handover timer value in milliseconds per 3GPP TS 38.331.<br/>
+          ntnConfig is the target satellite's NTN configuration after the switch.
+Required: OCUDU rejects a sat_switch_with_resync that has no ntn_cfg.<br/>
           <br/>
-            <i>Enum</i>: 50, 100, 150, 200, 500, 1000, 2000, 10000<br/>
+            <i>Validations</i>:<li>has(self.ephemerisECEF) || has(self.ephemerisOrbital): exactly one of ephemerisECEF or ephemerisOrbital must be set</li><li>!(has(self.ephemerisECEF) && has(self.ephemerisOrbital)): ephemerisECEF and ephemerisOrbital are mutually exclusive</li><li>!has(self.ephemerisECEF) || self.ephemerisECEF.posX != 0 || self.ephemerisECEF.posY != 0 || self.ephemerisECEF.posZ != 0: ephemerisECEF position must not be all zeros</li>
         </td>
         <td>true</td>
       </tr><tr>
-        <td><b>targetPCI</b></td>
+        <td><b>epochUnixMs</b></td>
         <td>integer</td>
         <td>
-          targetPCI is the Physical Cell Identity of the target cell after switch (0-1007).<br/>
+          epochUnixMs is the reference epoch for the target assistance info, in Unix
+milliseconds. 0 omits the field. Unlike the serving-cell epoch, OCUDU does
+not require the sat-switch epoch to be in the future.<br/>
+          <br/>
+            <i>Format</i>: int64<br/>
+        </td>
+        <td>false</td>
+      </tr><tr>
+        <td><b><a href="#ntncellconfigspecntnsatswitchwithresyncgatewaylocation">gatewayLocation</a></b></td>
+        <td>object</td>
+        <td>
+          gatewayLocation is the target satellite's NTN gateway (feeder) location,
+emitted as OCUDU's ntn_gateway_location geodetic coordinates.<br/>
+        </td>
+        <td>false</td>
+      </tr><tr>
+        <td><b>ssbTimeOffsetSubframes</b></td>
+        <td>integer</td>
+        <td>
+          ssbTimeOffsetSubframes is the SSB time offset in subframes (0-159), mapping
+to OCUDU's ssb_time_offset_sf.<br/>
           <br/>
             <i>Minimum</i>: 0<br/>
-            <i>Maximum</i>: 1007<br/>
+            <i>Maximum</i>: 159<br/>
+        </td>
+        <td>false</td>
+      </tr><tr>
+        <td><b>tServiceStartUnixMs</b></td>
+        <td>integer</td>
+        <td>
+          tServiceStartUnixMs is when the target satellite starts serving, in Unix
+milliseconds. 0 omits the field.<br/>
+          <br/>
+            <i>Format</i>: int64<br/>
+        </td>
+        <td>false</td>
+      </tr></tbody>
+</table>
+
+
+### NTNCellConfig.spec.ntn.satSwitchWithResync.ntnConfig
+<sup><sup>[↩ Parent](#ntncellconfigspecntnsatswitchwithresync)</sup></sup>
+
+
+
+ntnConfig is the target satellite's NTN configuration after the switch.
+Required: OCUDU rejects a sat_switch_with_resync that has no ntn_cfg.
+
+<table>
+    <thead>
+        <tr>
+            <th>Name</th>
+            <th>Type</th>
+            <th>Description</th>
+            <th>Required</th>
+        </tr>
+    </thead>
+    <tbody><tr>
+        <td><b>cellSpecificKoffset</b></td>
+        <td>integer</td>
+        <td>
+          cellSpecificKoffset is the target cell-specific K_offset in milliseconds
+(1-1023), same semantics as NTNParams.cellSpecificKoffset. 0 omits it.<br/>
+          <br/>
+            <i>Minimum</i>: 1<br/>
+            <i>Maximum</i>: 1023<br/>
+        </td>
+        <td>false</td>
+      </tr><tr>
+        <td><b><a href="#ntncellconfigspecntnsatswitchwithresyncntnconfigephemerisecef">ephemerisECEF</a></b></td>
+        <td>object</td>
+        <td>
+          ephemerisECEF is the target satellite's ECEF state vector.
+Mutually exclusive with ephemerisOrbital.<br/>
+        </td>
+        <td>false</td>
+      </tr><tr>
+        <td><b><a href="#ntncellconfigspecntnsatswitchwithresyncntnconfigephemerisorbital">ephemerisOrbital</a></b></td>
+        <td>object</td>
+        <td>
+          ephemerisOrbital is the target satellite's Keplerian elements.
+Mutually exclusive with ephemerisECEF.<br/>
+        </td>
+        <td>false</td>
+      </tr><tr>
+        <td><b>kMac</b></td>
+        <td>integer</td>
+        <td>
+          kMac is the MAC-CE scheduling offset k_mac (3GPP kmac-r17, INTEGER 1..512).
+It tunes the k-offset applied to MAC CE contention-based resolution so UE
+MAC feedback stays time-aligned with the satellite round-trip; distinct from
+cellSpecificKoffset (PUSCH/PDSCH offset).
+
+This is the ONLY OCUDU surface that accepts k_mac (issue #52): the runtime
+ntn_config_update command's sat_switch_with_resync.ntn_cfg. k_mac is NOT in
+OCUDU's bootstrap YAML on any cell (serving, neighbor, or satswitch), so the
+serving-cell static config remains 7/8 on the ntn_config field set by design.
+
+The 1..512 bound here is LOAD-BEARING: OCUDU's runtime update path does not
+range-check k_mac (verified against a live gNB — it accepts out-of-range
+values that would then violate the ASN.1 kmac-r17 constraint), so this CRD
+validation is the only guard keeping a 3GPP-invalid k_mac off the wire.<br/>
+          <br/>
+            <i>Minimum</i>: 1<br/>
+            <i>Maximum</i>: 512<br/>
+        </td>
+        <td>false</td>
+      </tr><tr>
+        <td><b>ntnUlSyncValidityDur</b></td>
+        <td>integer</td>
+        <td>
+          ntnUlSyncValidityDur is the target UL-sync validity duration in seconds.
+OCUDU keys this ntn_ul_sync_validity_dur inside ntn_cfg — deliberately
+distinct from the serving-cell ntn_ul_sync_validity_duration key.<br/>
+          <br/>
+            <i>Enum</i>: 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 120, 180, 240, 900<br/>
+        </td>
+        <td>false</td>
+      </tr><tr>
+        <td><b><a href="#ntncellconfigspecntnsatswitchwithresyncntnconfigtainfo">taInfo</a></b></td>
+        <td>object</td>
+        <td>
+          taInfo provides the target satellite's timing-advance parameters. The
+runtime ntn_cfg accepts only ta_common / ta_common_drift /
+ta_common_drift_variant — NOT ta_common_offset (that key is YAML-only), so
+taInfo.taCommonOffset is ignored when pushed here.<br/>
+        </td>
+        <td>false</td>
+      </tr><tr>
+        <td><b>taReport</b></td>
+        <td>boolean</td>
+        <td>
+          taReport enables UE TA reporting for the target satellite.<br/>
+        </td>
+        <td>false</td>
+      </tr></tbody>
+</table>
+
+
+### NTNCellConfig.spec.ntn.satSwitchWithResync.ntnConfig.ephemerisECEF
+<sup><sup>[↩ Parent](#ntncellconfigspecntnsatswitchwithresyncntnconfig)</sup></sup>
+
+
+
+ephemerisECEF is the target satellite's ECEF state vector.
+Mutually exclusive with ephemerisOrbital.
+
+<table>
+    <thead>
+        <tr>
+            <th>Name</th>
+            <th>Type</th>
+            <th>Description</th>
+            <th>Required</th>
+        </tr>
+    </thead>
+    <tbody><tr>
+        <td><b>posX</b></td>
+        <td>integer</td>
+        <td>
+          posX is the X position in 1.3 m/LSB codepoints (3GPP positionX-r17,
+-33554432 to 33554431). The operator emits posX × 1.3 as metres to OCUDU.<br/>
+          <br/>
+            <i>Minimum</i>: -3.3554432e+07<br/>
+            <i>Maximum</i>: 3.355443e+07<br/>
+        </td>
+        <td>true</td>
+      </tr><tr>
+        <td><b>posY</b></td>
+        <td>integer</td>
+        <td>
+          posY is the Y position in 1.3 m/LSB codepoints (-33554432 to 33554431).<br/>
+          <br/>
+            <i>Minimum</i>: -3.3554432e+07<br/>
+            <i>Maximum</i>: 3.355443e+07<br/>
+        </td>
+        <td>true</td>
+      </tr><tr>
+        <td><b>posZ</b></td>
+        <td>integer</td>
+        <td>
+          posZ is the Z position in 1.3 m/LSB codepoints (-33554432 to 33554431).<br/>
+          <br/>
+            <i>Minimum</i>: -3.3554432e+07<br/>
+            <i>Maximum</i>: 3.355443e+07<br/>
+        </td>
+        <td>true</td>
+      </tr><tr>
+        <td><b>velX</b></td>
+        <td>integer</td>
+        <td>
+          velX is the X velocity in 0.06 m/s/LSB codepoints (3GPP velocityVX-r17,
+-131072 to 131071; 0 for GEO). The operator emits velX × 0.06 as m/s.<br/>
+          <br/>
+            <i>Default</i>: 0<br/>
+            <i>Minimum</i>: -131072<br/>
+            <i>Maximum</i>: 131071<br/>
+        </td>
+        <td>false</td>
+      </tr><tr>
+        <td><b>velY</b></td>
+        <td>integer</td>
+        <td>
+          velY is the Y velocity in 0.06 m/s/LSB codepoints (-131072 to 131071; 0 for GEO).<br/>
+          <br/>
+            <i>Default</i>: 0<br/>
+            <i>Minimum</i>: -131072<br/>
+            <i>Maximum</i>: 131071<br/>
+        </td>
+        <td>false</td>
+      </tr><tr>
+        <td><b>velZ</b></td>
+        <td>integer</td>
+        <td>
+          velZ is the Z velocity in 0.06 m/s/LSB codepoints (-131072 to 131071; 0 for GEO).<br/>
+          <br/>
+            <i>Default</i>: 0<br/>
+            <i>Minimum</i>: -131072<br/>
+            <i>Maximum</i>: 131071<br/>
+        </td>
+        <td>false</td>
+      </tr></tbody>
+</table>
+
+
+### NTNCellConfig.spec.ntn.satSwitchWithResync.ntnConfig.ephemerisOrbital
+<sup><sup>[↩ Parent](#ntncellconfigspecntnsatswitchwithresyncntnconfig)</sup></sup>
+
+
+
+ephemerisOrbital is the target satellite's Keplerian elements.
+Mutually exclusive with ephemerisECEF.
+
+<table>
+    <thead>
+        <tr>
+            <th>Name</th>
+            <th>Type</th>
+            <th>Description</th>
+            <th>Required</th>
+        </tr>
+    </thead>
+    <tbody><tr>
+        <td><b>argOfPeriapsis</b></td>
+        <td>integer</td>
+        <td>
+          argOfPeriapsis is the argument of periapsis in 1e-4 degrees (0-3600000).<br/>
+          <br/>
+            <i>Minimum</i>: 0<br/>
+            <i>Maximum</i>: 3.6e+06<br/>
+        </td>
+        <td>true</td>
+      </tr><tr>
+        <td><b>eccentricity</b></td>
+        <td>integer</td>
+        <td>
+          eccentricity is the orbital eccentricity scaled by 1e6 (0-15005). The
+operator emits eccentricity × 1e-6; OCUDU accepts e ≤ 0.01500510825.<br/>
+          <br/>
+            <i>Minimum</i>: 0<br/>
+            <i>Maximum</i>: 15005<br/>
+        </td>
+        <td>true</td>
+      </tr><tr>
+        <td><b>inclination</b></td>
+        <td>integer</td>
+        <td>
+          inclination is the orbital inclination in 1e-4 degrees; the operator emits
+inclination × π/1.8e6 as radians. OCUDU's orbital ephemeris accepts only
+[0°, 90°] (0 to +π/2 rad), so inclinations above 90° (e.g. sun-synchronous
+~98°, retrograde) are NOT representable via the orbital path — use
+ephemerisECEF (SGP4 state vector) for those. Max is 900000 (90°).<br/>
+          <br/>
+            <i>Minimum</i>: 0<br/>
+            <i>Maximum</i>: 900000<br/>
+        </td>
+        <td>true</td>
+      </tr><tr>
+        <td><b>meanAnomaly</b></td>
+        <td>integer</td>
+        <td>
+          meanAnomaly is the mean anomaly in 1e-4 degrees (0-3600000).<br/>
+          <br/>
+            <i>Minimum</i>: 0<br/>
+            <i>Maximum</i>: 3.6e+06<br/>
+        </td>
+        <td>true</td>
+      </tr><tr>
+        <td><b>rightAscension</b></td>
+        <td>integer</td>
+        <td>
+          rightAscension is the right ascension of the ascending node in 1e-4 degrees (0-3600000).<br/>
+          <br/>
+            <i>Minimum</i>: 0<br/>
+            <i>Maximum</i>: 3.6e+06<br/>
+        </td>
+        <td>true</td>
+      </tr><tr>
+        <td><b>semiMajorAxis</b></td>
+        <td>integer</td>
+        <td>
+          semiMajorAxis is the semi-major axis in metres, emitted as-is to OCUDU
+(which accepts 6500000-42998632 m).<br/>
+          <br/>
+            <i>Minimum</i>: 6.5e+06<br/>
+            <i>Maximum</i>: 4.2998632e+07<br/>
+        </td>
+        <td>true</td>
+      </tr></tbody>
+</table>
+
+
+### NTNCellConfig.spec.ntn.satSwitchWithResync.ntnConfig.taInfo
+<sup><sup>[↩ Parent](#ntncellconfigspecntnsatswitchwithresyncntnconfig)</sup></sup>
+
+
+
+taInfo provides the target satellite's timing-advance parameters. The
+runtime ntn_cfg accepts only ta_common / ta_common_drift /
+ta_common_drift_variant — NOT ta_common_offset (that key is YAML-only), so
+taInfo.taCommonOffset is ignored when pushed here.
+
+<table>
+    <thead>
+        <tr>
+            <th>Name</th>
+            <th>Type</th>
+            <th>Description</th>
+            <th>Required</th>
+        </tr>
+    </thead>
+    <tbody><tr>
+        <td><b>taCommon</b></td>
+        <td>integer</td>
+        <td>
+          taCommon is the common Timing Advance value (0-66485757). Required when
+taInfo is set — explicitly provide 0 for GEO satellites.<br/>
+          <br/>
+            <i>Minimum</i>: 0<br/>
+            <i>Maximum</i>: 6.6485756e+07<br/>
+        </td>
+        <td>true</td>
+      </tr><tr>
+        <td><b>taCommonDrift</b></td>
+        <td>integer</td>
+        <td>
+          taCommonDrift is the TA drift rate in 3GPP codepoints (ta-CommonDrift-r17,
+-257303 to 257303). The operator emits taCommonDrift × 2e-4 as µs/s
+(OCUDU accepts ±51.4606 µs/s).<br/>
+          <br/>
+            <i>Minimum</i>: -257303<br/>
+            <i>Maximum</i>: 257303<br/>
+        </td>
+        <td>false</td>
+      </tr><tr>
+        <td><b>taCommonDriftVariant</b></td>
+        <td>integer</td>
+        <td>
+          taCommonDriftVariant is the TA drift-rate variant in codepoints
+(ta-CommonDriftVariant-r17, 0 to 28949). Emitted × 2e-5 as µs/s²
+(OCUDU accepts 0-0.57898 µs/s²).<br/>
+          <br/>
+            <i>Minimum</i>: 0<br/>
+            <i>Maximum</i>: 28949<br/>
+        </td>
+        <td>false</td>
+      </tr><tr>
+        <td><b>taCommonOffset</b></td>
+        <td>integer</td>
+        <td>
+          taCommonOffset is an additional common-TA offset in codepoints (same
+0.004072 µs granularity as taCommon; 0 to 2455796 maps to OCUDU's 0-10000 µs).<br/>
+          <br/>
+            <i>Minimum</i>: 0<br/>
+            <i>Maximum</i>: 2.455795e+06<br/>
+        </td>
+        <td>false</td>
+      </tr></tbody>
+</table>
+
+
+### NTNCellConfig.spec.ntn.satSwitchWithResync.gatewayLocation
+<sup><sup>[↩ Parent](#ntncellconfigspecntnsatswitchwithresync)</sup></sup>
+
+
+
+gatewayLocation is the target satellite's NTN gateway (feeder) location,
+emitted as OCUDU's ntn_gateway_location geodetic coordinates.
+
+<table>
+    <thead>
+        <tr>
+            <th>Name</th>
+            <th>Type</th>
+            <th>Description</th>
+            <th>Required</th>
+        </tr>
+    </thead>
+    <tbody><tr>
+        <td><b>altitude</b></td>
+        <td>integer</td>
+        <td>
+          altitude in metres above sea level. Required when ntnGatewayLocation is set.<br/>
+        </td>
+        <td>true</td>
+      </tr><tr>
+        <td><b>latitude</b></td>
+        <td>integer</td>
+        <td>
+          latitude in 1e-4 degrees (-900000 to 900000).<br/>
+          <br/>
+            <i>Minimum</i>: -900000<br/>
+            <i>Maximum</i>: 900000<br/>
+        </td>
+        <td>true</td>
+      </tr><tr>
+        <td><b>longitude</b></td>
+        <td>integer</td>
+        <td>
+          longitude in 1e-4 degrees (-1800000 to 1800000).<br/>
+          <br/>
+            <i>Minimum</i>: -1.8e+06<br/>
+            <i>Maximum</i>: 1.8e+06<br/>
         </td>
         <td>true</td>
       </tr></tbody>
@@ -1297,28 +1752,42 @@ When set, taInfo.taCommon takes precedence over the top-level taCommon field.
 taInfo is set — explicitly provide 0 for GEO satellites.<br/>
           <br/>
             <i>Minimum</i>: 0<br/>
-            <i>Maximum</i>: 6.6485757e+07<br/>
+            <i>Maximum</i>: 6.6485756e+07<br/>
         </td>
         <td>true</td>
       </tr><tr>
         <td><b>taCommonDrift</b></td>
         <td>integer</td>
         <td>
-          taCommonDrift is the TA drift rate.<br/>
+          taCommonDrift is the TA drift rate in 3GPP codepoints (ta-CommonDrift-r17,
+-257303 to 257303). The operator emits taCommonDrift × 2e-4 as µs/s
+(OCUDU accepts ±51.4606 µs/s).<br/>
+          <br/>
+            <i>Minimum</i>: -257303<br/>
+            <i>Maximum</i>: 257303<br/>
         </td>
         <td>false</td>
       </tr><tr>
         <td><b>taCommonDriftVariant</b></td>
         <td>integer</td>
         <td>
-          taCommonDriftVariant is the TA drift rate variant.<br/>
+          taCommonDriftVariant is the TA drift-rate variant in codepoints
+(ta-CommonDriftVariant-r17, 0 to 28949). Emitted × 2e-5 as µs/s²
+(OCUDU accepts 0-0.57898 µs/s²).<br/>
+          <br/>
+            <i>Minimum</i>: 0<br/>
+            <i>Maximum</i>: 28949<br/>
         </td>
         <td>false</td>
       </tr><tr>
         <td><b>taCommonOffset</b></td>
         <td>integer</td>
         <td>
-          taCommonOffset is an additional TA offset.<br/>
+          taCommonOffset is an additional common-TA offset in codepoints (same
+0.004072 µs granularity as taCommon; 0 to 2455796 maps to OCUDU's 0-10000 µs).<br/>
+          <br/>
+            <i>Minimum</i>: 0<br/>
+            <i>Maximum</i>: 2.455795e+06<br/>
         </td>
         <td>false</td>
       </tr></tbody>
@@ -1364,6 +1833,90 @@ provider specifies which NTN backend to configure.
           namespace where the provider resources (e.g., OCUDU gNB) are deployed.<br/>
         </td>
         <td>false</td>
+      </tr><tr>
+        <td><b><a href="#ntncellconfigspecproviderremotecontrol">remoteControl</a></b></td>
+        <td>object</td>
+        <td>
+          remoteControl configures the gNB remote_control WebSocket for live NTN
+config push. When set together with spec.cellID, the operator pushes runtime
+ntn_config_update commands; otherwise it uses the ConfigMap path only.<br/>
+          <br/>
+            <i>Validations</i>:<li>int(self.endpoint.split(':')[1]) >= 1 && int(self.endpoint.split(':')[1]) <= 65535: endpoint port must be in 1-65535</li>
+        </td>
+        <td>false</td>
+      </tr></tbody>
+</table>
+
+
+### NTNCellConfig.spec.provider.remoteControl
+<sup><sup>[↩ Parent](#ntncellconfigspecprovider)</sup></sup>
+
+
+
+remoteControl configures the gNB remote_control WebSocket for live NTN
+config push. When set together with spec.cellID, the operator pushes runtime
+ntn_config_update commands; otherwise it uses the ConfigMap path only.
+
+<table>
+    <thead>
+        <tr>
+            <th>Name</th>
+            <th>Type</th>
+            <th>Description</th>
+            <th>Required</th>
+        </tr>
+    </thead>
+    <tbody><tr>
+        <td><b>endpoint</b></td>
+        <td>string</td>
+        <td>
+          endpoint is host:port of the gNB remote_control server (e.g. "127.0.0.1:8001").
+The provider prepends ws://, so include NEITHER a scheme nor a path — a value
+like "ws://host:8001" would dial "ws://ws://host:8001" and fail. The pattern
+enforces bare host:port (a permanent admission error beats a silent
+tight-requeue on a mistyped endpoint).<br/>
+        </td>
+        <td>true</td>
+      </tr></tbody>
+</table>
+
+
+### NTNCellConfig.spec.cellID
+<sup><sup>[↩ Parent](#ntncellconfigspec)</sup></sup>
+
+
+
+cellID identifies the OCUDU cell (plmn + nci) that runtime remote commands
+target. Required when provider.remoteControl is set; the value must match
+the cell the gNB booted with. Unset ⇒ ConfigMap bootstrap path only.
+
+<table>
+    <thead>
+        <tr>
+            <th>Name</th>
+            <th>Type</th>
+            <th>Description</th>
+            <th>Required</th>
+        </tr>
+    </thead>
+    <tbody><tr>
+        <td><b>nci</b></td>
+        <td>integer</td>
+        <td>
+          nci is the 36-bit NR Cell Identity (0 to 2^36-1).<br/>
+          <br/>
+            <i>Format</i>: int64<br/>
+            <i>Minimum</i>: 0<br/>
+            <i>Maximum</i>: 6.8719476735e+10<br/>
+        </td>
+        <td>true</td>
+      </tr><tr>
+        <td><b>plmn</b></td>
+        <td>string</td>
+        <td>
+          plmn is the cell's PLMN, 5 or 6 digits (e.g. "00101").<br/>
+        </td>
+        <td>true</td>
       </tr></tbody>
 </table>
 
@@ -1417,7 +1970,7 @@ cellOverrides allows fine-tuning PUCCH, PDSCH, PRACH, and RRC parameters.
         <td>
           sibSchedule tunes SIB19 broadcast scheduling. Any unset sub-field
 falls back to the defaults (siWindowLength=5, siPeriod=16,
-siWindowPosition=1). Tune when PDCCH capacity is tight or when
+siWindowPosition=2). Tune when PDCCH capacity is tight or when
 SIB19 broadcast cadence needs to track short ntn-UlSyncValidityDur.<br/>
         </td>
         <td>false</td>
@@ -1432,7 +1985,7 @@ SIB19 broadcast cadence needs to track short ntn-UlSyncValidityDur.<br/>
 
 sibSchedule tunes SIB19 broadcast scheduling. Any unset sub-field
 falls back to the defaults (siWindowLength=5, siPeriod=16,
-siWindowPosition=1). Tune when PDCCH capacity is tight or when
+siWindowPosition=2). Tune when PDCCH capacity is tight or when
 SIB19 broadcast cadence needs to track short ntn-UlSyncValidityDur.
 
 <table>
@@ -1468,11 +2021,13 @@ the standard set; picking a larger value increases PDCCH pressure.<br/>
         <td><b>siWindowPosition</b></td>
         <td>integer</td>
         <td>
-          siWindowPosition is the slot offset within the SI period. Adjust
-to avoid collision with SIB1/SIB2 scheduling windows. Pointer so 0
-(the first slot) can be distinguished from unset.<br/>
+          siWindowPosition is SIB19's slot offset within the SI period
+(schedulingInfoList2-r17). It must be strictly greater than the number of
+preceding schedulingInfoList entries; the emitter always schedules one SIB2
+(ID < 15) before SIB19, so the minimum is 2. Pointer so an explicit value is
+distinguished from unset (which defaults to 2).<br/>
           <br/>
-            <i>Minimum</i>: 0<br/>
+            <i>Minimum</i>: 2<br/>
             <i>Maximum</i>: 79<br/>
         </td>
         <td>false</td>
@@ -2623,6 +3178,16 @@ SatelliteEphemerisStatus defines the observed state of SatelliteEphemeris.
         </td>
         <td>false</td>
       </tr><tr>
+        <td><b><a href="#satelliteephemerisstatuspropagatedstatesindex">propagatedStates</a></b></td>
+        <td>[]object</td>
+        <td>
+          propagatedStates holds SGP4-propagated ECEF state vectors (per satellite) at
+the last refresh epoch, consumed by NTNCellConfig runtime ephemeris push (#176).
+Capped (maxItems) to match the controller's maxPropagatedStates and stay well
+under the etcd object-size limit.<br/>
+        </td>
+        <td>false</td>
+      </tr><tr>
         <td><b>satelliteCount</b></td>
         <td>integer</td>
         <td>
@@ -2765,5 +3330,146 @@ PassWindow represents a predicted contact opportunity between a satellite and gr
           satellite is the name or NORAD ID of the satellite.<br/>
         </td>
         <td>true</td>
+      </tr></tbody>
+</table>
+
+
+### SatelliteEphemeris.status.propagatedStates[index]
+<sup><sup>[↩ Parent](#satelliteephemerisstatus)</sup></sup>
+
+
+
+PropagatedState is a satellite state vector propagated (SGP4) to a specific
+epoch, in the 3GPP ECEF codepoint form the runtime ephemeris push consumes.
+
+<table>
+    <thead>
+        <tr>
+            <th>Name</th>
+            <th>Type</th>
+            <th>Description</th>
+            <th>Required</th>
+        </tr>
+    </thead>
+    <tbody><tr>
+        <td><b><a href="#satelliteephemerisstatuspropagatedstatesindexecef">ecef</a></b></td>
+        <td>object</td>
+        <td>
+          ecef is the propagated position/velocity in 3GPP codepoints. The provider
+converts these to physical SI when pushing to OCUDU.<br/>
+        </td>
+        <td>true</td>
+      </tr><tr>
+        <td><b>epochUnixMs</b></td>
+        <td>integer</td>
+        <td>
+          epochUnixMs is the propagation epoch in Unix milliseconds (in the future,
+as OCUDU's ntn_config_update requires).<br/>
+          <br/>
+            <i>Format</i>: int64<br/>
+        </td>
+        <td>true</td>
+      </tr><tr>
+        <td><b>noradID</b></td>
+        <td>integer</td>
+        <td>
+          noradID is the satellite's NORAD catalog number, used by NTNCellConfig
+(spec.ephemerisNoradID) to select which state to push.<br/>
+        </td>
+        <td>true</td>
+      </tr><tr>
+        <td><b>satellite</b></td>
+        <td>string</td>
+        <td>
+          satellite is the satellite name or object ID (bounded; the controller
+truncates the externally-sourced name to this length).<br/>
+        </td>
+        <td>true</td>
+      </tr></tbody>
+</table>
+
+
+### SatelliteEphemeris.status.propagatedStates[index].ecef
+<sup><sup>[↩ Parent](#satelliteephemerisstatuspropagatedstatesindex)</sup></sup>
+
+
+
+ecef is the propagated position/velocity in 3GPP codepoints. The provider
+converts these to physical SI when pushing to OCUDU.
+
+<table>
+    <thead>
+        <tr>
+            <th>Name</th>
+            <th>Type</th>
+            <th>Description</th>
+            <th>Required</th>
+        </tr>
+    </thead>
+    <tbody><tr>
+        <td><b>posX</b></td>
+        <td>integer</td>
+        <td>
+          posX is the X position in 1.3 m/LSB codepoints (3GPP positionX-r17,
+-33554432 to 33554431). The operator emits posX × 1.3 as metres to OCUDU.<br/>
+          <br/>
+            <i>Minimum</i>: -3.3554432e+07<br/>
+            <i>Maximum</i>: 3.355443e+07<br/>
+        </td>
+        <td>true</td>
+      </tr><tr>
+        <td><b>posY</b></td>
+        <td>integer</td>
+        <td>
+          posY is the Y position in 1.3 m/LSB codepoints (-33554432 to 33554431).<br/>
+          <br/>
+            <i>Minimum</i>: -3.3554432e+07<br/>
+            <i>Maximum</i>: 3.355443e+07<br/>
+        </td>
+        <td>true</td>
+      </tr><tr>
+        <td><b>posZ</b></td>
+        <td>integer</td>
+        <td>
+          posZ is the Z position in 1.3 m/LSB codepoints (-33554432 to 33554431).<br/>
+          <br/>
+            <i>Minimum</i>: -3.3554432e+07<br/>
+            <i>Maximum</i>: 3.355443e+07<br/>
+        </td>
+        <td>true</td>
+      </tr><tr>
+        <td><b>velX</b></td>
+        <td>integer</td>
+        <td>
+          velX is the X velocity in 0.06 m/s/LSB codepoints (3GPP velocityVX-r17,
+-131072 to 131071; 0 for GEO). The operator emits velX × 0.06 as m/s.<br/>
+          <br/>
+            <i>Default</i>: 0<br/>
+            <i>Minimum</i>: -131072<br/>
+            <i>Maximum</i>: 131071<br/>
+        </td>
+        <td>false</td>
+      </tr><tr>
+        <td><b>velY</b></td>
+        <td>integer</td>
+        <td>
+          velY is the Y velocity in 0.06 m/s/LSB codepoints (-131072 to 131071; 0 for GEO).<br/>
+          <br/>
+            <i>Default</i>: 0<br/>
+            <i>Minimum</i>: -131072<br/>
+            <i>Maximum</i>: 131071<br/>
+        </td>
+        <td>false</td>
+      </tr><tr>
+        <td><b>velZ</b></td>
+        <td>integer</td>
+        <td>
+          velZ is the Z velocity in 0.06 m/s/LSB codepoints (-131072 to 131071; 0 for GEO).<br/>
+          <br/>
+            <i>Default</i>: 0<br/>
+            <i>Minimum</i>: -131072<br/>
+            <i>Maximum</i>: 131071<br/>
+        </td>
+        <td>false</td>
       </tr></tbody>
 </table>

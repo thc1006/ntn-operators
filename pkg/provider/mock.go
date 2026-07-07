@@ -38,8 +38,12 @@ type MockProvider struct {
 	ApplyCalls     int
 	StatusCalls    int
 	EphemerisCalls int
+	RuntimeErr     error
+	RuntimeCalls   int
 	LastSpec       *ntnv1alpha1.NTNCellConfigSpec
 	LastEphemeris  *EphemerisUpdate
+	LastRuntime    *RuntimeUpdate
+	LastTarget     *ResolvedRemoteControl
 	StatusValue    *ntnv1alpha1.NTNCellConfigStatus
 }
 
@@ -67,6 +71,15 @@ func (m *MockProvider) PushEphemerisUpdate(_ context.Context, _, _ string, updat
 	m.EphemerisCalls++
 	m.LastEphemeris = &update
 	return m.EphemerisErr
+}
+
+func (m *MockProvider) PushRuntimeUpdate(_ context.Context, target ResolvedRemoteControl, update RuntimeUpdate) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.RuntimeCalls++
+	m.LastRuntime = &update
+	m.LastTarget = &target
+	return m.RuntimeErr
 }
 
 func (m *MockProvider) EnsureOwnership(
