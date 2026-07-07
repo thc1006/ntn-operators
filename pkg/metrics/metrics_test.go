@@ -26,8 +26,8 @@ import (
 
 func TestMetricsRegistered(t *testing.T) {
 	// Trigger all metrics with dummy values so Gather returns them.
-	FailoverTotal.With(prometheus.Labels{"slice": "_", "from_path": "_", "to_path": "_"}).Add(0)
-	SatellitePassAvailable.With(prometheus.Labels{"ephemeris": "_"}).Set(0)
+	FailoverTotal.With(prometheus.Labels{"namespace": "_", "slice": "_", "from_path": "_", "to_path": "_"}).Add(0)
+	SatellitePassAvailable.With(prometheus.Labels{"namespace": "_", "ephemeris": "_"}).Set(0)
 	GroundStationHealth.With(prometheus.Labels{"station": "_", "condition": "_"}).Set(0)
 	ConfigApplyErrorsTotal.With(prometheus.Labels{"config": "_", "provider": "_"}).Add(0)
 	GPFetchDuration.With(prometheus.Labels{"source_type": "_", "status": "_"}).Observe(0)
@@ -65,12 +65,12 @@ func TestMetricsRegistered(t *testing.T) {
 
 func TestFailoverTotalIncrement(t *testing.T) {
 	FailoverTotal.With(prometheus.Labels{
-		"slice": "test-slice", "from_path": "terrestrial", "to_path": "satellite",
+		"namespace": "default", "slice": "test-slice", "from_path": "terrestrial", "to_path": "satellite",
 	}).Inc()
 
 	m := &dto.Metric{}
 	if err := FailoverTotal.With(prometheus.Labels{
-		"slice": "test-slice", "from_path": "terrestrial", "to_path": "satellite",
+		"namespace": "default", "slice": "test-slice", "from_path": "terrestrial", "to_path": "satellite",
 	}).Write(m); err != nil {
 		t.Fatal(err)
 	}

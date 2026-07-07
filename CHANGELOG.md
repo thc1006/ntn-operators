@@ -49,6 +49,11 @@ real OCUDU gNB (commit `0b229d35`).
   block — the only OCUDU surface that accepts it. `SatSwitchNTNConfig.kMac`
   (1..512) is delivered by the runtime push.
 - **ECEF velocity range validation (#C2)** on propagated/emitted state vectors.
+- **NTNSlice per-CR Prometheus series leak (#178).** The NTNSlice reconciler now
+  has a `metrics-cleanup` finalizer that releases its series on deletion:
+  `ntn_operators_failover_total` directly, and `ntn_operators_satellite_pass_available`
+  (shared by slices in a namespace that reference the same ephemeris) only once
+  no other slice in that namespace references it (namespace-scoped refcounting).
 
 ### Changed
 
@@ -63,18 +68,28 @@ real OCUDU gNB (commit `0b229d35`).
 - `provider.remoteControl.endpoint` now validates a bare `host:port` (no scheme
   or path): a value like `ws://host:8001` is rejected at admission instead of
   failing to dial and requeuing forever.
+- `ntn_operators_failover_total` and `ntn_operators_satellite_pass_available` gain
+  a `namespace` label (#178). NTNSlice is namespaced (and its `ephemerisRef` is
+  resolved per-namespace), so keying by `slice`/`ephemeris` alone conflated
+  same-named CRs/refs across namespaces (and, for the counter, wiped them on
+  delete). PromQL that groups by the existing labels still works; add `namespace`
+  to dashboards for per-CR accuracy.
 
 ### Notes
 
 - Issue #53 (`ta-CommonDriftCorrection`, Rel-18) remains tracked-only: OCUDU still
   exposes no parser hook (YAML or runtime) as of this change.
-- Known follow-ups (tracked, out of scope here): (1) the NTNSlice reconciler has
-  no finalizer and its `SatellitePassAvailable` series is keyed by ephemeris
-  (shared across slices), so per-CR metric cleanup there needs a finalizer +
-  refcounting; (2) the runtime-push epoch is stamped near-now (~5 min) while the
-  ephemeris refresh interval is ≥2 h (GP-source rate limits), so a consumer
-  reconcile landing >5 min after the last propagation skips the push until the
-  next refresh (the cell keeps serving the last-pushed / bootstrap ephemeris).
+- Known follow-up (tracked, #179): the runtime-push epoch is stamped near-now
+  (~5 min) while the ephemeris refresh interval is ≥2 h (GP-source rate limits),
+  so a consumer reconcile landing >5 min after the last propagation skips the
+  push until the next refresh (the cell keeps serving the last-pushed / bootstrap
+  ephemeris). (The other #177 follow-up, NTNSlice metric cleanup, is done in #178.)
+- The NTNSlice `metrics-cleanup` finalizer means `kubectl delete ntnslice` now
+  completes only after the operator reconciles the deletion; a slice stays
+  `Terminating` while the operator is down (standard finalizer behavior).
+- Known follow-up (tracked, #180): `ntn_operators_gp_satellite_count`
+  (SatelliteEphemeris controller) has the same cross-namespace conflation #178
+  fixed for the NTNSlice metrics; deferred as a separate controller/scope.
 
 ## [0.5.0] - 2026-05-27
 

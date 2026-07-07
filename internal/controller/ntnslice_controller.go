@@ -29,10 +29,12 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	ctrlrt "sigs.k8s.io/controller-runtime/pkg/controller"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -113,6 +115,12 @@ func (r *NTNSliceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 			r.ReaderProvider.Evict(req.NamespacedName)
 		}
 		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
+
+	// Step 1b: manage the metrics-cleanup finalizer so per-CR metric series are
+	// released on deletion (see handleSliceFinalizer).
+	if done, err := r.handleSliceFinalizer(ctx, ns); done {
+		return ctrl.Result{}, err
 	}
 
 	now := r.now()
@@ -233,11 +241,12 @@ func (r *NTNSliceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	previousPath := string(currentPath)
 	ns.Status.ActivePathType = string(result.TargetPath)
 
-	// Update satellite availability metric.
+	// Update satellite availability metric (keyed by namespace+ephemeris).
+	passLabels := prometheus.Labels{"namespace": ns.Namespace, "ephemeris": ns.Spec.SatellitePath.EphemerisRef}
 	if satelliteAvailable {
-		ntnmetrics.SatellitePassAvailable.With(prometheus.Labels{"ephemeris": ns.Spec.SatellitePath.EphemerisRef}).Set(1)
+		ntnmetrics.SatellitePassAvailable.With(passLabels).Set(1)
 	} else {
-		ntnmetrics.SatellitePassAvailable.With(prometheus.Labels{"ephemeris": ns.Spec.SatellitePath.EphemerisRef}).Set(0)
+		ntnmetrics.SatellitePassAvailable.With(passLabels).Set(0)
 	}
 
 	switch result.Decision {
@@ -245,7 +254,8 @@ func (r *NTNSliceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		ns.Status.FailoverCount++
 		ns.Status.LastFailover = &metav1.Time{Time: now}
 		ntnmetrics.FailoverTotal.With(prometheus.Labels{
-			"slice": ns.Name, "from_path": previousPath, "to_path": string(result.TargetPath),
+			"namespace": ns.Namespace, "slice": ns.Name,
+			"from_path": previousPath, "to_path": string(result.TargetPath),
 		}).Inc()
 		log.Info("Failover triggered", "from", previousPath, "to", result.TargetPath, "reason", result.Reason)
 		if r.Recorder != nil {
@@ -441,6 +451,98 @@ func (r *NTNSliceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 
 // ephemerisToSlice maps a SatelliteEphemeris change to all NTNSlices
 // that reference it via spec.satellitePath.ephemerisRef.
+// sliceMetricsFinalizer gates NTNSlice deletion so the reconciler can release
+// the slice's per-CR Prometheus series before the object is removed.
+const sliceMetricsFinalizer = "ntn.operators.dev/metrics-cleanup"
+
+// handleSliceFinalizer releases the NTNSlice's per-CR metric series on deletion
+// so /metrics does not accumulate dead series across create/delete churn.
+// Returns (done, error); when done is true the caller must return.
+//
+// FailoverTotal is per-CR (keyed by namespace+slice) and is released directly.
+// SatellitePassAvailable is keyed by ephemeris ref, which multiple slices can
+// share, so it is released only once no other slice references that ref
+// (refcounting) — otherwise a sibling slice's series would be wrongly dropped.
+func (r *NTNSliceReconciler) handleSliceFinalizer(
+	ctx context.Context, ns *ntnv1alpha1.NTNSlice,
+) (bool, error) {
+	log := logf.FromContext(ctx)
+
+	if ns.DeletionTimestamp != nil {
+		if controllerutil.ContainsFinalizer(ns, sliceMetricsFinalizer) {
+			// FailoverTotal is per-CR (keyed by namespace+slice); release it directly.
+			ntnmetrics.FailoverTotal.DeletePartialMatch(prometheus.Labels{
+				"namespace": ns.Namespace, "slice": ns.Name,
+			})
+			// SatellitePassAvailable is keyed by namespace+ephemeris, which several
+			// slices in the SAME namespace can share; release it only once no other
+			// slice in this namespace references the ref.
+			ref := ns.Spec.SatellitePath.EphemerisRef
+			shared, err := r.ephemerisMetricReferenced(ctx, ns.Namespace, ref, ns.UID)
+			if err != nil {
+				// Retry on transient list errors rather than leak the series.
+				log.Error(err, "listing NTNSlices for metric refcount during finalization")
+				return true, err
+			}
+			if !shared {
+				ntnmetrics.SatellitePassAvailable.DeletePartialMatch(prometheus.Labels{
+					"namespace": ns.Namespace, "ephemeris": ref,
+				})
+			}
+			controllerutil.RemoveFinalizer(ns, sliceMetricsFinalizer)
+			if err := r.Update(ctx, ns); err != nil {
+				return true, err
+			}
+		}
+		return true, nil
+	}
+
+	// Not being deleted: ensure the finalizer is present, then CONTINUE the same
+	// reconcile (return done=false). r.Update writes the new resourceVersion back
+	// into ns, so the later status update still applies — this must not short-circuit
+	// with a requeue, or the first reconcile of a slice would compute no status.
+	if !controllerutil.ContainsFinalizer(ns, sliceMetricsFinalizer) {
+		controllerutil.AddFinalizer(ns, sliceMetricsFinalizer)
+		if err := r.Update(ctx, ns); err != nil {
+			return true, err
+		}
+	}
+	return false, nil
+}
+
+// ephemerisMetricReferenced reports whether any NTNSlice in namespace, other than
+// the one being deleted, still references ephemerisRef — matching
+// SatellitePassAvailable's {namespace, ephemeris} keying (the ref is resolved
+// within the slice's namespace), so a shared series is kept until its last
+// referencing slice in that namespace is gone.
+//
+// The DeletionTimestamp skip is load-bearing for leak-safety under concurrent
+// finalization: the List reads the shared, monotonically-updated informer cache,
+// and this reconcile only reached the deletion branch because its own Get already
+// observed self's DeletionTimestamp (Get happens-before this List). So if two
+// siblings sharing a ref are finalized concurrently, at most one can observe the
+// other as live — the other necessarily sees it terminating/gone and deletes the
+// series. Dropping this skip (or reading un-cached) would reintroduce a
+// double-KEEP leak; keep it.
+func (r *NTNSliceReconciler) ephemerisMetricReferenced(
+	ctx context.Context, namespace, ephemerisRef string, deleting types.UID,
+) (bool, error) {
+	var list ntnv1alpha1.NTNSliceList
+	if err := r.List(ctx, &list, client.InNamespace(namespace)); err != nil {
+		return false, err
+	}
+	for i := range list.Items {
+		s := &list.Items[i]
+		if s.UID == deleting || s.DeletionTimestamp != nil {
+			continue
+		}
+		if s.Spec.SatellitePath.EphemerisRef == ephemerisRef {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func (r *NTNSliceReconciler) ephemerisToSlice(
 	ctx context.Context, obj client.Object,
 ) []reconcile.Request {

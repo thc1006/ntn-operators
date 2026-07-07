@@ -25,14 +25,19 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	ntnv1alpha1 "github.com/thc1006/ntn-operators/api/v1alpha1"
+	ntnmetrics "github.com/thc1006/ntn-operators/pkg/metrics"
 	"github.com/thc1006/ntn-operators/pkg/netutil"
 	slicemetrics "github.com/thc1006/ntn-operators/pkg/slice/metrics"
 )
@@ -82,7 +87,13 @@ var _ = Describe("NTNSlice Controller", func() {
 			return
 		}
 		Expect(err).NotTo(HaveOccurred())
-		Expect(k8sClient.Delete(context.Background(), slice)).To(Succeed())
+		// The reconciler adds a metrics-cleanup finalizer, so a plain Delete only
+		// marks the object Terminating; drop the finalizer so envtest actually
+		// removes it (otherwise it lingers and poisons the next spec's create).
+		if controllerutil.RemoveFinalizer(slice, sliceMetricsFinalizer) {
+			Expect(client.IgnoreNotFound(k8sClient.Update(context.Background(), slice))).To(Succeed())
+		}
+		Expect(client.IgnoreNotFound(k8sClient.Delete(context.Background(), slice))).To(Succeed())
 	}
 
 	newReconciler := func() *NTNSliceReconciler {
@@ -93,6 +104,29 @@ var _ = Describe("NTNSlice Controller", func() {
 			Now:      func() time.Time { return time.Date(2026, 4, 17, 12, 0, 0, 0, time.UTC) },
 		}
 	}
+
+	// Safety net: after every spec, sweep any NTNSlice left in the test namespace
+	// (envtest has no garbage collector, and reconciling adds a finalizer, so a
+	// spec that Deletes without clearing it would leave a Terminating object that
+	// poisons later specs' List counts / creates). Runs after each spec's own
+	// AfterEach/DeferCleanup, so it also catches specs that clean up with a plain
+	// Delete. Idempotent for specs that already cleaned up.
+	AfterEach(func() {
+		var list ntnv1alpha1.NTNSliceList
+		Expect(k8sClient.List(context.Background(), &list, client.InNamespace(namespace))).To(Succeed())
+		for i := range list.Items {
+			s := &list.Items[i]
+			if controllerutil.RemoveFinalizer(s, sliceMetricsFinalizer) {
+				Expect(client.IgnoreNotFound(k8sClient.Update(context.Background(), s))).To(Succeed())
+			}
+			Expect(client.IgnoreNotFound(k8sClient.Delete(context.Background(), s))).To(Succeed())
+		}
+		Eventually(func(g Gomega) {
+			var l ntnv1alpha1.NTNSliceList
+			g.Expect(k8sClient.List(context.Background(), &l, client.InNamespace(namespace))).To(Succeed())
+			g.Expect(l.Items).To(BeEmpty())
+		}).WithTimeout(5 * time.Second).WithPolling(100 * time.Millisecond).Should(Succeed())
+	})
 
 	Context("When terrestrial is healthy (initial state)", func() {
 		BeforeEach(func() { createSlice() })
@@ -974,6 +1008,48 @@ var _ = Describe("NTNSlice Controller", func() {
 			Expect(cond).NotTo(BeNil())
 			Expect(cond.Status).To(Equal(metav1.ConditionFalse))
 			Expect(cond.Reason).To(Equal("SatelliteUnavailable"))
+		})
+	})
+
+	// Exercises the REAL finalizer-driven deletion path against the envtest
+	// apiserver (the unit tests use a fake client): a deletion reconcile must
+	// clear the finalizer AND release the slice's per-CR series.
+	Context("When a slice with the metrics-cleanup finalizer is deleted", func() {
+		It("clears the finalizer and releases its per-CR series via the deletion reconcile", func() {
+			const name, ref = "del-recon", "eph-del-recon"
+			key := types.NamespacedName{Name: name, Namespace: namespace}
+			spec := baseSpec()
+			spec.SatellitePath.EphemerisRef = ref
+			slice := &ntnv1alpha1.NTNSlice{
+				ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+				Spec:       spec,
+			}
+			Expect(k8sClient.Create(context.Background(), slice)).To(Succeed())
+			r := newReconciler()
+
+			// First reconcile adds the finalizer (Step 1b runs before the reader
+			// logic, so it lands even with no metrics endpoint configured).
+			_, _ = r.Reconcile(context.Background(), reconcile.Request{NamespacedName: key})
+			Expect(k8sClient.Get(context.Background(), key, slice)).To(Succeed())
+			Expect(controllerutil.ContainsFinalizer(slice, sliceMetricsFinalizer)).To(BeTrue())
+
+			// Seed the per-CR series as a successful reconcile would.
+			ntnmetrics.SatellitePassAvailable.With(prometheus.Labels{"namespace": namespace, "ephemeris": ref}).Set(1)
+			before := testutil.CollectAndCount(ntnmetrics.SatellitePassAvailable)
+
+			// Delete → held Terminating by the finalizer on the real apiserver.
+			Expect(k8sClient.Delete(context.Background(), slice)).To(Succeed())
+			Expect(k8sClient.Get(context.Background(), key, slice)).To(Succeed())
+			Expect(slice.DeletionTimestamp).NotTo(BeNil())
+
+			// The deletion reconcile drives the real path: the controller clears the
+			// finalizer (r.Update to the apiserver) and releases the series.
+			_, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: key})
+			Expect(err).NotTo(HaveOccurred())
+			Eventually(func() bool {
+				return apierrors.IsNotFound(k8sClient.Get(context.Background(), key, &ntnv1alpha1.NTNSlice{}))
+			}).WithTimeout(5 * time.Second).WithPolling(100 * time.Millisecond).Should(BeTrue())
+			Expect(testutil.CollectAndCount(ntnmetrics.SatellitePassAvailable)).To(Equal(before - 1))
 		})
 	})
 })
