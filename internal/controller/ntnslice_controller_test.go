@@ -198,6 +198,15 @@ var _ = Describe("NTNSlice Controller", func() {
 				_ = k8sClient.Delete(context.Background(), eph)
 			})
 
+			// Capture FailoverTotal before reconcile and assert a +1 delta,
+			// so the check is independent of any other spec that fails over
+			// on the same series under -ginkgo.randomize-all.
+			counterLabels := prometheus.Labels{
+				"namespace": namespace, "slice": sliceName,
+				"from_path": "terrestrial", "to_path": pathSatellite,
+			}
+			before := testutil.ToFloat64(ntnmetrics.FailoverTotal.With(counterLabels))
+
 			reconciler := newReconciler()
 			_, err := reconciler.Reconcile(context.Background(), reconcile.Request{
 				NamespacedName: typeNamespacedName,
@@ -209,6 +218,10 @@ var _ = Describe("NTNSlice Controller", func() {
 			Expect(updated.Status.ActivePathType).To(Equal(pathSatellite))
 			Expect(updated.Status.FailoverCount).To(Equal(1))
 			Expect(updated.Status.LastFailover).NotTo(BeNil())
+			// The deferred FailoverTotal.Inc() must have fired, now that the
+			// status write persisted — guards the Inc ordering end-to-end.
+			Expect(testutil.ToFloat64(ntnmetrics.FailoverTotal.With(counterLabels))).
+				To(Equal(before + 1))
 		})
 	})
 

@@ -249,14 +249,19 @@ func (r *NTNSliceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		ntnmetrics.SatellitePassAvailable.With(passLabels).Set(0)
 	}
 
+	// The FailoverTotal counter increment is deferred until after the status write
+	// (Step 8) persists, so a stale/conflicting reconcile that fails to record the
+	// failover cannot double-count it. Stays nil unless this reconcile fails over.
+	var failoverLabels prometheus.Labels
+
 	switch result.Decision {
 	case slice.DecisionFailover:
 		ns.Status.FailoverCount++
 		ns.Status.LastFailover = &metav1.Time{Time: now}
-		ntnmetrics.FailoverTotal.With(prometheus.Labels{
+		failoverLabels = prometheus.Labels{
 			"namespace": ns.Namespace, "slice": ns.Name,
 			"from_path": previousPath, "to_path": string(result.TargetPath),
-		}).Inc()
+		}
 		log.Info("Failover triggered", "from", previousPath, "to", result.TargetPath, "reason", result.Reason)
 		if r.Recorder != nil {
 			r.Recorder.Eventf(ns, nil, "Warning", "FailoverTriggered", "FailoverTriggered",
@@ -305,6 +310,14 @@ func (r *NTNSliceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	// Step 8: Update status.
 	if err := r.Status().Update(ctx, ns); err != nil {
 		return ctrl.Result{}, err
+	}
+
+	// Emit the failover counter only after the status write persisted, so a
+	// conflicting/stale reconcile (which discards its status update) never counts
+	// a failover it did not actually record — keeping FailoverTotal in step with
+	// status.FailoverCount.
+	if failoverLabels != nil {
+		ntnmetrics.FailoverTotal.With(failoverLabels).Inc()
 	}
 
 	return ctrl.Result{RequeueAfter: sliceRequeueInterval}, nil
