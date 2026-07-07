@@ -19,8 +19,8 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(ntn_operators_failover_total[5m])) by (slice, to_path)",
-          "legendFormat": "{{slice}} -> {{to_path}}"
+          "expr": "sum(rate(ntn_operators_failover_total[5m])) by (namespace, slice, to_path)",
+          "legendFormat": "{{namespace}}/{{slice}} -> {{to_path}}"
         }
       ]
     },
@@ -36,7 +36,7 @@
       "targets": [
         {
           "expr": "ntn_operators_satellite_pass_available",
-          "legendFormat": "{{ephemeris}}"
+          "legendFormat": "{{namespace}}/{{ephemeris}}"
         }
       ],
       "fieldConfig": {
