@@ -49,6 +49,11 @@ real OCUDU gNB (commit `0b229d35`).
   block — the only OCUDU surface that accepts it. `SatSwitchNTNConfig.kMac`
   (1..512) is delivered by the runtime push.
 - **ECEF velocity range validation (#C2)** on propagated/emitted state vectors.
+- **NTNSlice per-CR Prometheus series leak (#178).** The NTNSlice reconciler now
+  has a `metrics-cleanup` finalizer that releases its series on deletion:
+  `ntn_operators_failover_total` directly, and `ntn_operators_satellite_pass_available`
+  (keyed by ephemeris, shared across slices) only once no other slice references
+  that ephemeris (refcounting).
 
 ### Changed
 
@@ -63,18 +68,20 @@ real OCUDU gNB (commit `0b229d35`).
 - `provider.remoteControl.endpoint` now validates a bare `host:port` (no scheme
   or path): a value like `ws://host:8001` is rejected at admission instead of
   failing to dial and requeuing forever.
+- `ntn_operators_failover_total` gains a `namespace` label (#178). NTNSlice is
+  namespaced, so keying by `slice` alone conflated (and, on delete, wiped)
+  same-named slices across namespaces. PromQL that groups by `slice` still works;
+  update dashboards to include `namespace` for per-CR accuracy.
 
 ### Notes
 
 - Issue #53 (`ta-CommonDriftCorrection`, Rel-18) remains tracked-only: OCUDU still
   exposes no parser hook (YAML or runtime) as of this change.
-- Known follow-ups (tracked, out of scope here): (1) the NTNSlice reconciler has
-  no finalizer and its `SatellitePassAvailable` series is keyed by ephemeris
-  (shared across slices), so per-CR metric cleanup there needs a finalizer +
-  refcounting; (2) the runtime-push epoch is stamped near-now (~5 min) while the
-  ephemeris refresh interval is ≥2 h (GP-source rate limits), so a consumer
-  reconcile landing >5 min after the last propagation skips the push until the
-  next refresh (the cell keeps serving the last-pushed / bootstrap ephemeris).
+- Known follow-up (tracked, #179): the runtime-push epoch is stamped near-now
+  (~5 min) while the ephemeris refresh interval is ≥2 h (GP-source rate limits),
+  so a consumer reconcile landing >5 min after the last propagation skips the
+  push until the next refresh (the cell keeps serving the last-pushed / bootstrap
+  ephemeris). (The other #177 follow-up, NTNSlice metric cleanup, is done in #178.)
 
 ## [0.5.0] - 2026-05-27
 

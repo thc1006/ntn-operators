@@ -25,12 +25,14 @@ import (
 
 var (
 	// FailoverTotal counts failover events by slice, source path, and target path.
+	// FailoverTotal is keyed by namespace+slice (NTNSlice is namespaced, so the
+	// slice name alone is not unique) plus the source/target paths.
 	FailoverTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "ntn_operators_failover_total",
 			Help: "Total number of failover events.",
 		},
-		[]string{"slice", "from_path", "to_path"},
+		[]string{"namespace", "slice", "from_path", "to_path"},
 	)
 
 	// SatellitePassAvailable indicates whether a satellite pass window is active (1) or not (0).

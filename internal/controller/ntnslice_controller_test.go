@@ -30,6 +30,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	ntnv1alpha1 "github.com/thc1006/ntn-operators/api/v1alpha1"
@@ -82,7 +84,13 @@ var _ = Describe("NTNSlice Controller", func() {
 			return
 		}
 		Expect(err).NotTo(HaveOccurred())
-		Expect(k8sClient.Delete(context.Background(), slice)).To(Succeed())
+		// The reconciler adds a metrics-cleanup finalizer, so a plain Delete only
+		// marks the object Terminating; drop the finalizer so envtest actually
+		// removes it (otherwise it lingers and poisons the next spec's create).
+		if controllerutil.RemoveFinalizer(slice, sliceMetricsFinalizer) {
+			Expect(client.IgnoreNotFound(k8sClient.Update(context.Background(), slice))).To(Succeed())
+		}
+		Expect(client.IgnoreNotFound(k8sClient.Delete(context.Background(), slice))).To(Succeed())
 	}
 
 	newReconciler := func() *NTNSliceReconciler {
@@ -93,6 +101,29 @@ var _ = Describe("NTNSlice Controller", func() {
 			Now:      func() time.Time { return time.Date(2026, 4, 17, 12, 0, 0, 0, time.UTC) },
 		}
 	}
+
+	// Safety net: after every spec, sweep any NTNSlice left in the test namespace
+	// (envtest has no garbage collector, and reconciling adds a finalizer, so a
+	// spec that Deletes without clearing it would leave a Terminating object that
+	// poisons later specs' List counts / creates). Runs after each spec's own
+	// AfterEach/DeferCleanup, so it also catches specs that clean up with a plain
+	// Delete. Idempotent for specs that already cleaned up.
+	AfterEach(func() {
+		var list ntnv1alpha1.NTNSliceList
+		Expect(k8sClient.List(context.Background(), &list, client.InNamespace(namespace))).To(Succeed())
+		for i := range list.Items {
+			s := &list.Items[i]
+			if controllerutil.RemoveFinalizer(s, sliceMetricsFinalizer) {
+				Expect(client.IgnoreNotFound(k8sClient.Update(context.Background(), s))).To(Succeed())
+			}
+			Expect(client.IgnoreNotFound(k8sClient.Delete(context.Background(), s))).To(Succeed())
+		}
+		Eventually(func(g Gomega) {
+			var l ntnv1alpha1.NTNSliceList
+			g.Expect(k8sClient.List(context.Background(), &l, client.InNamespace(namespace))).To(Succeed())
+			g.Expect(l.Items).To(BeEmpty())
+		}).WithTimeout(5 * time.Second).WithPolling(100 * time.Millisecond).Should(Succeed())
+	})
 
 	Context("When terrestrial is healthy (initial state)", func() {
 		BeforeEach(func() { createSlice() })
