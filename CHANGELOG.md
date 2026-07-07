@@ -67,6 +67,15 @@ real OCUDU gNB (commit `0b229d35`).
 - Issue #53 (`ta-CommonDriftCorrection`, Rel-18) remains tracked-only: OCUDU still
   exposes no parser hook (YAML or runtime) as of this change.
 
+## [0.5.0] - 2026-05-27
+
+Promotion of `0.5.0-rc.1` after a short soak. No CRD, controller, or
+signing-format change vs rc.1; the rc validated the full publish + anonymous
+`cosign verify` / `verify-attestation` chain (Rekor logIndex 1635906087),
+multi-arch (amd64+arm64), and Helm OCI push. The OLM CSV now declares
+`replaces: ntn-operators.v0.4.0` (v0.4.0 is published on OperatorHub) in place
+of the rc's `skipRange`.
+
 ## [0.5.0-rc.1] - 2026-05-27
 
 ### Changed
