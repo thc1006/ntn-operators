@@ -155,10 +155,7 @@ func capPerSatellite(passes []PassResult, limit int) []PassResult {
 			nSat++
 		}
 	}
-	quota := limit / nSat
-	if quota < 1 {
-		quota = 1
-	}
+	quota := max(limit/nSat, 1)
 	kept := make([]PassResult, 0, limit)
 	leftover := make([]PassResult, 0)
 	count := make(map[string]int)

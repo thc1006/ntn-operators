@@ -282,7 +282,10 @@ func pushNTNConfigUpdate(ctx context.Context, endpoint string, env ntnConfigUpda
 		return &wsError{wsMarshal, fmt.Sprintf("marshal ntn_config_update: %v", err)}
 	}
 	if len(payload) > wsMaxPayload {
-		return &wsError{wsPayloadTooLarge, fmt.Sprintf("frame %d bytes exceeds OCUDU %d-byte cap", len(payload), wsMaxPayload)}
+		return &wsError{
+			wsPayloadTooLarge,
+			fmt.Sprintf("frame %d bytes exceeds OCUDU %d-byte cap", len(payload), wsMaxPayload),
+		}
 	}
 
 	dialCtx, cancel := context.WithTimeout(ctx, wsDialTimeout)

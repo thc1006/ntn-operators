@@ -28,9 +28,9 @@ import (
 // satellite's earliest window.
 func TestCapPerSatellite_KeepsEverySatellitesEarliestWindow(t *testing.T) {
 	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	var passes []PassResult
+	passes := make([]PassResult, 0, MaxPassWindows+101)
 	// SAT-BUSY alone produces more than MaxPassWindows early passes.
-	for i := 0; i < MaxPassWindows+100; i++ {
+	for i := range MaxPassWindows + 100 {
 		passes = append(passes, PassResult{
 			Satellite: "SAT-BUSY",
 			AOS:       base.Add(time.Duration(i) * time.Minute),
@@ -82,8 +82,8 @@ func TestCapPerSatellite_UnderLimitUnchanged(t *testing.T) {
 // With more satellites than the limit, keep the earliest `limit` passes.
 func TestCapPerSatellite_MoreSatellitesThanLimit(t *testing.T) {
 	base := time.Unix(0, 0)
-	var passes []PassResult
-	for i := 0; i < MaxPassWindows+50; i++ {
+	passes := make([]PassResult, 0, MaxPassWindows+50)
+	for i := range MaxPassWindows + 50 {
 		passes = append(passes, PassResult{
 			Satellite: "SAT-" + strconv.Itoa(i),
 			AOS:       base.Add(time.Duration(i) * time.Second),
@@ -95,5 +95,36 @@ func TestCapPerSatellite_MoreSatellitesThanLimit(t *testing.T) {
 	}
 	if !got[0].AOS.Equal(base) {
 		t.Error("earliest pass not kept")
+	}
+}
+
+// A small explicit limit exercises the per-satellite quota path (and gives the
+// limit parameter a value other than MaxPassWindows).
+func TestCapPerSatellite_SmallLimitQuota(t *testing.T) {
+	base := time.Unix(0, 0)
+	passes := make([]PassResult, 0, 12)
+	// 3 satellites × 4 passes; cap at 6 → quota = 6/3 = 2 per satellite.
+	for _, sat := range []string{"A", "B", "C"} {
+		for i := range 4 {
+			passes = append(passes, PassResult{Satellite: sat, AOS: base.Add(time.Duration(i) * time.Second)})
+		}
+	}
+	sort.Slice(passes, func(i, j int) bool { return passes[i].AOS.Before(passes[j].AOS) })
+
+	got := capPerSatellite(passes, 6)
+	if len(got) != 6 {
+		t.Fatalf("expected 6 (cap), got %d", len(got))
+	}
+	perSat := map[string]int{}
+	for _, p := range got {
+		perSat[p.Satellite]++
+	}
+	if len(perSat) != 3 {
+		t.Errorf("expected all 3 satellites represented, got %d", len(perSat))
+	}
+	for sat, n := range perSat {
+		if n > 2 {
+			t.Errorf("satellite %s exceeded per-satellite quota: %d > 2", sat, n)
+		}
 	}
 }

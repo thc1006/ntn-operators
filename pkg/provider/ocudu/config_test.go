@@ -874,9 +874,9 @@ func TestGenerateConfig_YAMLRoundTrip(t *testing.T) {
 				TACommonDriftVariant: 10,
 				TACommonOffset:       200,
 			},
-			EpochTime:           &ntnv1alpha1.EpochTime{SFN: 512, SubframeNumber: 5},
-			EphemerisECEF:       &ntnv1alpha1.EphemerisECEF{PosX: 1, PosY: 2, PosZ: 3, VelX: 10, VelY: 20, VelZ: 30},
-			MovingRefLocation:   &ntnv1alpha1.MovingRefLocation{Latitude: 248500, Longitude: 1210000},
+			EpochTime:         &ntnv1alpha1.EpochTime{SFN: 512, SubframeNumber: 5},
+			EphemerisECEF:     &ntnv1alpha1.EphemerisECEF{PosX: 1, PosY: 2, PosZ: 3, VelX: 10, VelY: 20, VelZ: 30},
+			MovingRefLocation: &ntnv1alpha1.MovingRefLocation{Latitude: 248500, Longitude: 1210000},
 			SatSwitchWithResync: &ntnv1alpha1.SatSwitchWithResync{
 				NTNConfig: ntnv1alpha1.SatSwitchNTNConfig{
 					EphemerisECEF: &ntnv1alpha1.EphemerisECEF{PosX: 1, PosY: 2, PosZ: 3},

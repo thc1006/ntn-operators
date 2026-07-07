@@ -420,7 +420,7 @@ func (r *NTNCellConfigReconciler) pushEphemerisUpdateIfNeeded(
 	// push the SGP4-propagated ephemeris live via ntn_config_update (#176) instead
 	// of rewriting the bootstrap ConfigMap with the CR's static ephemeris.
 	if spec.Provider.RemoteControl != nil && spec.CellID != nil {
-		return r.pushRuntimeEphemeris(ctx, cc, spec, eph, prov, marker)
+		return r.pushRuntimeEphemeris(ctx, spec, eph, prov, marker)
 	}
 
 	// A satSwitchWithResync is runtime-only (its k_mac has no bootstrap-YAML
@@ -468,7 +468,6 @@ func (r *NTNCellConfigReconciler) pushEphemerisUpdateIfNeeded(
 // discarding it and re-emitting the CR's static ephemeris.
 func (r *NTNCellConfigReconciler) pushRuntimeEphemeris(
 	ctx context.Context,
-	cc *ntnv1alpha1.NTNCellConfig,
 	spec *ntnv1alpha1.NTNCellConfigSpec,
 	eph *ntnv1alpha1.SatelliteEphemeris,
 	prov provider.NTNProvider,

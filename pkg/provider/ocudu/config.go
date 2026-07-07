@@ -35,11 +35,12 @@ import (
 // encoding. Emitting `codepoint × factor` therefore round-trips to exactly the
 // intended SIB19 value. Factors are the inverse of OCUDU's own divisors, taken
 // from lib/du/du_high/du_manager/converters/asn1_ntn_config_helpers.cpp:
-//   ta_common / 0.004072, ta_common_drift / 0.0002, ta_common_drift_variant /
-//   0.00002, position / 1.3, velocity / 0.06, eccentricity / 1.431e-8,
-//   inclination|longitude|periapsis|mean_anomaly / 2.341e-8 (radians),
-//   geodetic degrees. (ECEF position/velocity steps reuse the CRD's 3GPP
-//   constants ntnv1alpha1.ECEFPositionStep / ECEFVelocityStep.)
+//
+//	ta_common / 0.004072, ta_common_drift / 0.0002, ta_common_drift_variant /
+//	0.00002, position / 1.3, velocity / 0.06, eccentricity / 1.431e-8,
+//	inclination|longitude|periapsis|mean_anomaly / 2.341e-8 (radians),
+//	geodetic degrees. (ECEF position/velocity steps reuse the CRD's 3GPP
+//	constants ntnv1alpha1.ECEFPositionStep / ECEFVelocityStep.)
 const (
 	// taCommonStepUs is µs per ta_common / ta_common_offset codepoint.
 	taCommonStepUs = 0.004072
@@ -247,7 +248,7 @@ type configData struct {
 	// operating-SCS slots internally, so this value passes through unchanged
 	// (no unit conversion). OCUDU accepts 1-1023 and rejects 0; the 3GPP IE
 	// allows 0..1023, so the CRD's Minimum=1 mirrors OCUDU, not the spec.
-	Koffset                   int
+	Koffset int
 	// The following are PHYSICAL SI values emitted to OCUDU, converted from the
 	// CRD's 3GPP codepoints (see the conversion-factor constants above).
 	TACommon                  float64 // µs
@@ -306,8 +307,8 @@ type configData struct {
 
 // SI scheduling defaults mirror the live-gNB-verified geo_ntn.yml values.
 const (
-	defaultSIWindowLength   = 5
-	defaultSIPeriod         = 16
+	defaultSIWindowLength = 5
+	defaultSIPeriod       = 16
 	// defaultSIWindowPosition is 2: SIB19 (schedulingInfoList2) must sit strictly
 	// after the single SIB2 (schedulingInfoList) entry the emitter always adds.
 	defaultSIWindowPosition = 2

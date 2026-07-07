@@ -32,20 +32,18 @@ import (
 	"github.com/thc1006/ntn-operators/pkg/provider"
 )
 
-func ptrInt(i int) *int { return &i }
-
 func TestSelectPropagatedState(t *testing.T) {
 	states := []ntnv1alpha1.PropagatedState{
 		{NoradID: 100, ECEF: ntnv1alpha1.EphemerisECEF{PosX: 1}},
 		{NoradID: 200, ECEF: ntnv1alpha1.EphemerisECEF{PosX: 2}},
 	}
-	if got := selectPropagatedState(states, ptrInt(200)); got == nil || got.NoradID != 200 {
+	if got := selectPropagatedState(states, new(200)); got == nil || got.NoradID != 200 {
 		t.Fatalf("by-noradID selection failed: %+v", got)
 	}
 	if got := selectPropagatedState(states, nil); got == nil || got.NoradID != 100 {
 		t.Fatalf("nil selector should pick first: %+v", got)
 	}
-	if got := selectPropagatedState(states, ptrInt(999)); got != nil {
+	if got := selectPropagatedState(states, new(999)); got != nil {
 		t.Fatalf("unknown noradID should return nil: %+v", got)
 	}
 	if got := selectPropagatedState(nil, nil); got != nil {
@@ -79,7 +77,7 @@ func ccWithRemoteControl() *ntnv1alpha1.NTNCellConfig {
 			},
 			CellID:           &ntnv1alpha1.CellID{PLMN: "00101", NCI: 6733824},
 			EphemerisRef:     "eph1",
-			EphemerisNoradID: ptrInt(25544),
+			EphemerisNoradID: new(25544),
 			NTN: ntnv1alpha1.NTNParams{
 				EphemerisECEF: &ntnv1alpha1.EphemerisECEF{PosX: 111, PosY: 222, PosZ: 333},
 			},
