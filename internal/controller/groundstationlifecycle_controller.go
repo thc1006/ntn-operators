@@ -103,7 +103,7 @@ func (r *GroundStationLifecycleReconciler) Reconcile(ctx context.Context, req ct
 	if err := r.Get(ctx, req.NamespacedName, gs); err != nil {
 		if apierrors.IsNotFound(err) {
 			// CR deleted — release its per-CR metric series (all conditions).
-			ntnmetrics.GroundStationHealth.DeletePartialMatch(prometheus.Labels{"station": req.Name})
+			ntnmetrics.GroundStationHealth.DeletePartialMatch(prometheus.Labels{"namespace": req.Namespace, "station": req.Name})
 		}
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
@@ -138,8 +138,8 @@ func (r *GroundStationLifecycleReconciler) Reconcile(ctx context.Context, req ct
 		}
 	}
 
-	// Step 6: Update health metrics.
-	stationKey := gs.Namespace + "." + gs.Name
+	// Step 6: Update health metrics (keyed by namespace+station — see #183; the
+	// old composite `station=namespace.name` value made the bare-name delete miss).
 	for _, condType := range []string{
 		ntnv1alpha1.ConditionK8sNodeReady,
 		ntnv1alpha1.ConditionAntennaReady,
@@ -156,7 +156,7 @@ func (r *GroundStationLifecycleReconciler) Reconcile(ctx context.Context, req ct
 			}
 		}
 		ntnmetrics.GroundStationHealth.With(prometheus.Labels{
-			"station": stationKey, "condition": condType,
+			"namespace": gs.Namespace, "station": gs.Name, "condition": condType,
 		}).Set(val)
 	}
 

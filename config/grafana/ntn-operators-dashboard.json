@@ -86,7 +86,7 @@
       "targets": [
         {
           "expr": "ntn_operators_ground_station_health",
-          "legendFormat": "{{station}} / {{condition}}",
+          "legendFormat": "{{namespace}}/{{station}} / {{condition}}",
           "format": "table",
           "instant": true
         }
@@ -143,8 +143,8 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(ntn_operators_config_apply_errors_total[5m])) by (config, provider)",
-          "legendFormat": "{{config}} ({{provider}})"
+          "expr": "sum(rate(ntn_operators_config_apply_errors_total[5m])) by (namespace, config, provider)",
+          "legendFormat": "{{namespace}}/{{config}} ({{provider}})"
         }
       ]
     },

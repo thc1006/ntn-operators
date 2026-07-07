@@ -108,11 +108,14 @@ func (r *NTNSliceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	// Step 1: Get the NTNSlice resource.
 	ns := &ntnv1alpha1.NTNSlice{}
 	if err := r.Get(ctx, req.NamespacedName, ns); err != nil {
-		if apierrors.IsNotFound(err) && r.ReaderProvider != nil {
-			// The CR is gone — drop any cached reader so the Provider
-			// does not leak staleCache state for slices that no longer
-			// exist. Safe to call even if no entry was present.
-			r.ReaderProvider.Evict(req.NamespacedName)
+		if apierrors.IsNotFound(err) {
+			// The CR is gone — drop any cached reader AND release the per-CR
+			// ReaderStaleUsedTotal series so a deleted NTNSlice leaves no state
+			// behind. Evict via readerProvider() (the same accessor reads use),
+			// NOT the raw r.ReaderProvider field: with a nil ReaderProvider the
+			// lazy default provider still holds the cache/series, so guarding on
+			// the raw field leaked the stale series (#183). No-op if no entry.
+			r.readerProvider().Evict(req.NamespacedName)
 		}
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
