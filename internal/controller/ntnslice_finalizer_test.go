@@ -102,7 +102,7 @@ func TestSliceFinalizer_AddedOnLiveSlice(t *testing.T) {
 func TestSliceFinalizer_DeletionReleasesUnsharedSeries(t *testing.T) {
 	scheme := sliceScheme(t)
 	const ref, name = "eph-solo", "slice-solo"
-	ntnmetrics.SatellitePassAvailable.With(prometheus.Labels{"ephemeris": ref}).Set(1)
+	ntnmetrics.SatellitePassAvailable.With(prometheus.Labels{"namespace": "ns", "ephemeris": ref}).Set(1)
 	ntnmetrics.FailoverTotal.With(prometheus.Labels{"namespace": "ns", "slice": name, "from_path": "a", "to_path": "b"}).Inc()
 	gBefore := testutil.CollectAndCount(ntnmetrics.SatellitePassAvailable)
 	fBefore := testutil.CollectAndCount(ntnmetrics.FailoverTotal)
@@ -132,7 +132,7 @@ func TestSliceFinalizer_DeletionReleasesUnsharedSeries(t *testing.T) {
 func TestSliceFinalizer_DeletionKeepsSharedSeries(t *testing.T) {
 	scheme := sliceScheme(t)
 	const ref = "eph-shared"
-	ntnmetrics.SatellitePassAvailable.With(prometheus.Labels{"ephemeris": ref}).Set(1)
+	ntnmetrics.SatellitePassAvailable.With(prometheus.Labels{"namespace": "ns", "ephemeris": ref}).Set(1)
 	gBefore := testutil.CollectAndCount(ntnmetrics.SatellitePassAvailable)
 
 	sibling := sliceWithRef("slice-b", ref, true) // live, also references the shared ref
@@ -165,7 +165,7 @@ func TestEphemerisMetricReferenced(t *testing.T) {
 	r := &NTNSliceReconciler{Client: c}
 
 	// A live sibling references it.
-	ref, err := r.ephemerisMetricReferenced(context.Background(), "eph", self.UID)
+	ref, err := r.ephemerisMetricReferenced(context.Background(), "ns", "eph", self.UID)
 	if err != nil || !ref {
 		t.Fatalf("expected referenced=true (live sibling), got %v err=%v", ref, err)
 	}
@@ -173,7 +173,7 @@ func TestEphemerisMetricReferenced(t *testing.T) {
 	if err := c.Delete(context.Background(), live); err != nil {
 		t.Fatalf("delete live: %v", err)
 	}
-	ref, err = r.ephemerisMetricReferenced(context.Background(), "eph", self.UID)
+	ref, err = r.ephemerisMetricReferenced(context.Background(), "ns", "eph", self.UID)
 	if err != nil || ref {
 		t.Fatalf("expected referenced=false (only self + terminating), got %v err=%v", ref, err)
 	}

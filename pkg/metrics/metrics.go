@@ -35,13 +35,16 @@ var (
 		[]string{"namespace", "slice", "from_path", "to_path"},
 	)
 
-	// SatellitePassAvailable indicates whether a satellite pass window is active (1) or not (0).
+	// SatellitePassAvailable indicates whether a satellite pass window is active
+	// (1) or not (0). Keyed by namespace+ephemeris: the ephemeris ref is resolved
+	// within the NTNSlice's namespace, so the same ref name in two namespaces is
+	// two distinct ephemerides and must not share a series.
 	SatellitePassAvailable = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "ntn_operators_satellite_pass_available",
 			Help: "Whether a satellite pass window is currently active (1=yes, 0=no).",
 		},
-		[]string{"ephemeris"},
+		[]string{"namespace", "ephemeris"},
 	)
 
 	// GroundStationHealth reports ground station condition status (1=True, 0=False, -1=Unknown).

@@ -27,7 +27,7 @@ import (
 func TestMetricsRegistered(t *testing.T) {
 	// Trigger all metrics with dummy values so Gather returns them.
 	FailoverTotal.With(prometheus.Labels{"namespace": "_", "slice": "_", "from_path": "_", "to_path": "_"}).Add(0)
-	SatellitePassAvailable.With(prometheus.Labels{"ephemeris": "_"}).Set(0)
+	SatellitePassAvailable.With(prometheus.Labels{"namespace": "_", "ephemeris": "_"}).Set(0)
 	GroundStationHealth.With(prometheus.Labels{"station": "_", "condition": "_"}).Set(0)
 	ConfigApplyErrorsTotal.With(prometheus.Labels{"config": "_", "provider": "_"}).Add(0)
 	GPFetchDuration.With(prometheus.Labels{"source_type": "_", "status": "_"}).Observe(0)
