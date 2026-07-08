@@ -53,7 +53,7 @@ metadata:
     # against 100% of recent submissions (infinispan 2.5.7 / rabbitmq 1.19.1
     # / clickhouse 0.26.3 all carry this annotation).
     certified: "false"
-    containerImage: ghcr.io/thc1006/ntn-operators:v0.6.0-rc.1
+    containerImage: ghcr.io/thc1006/ntn-operators:v0.6.0
     repository: https://github.com/thc1006/ntn-operators
     # description: short tile text shown on operatorhub.io marketplace cards.
     # Hard limit is 135 chars per k8s-operatorhub/community-operators
@@ -63,7 +63,7 @@ metadata:
     # Bump on every version cut (approximate; set at release-prep time).
     createdAt: "2026-07-09T00:00:00Z"
     support: thc1006
-  name: ntn-operators.v0.6.0-rc.1
+  name: ntn-operators.v0.6.0
   namespace: placeholder
 spec:
   apiservicedefinitions: {}
@@ -150,7 +150,7 @@ spec:
               spec:
                 containers:
                   - name: manager
-                    image: ghcr.io/thc1006/ntn-operators:v0.6.0-rc.1
+                    image: ghcr.io/thc1006/ntn-operators:v0.6.0
                     args:
                       - --leader-elect
                       - --health-probe-bind-address=:8081
@@ -223,5 +223,5 @@ spec:
   # skipRange (not replaces): the OperatorHub community-operators semver-mode CI
   # rejects `replaces`/`skips`, so declare the upgrade edge via skipRange. This
   # range covers all prior published versions (v0.4.0 #8018, v0.5.0 #8299).
-  skipRange: "<0.6.0-rc.1"
-  version: 0.6.0-rc.1
+  skipRange: "<0.6.0"
+  version: 0.6.0
