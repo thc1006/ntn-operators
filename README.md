@@ -5,7 +5,7 @@
 
 Kubernetes-native management framework for Non-Terrestrial Networks (NTN). Declaratively manage satellite constellations, ground stations, NTN cell configurations, and terrestrial-satellite failover — all through standard Kubernetes CRDs.
 
-> **Latest release:** [v0.5.0](https://github.com/thc1006/ntn-operators/releases/tag/v0.5.0) — NTNCellConfig `cellSpecificKoffset` aligned to OCUDU's accepted range (1-1023), k8s.io 0.36 + controller-runtime 0.24.1, Go 1.26.3 toolchain (HIGH stdlib CVE fixes), and an OLM bundle-CRD drift gate. See [CHANGELOG.md](CHANGELOG.md) for the full delta.
+> **Latest release:** [v0.6.0](https://github.com/thc1006/ntn-operators/releases/tag/v0.6.0) — cluster-scope NTN orchestration foundation: gNB-parseable OCUDU config, runtime NTN push (OCUDU !798) with SGP4-propagated ECEF → SIB19, SatelliteEphemeris → multi-NTNCellConfig fan-out with off-cycle epoch freshness, namespace-consistent Prometheus metrics, and Go 1.26.4 (HIGH stdlib CVE fixes). See [CHANGELOG.md](CHANGELOG.md) for the full delta.
 
 ## Custom Resource Definitions
 
