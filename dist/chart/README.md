@@ -25,7 +25,7 @@ This chart installs four Custom Resource Definitions:
 |-----|------|---------|-------------|
 | `manager.replicas` | int | `1` | Number of controller manager replicas |
 | `manager.image.repository` | string | `ghcr.io/thc1006/ntn-operators` | Manager container image |
-| `manager.image.tag` | string | `v0.5.0` | Image tag |
+| `manager.image.tag` | string | `v0.6.0-rc.1` | Image tag |
 | `manager.image.pullPolicy` | string | `IfNotPresent` | Image pull policy |
 | `manager.args` | list | `[--leader-elect]` | Extra args passed to the manager binary |
 | `manager.env` | list | `[]` | Environment variables |

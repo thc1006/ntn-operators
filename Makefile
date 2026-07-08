@@ -59,7 +59,7 @@ vet: ## Run go vet against code.
 	go vet ./...
 
 IMAGE_TAG_BASE ?= ghcr.io/thc1006/ntn-operators
-VERSION ?= 0.5.0
+VERSION ?= 0.6.0-rc.1
 BUNDLE_IMG ?= $(IMAGE_TAG_BASE)-bundle:v$(VERSION)
 
 .PHONY: bundle
