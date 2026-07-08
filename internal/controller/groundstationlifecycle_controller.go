@@ -60,6 +60,10 @@ const (
 
 	// availableFirmwareAnnotation is the Node annotation for available firmware version.
 	availableFirmwareAnnotation = "ntn.operators.dev/available-firmware-version"
+
+	// reasonNodeNotFound is the condition Reason set on a GroundStationLifecycle's
+	// conditions when no Node matches its groundStationLabel selector.
+	reasonNodeNotFound = "NodeNotFound"
 )
 
 // ambiguousNodeError is returned when multiple Nodes match the same ground station label.
@@ -273,18 +277,18 @@ func (r *GroundStationLifecycleReconciler) reconcileHealth(
 		meta.SetStatusCondition(&gs.Status.Conditions, metav1.Condition{
 			Type:               ntnv1alpha1.ConditionK8sNodeReady,
 			Status:             metav1.ConditionFalse,
-			Reason:             "NodeNotFound",
+			Reason:             reasonNodeNotFound,
 			Message:            fmt.Sprintf("No node with label %s=%s found", groundStationLabel, groundStationLabelValue(gs.Namespace, gs.Name)),
 			ObservedGeneration: gs.Generation,
 		})
 		meta.SetStatusCondition(&gs.Status.Conditions, metav1.Condition{
 			Type: ntnv1alpha1.ConditionAntennaReady, Status: metav1.ConditionUnknown,
-			Reason: "NodeNotFound", Message: "Node not found, antenna status unknown",
+			Reason: reasonNodeNotFound, Message: "Node not found, antenna status unknown",
 			ObservedGeneration: gs.Generation,
 		})
 		meta.SetStatusCondition(&gs.Status.Conditions, metav1.Condition{
 			Type: ntnv1alpha1.ConditionRFLinkHealthy, Status: metav1.ConditionUnknown,
-			Reason: "NodeNotFound", Message: "Node not found, RF link status unknown",
+			Reason: reasonNodeNotFound, Message: "Node not found, RF link status unknown",
 			ObservedGeneration: gs.Generation,
 		})
 		if gs.Status.Phase == "" || gs.Status.Phase == ntnv1alpha1.PhaseProvisioning {

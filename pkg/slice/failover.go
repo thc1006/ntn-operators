@@ -36,6 +36,18 @@ const (
 	PathUnavailable PathType = "unavailable"
 )
 
+// Failover trigger metric names. Each satellite metric has a "terrestrial"
+// counterpart that resolves to the same Metrics field; both spellings are
+// accepted in trigger expressions (see ParseTrigger, Evaluate).
+const (
+	metricRSRP                  = "rsrp"
+	metricTerrestrialRSRP       = "terrestrialRSRP"
+	metricLatency               = "latency"
+	metricTerrestrialLatency    = "terrestrialLatency"
+	metricPacketLoss            = "packetLoss"
+	metricTerrestrialPacketLoss = "terrestrialPacketLoss"
+)
+
 // Decision represents the failover engine's recommendation.
 type Decision string
 
@@ -88,9 +100,9 @@ func ParseTrigger(s string) (Trigger, error) {
 				return Trigger{}, fmt.Errorf("empty metric in trigger %q", s)
 			}
 			validMetrics := map[string]bool{
-				"rsrp": true, "terrestrialRSRP": true,
-				"latency": true, "terrestrialLatency": true,
-				"packetLoss": true, "terrestrialPacketLoss": true,
+				metricRSRP: true, metricTerrestrialRSRP: true,
+				metricLatency: true, metricTerrestrialLatency: true,
+				metricPacketLoss: true, metricTerrestrialPacketLoss: true,
 			}
 			if !validMetrics[metric] {
 				return Trigger{}, fmt.Errorf("unknown metric %q in trigger %q", metric, s)
@@ -107,11 +119,11 @@ func ParseTrigger(s string) (Trigger, error) {
 func (t Trigger) EvaluateRecovery(m Metrics, margin float64) bool {
 	var actual float64
 	switch t.Metric {
-	case "rsrp", "terrestrialRSRP":
+	case metricRSRP, metricTerrestrialRSRP:
 		actual = m.RSRP
-	case "latency", "terrestrialLatency":
+	case metricLatency, metricTerrestrialLatency:
 		actual = m.LatencyMs
-	case "packetLoss", "terrestrialPacketLoss":
+	case metricPacketLoss, metricTerrestrialPacketLoss:
 		actual = m.PacketLossPercent
 	default:
 		return false // unknown metric — fail-safe, assume NOT recovered
@@ -137,11 +149,11 @@ func (t Trigger) EvaluateRecovery(m Metrics, margin float64) bool {
 func (t Trigger) Evaluate(m Metrics) bool {
 	var actual float64
 	switch t.Metric {
-	case "rsrp", "terrestrialRSRP":
+	case metricRSRP, metricTerrestrialRSRP:
 		actual = m.RSRP
-	case "latency", "terrestrialLatency":
+	case metricLatency, metricTerrestrialLatency:
 		actual = m.LatencyMs
-	case "packetLoss", "terrestrialPacketLoss":
+	case metricPacketLoss, metricTerrestrialPacketLoss:
 		actual = m.PacketLossPercent
 	default:
 		return false

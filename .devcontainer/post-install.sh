@@ -50,7 +50,7 @@ echo "------------------------------------"
 # Install kind
 if ! command -v kind &> /dev/null; then
   echo "Installing kind..."
-  curl -fLo /usr/local/bin/kind "https://kind.sigs.k8s.io/dl/v0.27.0/kind-linux-${ARCH}"
+  curl -fLo /usr/local/bin/kind "https://kind.sigs.k8s.io/dl/v0.32.0/kind-linux-${ARCH}"
   chmod +x /usr/local/bin/kind
   echo "kind installed successfully"
 fi
@@ -67,7 +67,7 @@ fi
 # Install kubebuilder
 if ! command -v kubebuilder &> /dev/null; then
   echo "Installing kubebuilder..."
-  curl -fLo /usr/local/bin/kubebuilder "https://go.kubebuilder.io/dl/v4.6.0/linux/${ARCH}"
+  curl -fLo /usr/local/bin/kubebuilder "https://go.kubebuilder.io/dl/v4.15.0/linux/${ARCH}"
   chmod +x /usr/local/bin/kubebuilder
   echo "kubebuilder installed successfully"
 fi
@@ -84,7 +84,7 @@ fi
 # Install kubectl
 if ! command -v kubectl &> /dev/null; then
   echo "Installing kubectl..."
-  KUBECTL_VERSION="v1.32.3"
+  KUBECTL_VERSION="v1.36.2"
   curl -fLo /usr/local/bin/kubectl "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${ARCH}/kubectl"
   chmod +x /usr/local/bin/kubectl
   echo "kubectl installed successfully"
