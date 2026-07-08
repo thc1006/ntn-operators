@@ -218,7 +218,7 @@ jobs:
 
       - name: Install Helm
         env:
-          HELM_VERSION: v3.17.4
+          HELM_VERSION: v3.21.2
         run: |
           set -euo pipefail
           TMPDIR="$(mktemp -d)"

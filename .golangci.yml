@@ -35,6 +35,21 @@ linters:
     modernize:
       disable:
         - omitzero
+    goconst:
+      # Test files use repeated literal strings as explicit fixture data
+      # (metric names, label values, sample inputs); inlining them is
+      # clearer than indirection through shared constants.
+      ignore-tests: true
+      # "namespace"/"ephemeris" are Prometheus metric label keys, written inline
+      # both at the metric declarations (pkg/metrics) and at every .With()/
+      # DeletePartialMatch call site (internal/controller). Extracting only the
+      # frequently-repeated keys would be inconsistent with the single-use
+      # sibling keys inline beside them (slice, station, config, provider,
+      # condition, from_path, to_path, name). goconst v2.12's composite-literal
+      # walking flags them; anchored regexes suppress only these exact values.
+      ignore-string-values:
+        - '^namespace$'
+        - '^ephemeris$'
   exclusions:
     generated: lax
     rules:

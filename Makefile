@@ -223,7 +223,7 @@ undeploy: kustomize ## Undeploy controller from the K8s cluster specified in ~/.
 # kpt binary path — prefer PATH. `make nephio-install-tools` installs into
 # $(go env GOPATH)/bin; ensure that directory is on your PATH.
 KPT ?= kpt
-KPT_VERSION ?= v1.0.0-beta.62
+KPT_VERSION ?= v1.0.0-beta.65
 NEPHIO_PKGS := nephio/packages/ntn-operators-crds nephio/packages/ntn-workloads-sample
 
 .PHONY: nephio-install-tools
@@ -295,7 +295,7 @@ GOLANGCI_LINT = $(LOCALBIN)/golangci-lint
 
 ## Tool Versions
 KUSTOMIZE_VERSION ?= v5.8.1
-CONTROLLER_TOOLS_VERSION ?= v0.20.1
+CONTROLLER_TOOLS_VERSION ?= v0.21.0
 
 #ENVTEST_VERSION is the version of controller-runtime release branch to fetch the envtest setup script (i.e. release-0.20)
 ENVTEST_VERSION ?= $(shell v='$(call gomodver,sigs.k8s.io/controller-runtime)'; \
@@ -307,7 +307,7 @@ ENVTEST_K8S_VERSION ?= $(shell v='$(call gomodver,k8s.io/api)'; \
   [ -n "$$v" ] || { echo "Set ENVTEST_K8S_VERSION manually (k8s.io/api replace has no tag)" >&2; exit 1; }; \
   printf '%s\n' "$$v" | sed -E 's/^v?[0-9]+\.([0-9]+).*/1.\1/')
 
-GOLANGCI_LINT_VERSION ?= v2.11.4
+GOLANGCI_LINT_VERSION ?= v2.12.2
 .PHONY: kustomize
 kustomize: $(KUSTOMIZE) ## Download kustomize locally if necessary.
 $(KUSTOMIZE): $(LOCALBIN)
@@ -396,7 +396,7 @@ HELM_CHART_DIR ?= dist/chart
 ## Additional arguments to pass to helm commands
 HELM_EXTRA_ARGS ?=
 
-HELM_VERSION ?= v3.17.4
+HELM_VERSION ?= v3.21.2
 .PHONY: install-helm
 install-helm: $(LOCALBIN) ## Install Helm (pinned version).
 	@{ command -v "$(HELM)" > /dev/null 2>&1 && "$(HELM)" version --short 2>/dev/null | grep -q "$(HELM_VERSION)"; } || { \

@@ -1,6 +1,6 @@
 # Synthetic Prometheus exporter for NTNSlice E2E tests.
 # Build locally with: docker build -t test-metrics-exporter:latest -f cmd/test-metrics-exporter/Dockerfile .
-FROM golang:1.26.3-alpine AS build
+FROM golang:1.26.5-alpine AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
