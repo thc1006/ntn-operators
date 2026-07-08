@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -31,7 +32,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	ntnv1alpha1 "github.com/thc1006/ntn-operators/api/v1alpha1"
+	"github.com/thc1006/ntn-operators/pkg/ephemeris"
 	ntnmetrics "github.com/thc1006/ntn-operators/pkg/metrics"
+	"github.com/thc1006/ntn-operators/pkg/provider"
 )
 
 // Reconciling a deleted (NotFound) CR must release its per-CR metric series so
@@ -203,6 +206,10 @@ func TestNTNCellConfigFinalizer_DeletedDoesNotWipeOtherNamespace(t *testing.T) {
 	const name = "cell-config-1"
 	deleted := prometheus.Labels{"namespace": "team-a", "config": name, "provider": "ocudu"}
 	survivor := prometheus.Labels{"namespace": "team-b", "config": name, "provider": "ocudu"}
+	// Counters accumulate; the survivor is never released by the reconcile under
+	// test, so start from a clean slate to keep the absolute asserts -count-safe.
+	ntnmetrics.ConfigApplyErrorsTotal.DeletePartialMatch(deleted)
+	ntnmetrics.ConfigApplyErrorsTotal.DeletePartialMatch(survivor)
 	ntnmetrics.ConfigApplyErrorsTotal.With(deleted).Add(3)
 	ntnmetrics.ConfigApplyErrorsTotal.With(survivor).Add(2)
 
@@ -256,5 +263,125 @@ func TestNTNSliceReconcile_DeletedReleasesStaleSeriesWithNilProvider(t *testing.
 
 	if got := testutil.ToFloat64(ntnmetrics.ReaderStaleUsedTotal.With(labels)); got != 0 {
 		t.Errorf("stale series not released on delete with nil ReaderProvider: got %v, want 0", got)
+	}
+}
+
+// TestNTNCellConfigReconcile_ApplyErrorWritesThenDeleteReleasesLiveSeries guards
+// the ConfigApplyErrorsTotal write/delete key CONSISTENCY end-to-end. A real
+// apply-error reconcile writes the {namespace,config,provider} series; a real
+// finalizer-deletion reconcile must release it. The finalizer test above only
+// SEEDS the series (delete-side), so a write-key regression (e.g. reintroducing
+// a composite `config`) would slip past it — this drives BOTH keys through real
+// code, mirroring the GroundStation live guard.
+func TestNTNCellConfigReconcile_ApplyErrorWritesThenDeleteReleasesLiveSeries(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := ntnv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme: %v", err)
+	}
+	const ns, name = "team-live-cae", "cell-live-cae"
+	cc := &ntnv1alpha1.NTNCellConfig{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+		Spec: ntnv1alpha1.NTNCellConfigSpec{
+			Provider: ntnv1alpha1.ProviderRef{Type: "ocudu", Namespace: ns},
+			NTN: ntnv1alpha1.NTNParams{
+				CellSpecificKoffset: 150,
+				EphemerisECEF:       &ntnv1alpha1.EphemerisECEF{PosX: 20922195, PosY: 1967783, PosZ: 19770302},
+				PayloadType:         "transparent",
+			},
+		},
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(cc).WithStatusSubresource(cc).Build()
+	r := &NTNCellConfigReconciler{
+		Client:    c,
+		Scheme:    scheme,
+		Recorder:  events.NewFakeRecorder(10),
+		Providers: map[string]provider.NTNProvider{"ocudu": &provider.MockProvider{ApplyErr: errors.New("connection refused")}},
+	}
+	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: name, Namespace: ns}}
+	labels := prometheus.Labels{"namespace": ns, "config": name, "provider": "ocudu"}
+	base := testutil.CollectAndCount(ntnmetrics.ConfigApplyErrorsTotal)
+
+	// Reconcile 1 adds the finalizer + requeues; reconcile 2 applies → error → Inc.
+	if _, err := r.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("reconcile 1 (finalizer): %v", err)
+	}
+	if _, err := r.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("reconcile 2 (apply): %v", err)
+	}
+	if got := testutil.ToFloat64(ntnmetrics.ConfigApplyErrorsTotal.With(labels)); got < 1 {
+		t.Fatalf("apply-error write did not increment the {namespace,config,provider} series: got %v", got)
+	}
+	if afterWrite := testutil.CollectAndCount(ntnmetrics.ConfigApplyErrorsTotal); afterWrite != base+1 {
+		t.Fatalf("apply-error write did not emit exactly one series: base=%d afterWrite=%d", base, afterWrite)
+	}
+
+	// Delete → the finalizer-deletion reconcile must release the SAME series.
+	if err := c.Delete(context.Background(), cc); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if _, err := r.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("reconcile 3 (finalizer cleanup): %v", err)
+	}
+	if afterDelete := testutil.CollectAndCount(ntnmetrics.ConfigApplyErrorsTotal); afterDelete != base {
+		t.Errorf("live series leaked (write/delete key drift): base=%d afterDelete=%d", base, afterDelete)
+	}
+}
+
+// TestSatelliteEphemerisReconcile_FetchWritesThenDeleteReleasesLiveSeries guards
+// the GPSatelliteCount write/delete key consistency end-to-end (from #180/#184):
+// a real GP-fetch reconcile writes the {namespace,ephemeris} series and a real
+// NotFound reconcile must release it. The cleanup tests above only SEED the
+// series, so this closes the write-key regression surface for the last per-CR
+// metric that lacked a live round-trip guard.
+func TestSatelliteEphemerisReconcile_FetchWritesThenDeleteReleasesLiveSeries(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := ntnv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme: %v", err)
+	}
+	const ns, name = "team-live-gpsc", "eph-live-gpsc"
+	eph := &ntnv1alpha1.SatelliteEphemeris{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+		Spec: ntnv1alpha1.SatelliteEphemerisSpec{
+			Source: ntnv1alpha1.EphemerisSource{
+				Type:            "CelesTrak",
+				URL:             "https://celestrak.org/test",
+				RefreshInterval: metav1.Duration{Duration: 4 * time.Hour},
+			},
+		},
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(eph).WithStatusSubresource(eph).Build()
+	r := &SatelliteEphemerisReconciler{
+		Client:   c,
+		Scheme:   scheme,
+		Recorder: events.NewFakeRecorder(10),
+		Fetcher: &mockGPFetcher{result: ephemeris.GPFetchResult{
+			SatelliteCount: 620,
+			FetchedAt:      time.Date(2026, 4, 17, 12, 0, 0, 0, time.UTC),
+		}},
+	}
+	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: name, Namespace: ns}}
+	labels := prometheus.Labels{"namespace": ns, "ephemeris": name}
+	base := testutil.CollectAndCount(ntnmetrics.GPSatelliteCount)
+
+	// Live reconcile fetches GP data → Sets GPSatelliteCount{namespace,ephemeris}.
+	if _, err := r.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("fetch reconcile: %v", err)
+	}
+	if got := testutil.ToFloat64(ntnmetrics.GPSatelliteCount.With(labels)); got != 620 {
+		t.Fatalf("fetch write did not set the {namespace,ephemeris} series to 620: got %v", got)
+	}
+	if afterWrite := testutil.CollectAndCount(ntnmetrics.GPSatelliteCount); afterWrite != base+1 {
+		t.Fatalf("fetch write did not emit exactly one series: base=%d afterWrite=%d", base, afterWrite)
+	}
+
+	// Delete → the NotFound reconcile must release the SAME series.
+	if err := c.Delete(context.Background(), eph); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if _, err := r.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("notfound reconcile: %v", err)
+	}
+	if afterDelete := testutil.CollectAndCount(ntnmetrics.GPSatelliteCount); afterDelete != base {
+		t.Errorf("live series leaked (write/delete key drift): base=%d afterDelete=%d", base, afterDelete)
 	}
 }
