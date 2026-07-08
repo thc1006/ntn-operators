@@ -1,6 +1,6 @@
 module github.com/thc1006/ntn-operators
 
-go 1.26.3
+go 1.26.4
 
 require (
 	github.com/akhenakh/sgp4 v1.0.1
