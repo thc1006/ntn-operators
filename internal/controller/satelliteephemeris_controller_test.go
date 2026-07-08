@@ -52,6 +52,13 @@ func (m *mockGPFetcher) Fetch(_ context.Context, _ string) (ephemeris.GPFetchRes
 	return m.result, m.err
 }
 
+// callCount returns how many times Fetch was invoked (race-safe).
+func (m *mockGPFetcher) callCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.calls
+}
+
 // testISSOMM creates an ISS OMM with epoch set to now for deterministic tests.
 func testISSOMM() sgp4.OMM {
 	return sgp4.OMM{
@@ -195,7 +202,7 @@ var _ = Describe("SatelliteEphemeris Controller", func() {
 				NamespacedName: typeNamespacedName,
 			})
 			Expect(err).NotTo(HaveOccurred())
-			Expect(result.RequeueAfter).To(Equal(4 * time.Hour))
+			Expect(result.RequeueAfter).To(Equal(propagationRefreshInterval))
 
 			updated := &ntnv1alpha1.SatelliteEphemeris{}
 			Expect(k8sClient.Get(context.Background(), typeNamespacedName, updated)).To(Succeed())
@@ -237,7 +244,7 @@ var _ = Describe("SatelliteEphemeris Controller", func() {
 				NamespacedName: typeNamespacedName,
 			})
 			Expect(err).NotTo(HaveOccurred())
-			Expect(result.RequeueAfter).To(Equal(4 * time.Hour))
+			Expect(result.RequeueAfter).To(Equal(propagationRefreshInterval))
 
 			updated := &ntnv1alpha1.SatelliteEphemeris{}
 			Expect(k8sClient.Get(context.Background(), typeNamespacedName, updated)).To(Succeed())
@@ -263,6 +270,8 @@ var _ = Describe("SatelliteEphemeris Controller", func() {
 				NamespacedName: typeNamespacedName,
 			})
 			Expect(err).NotTo(HaveOccurred())
+			// Rate-limit backoff is unchanged by #179: error paths still requeue at
+			// the (clamped) GP-refresh interval, not the short propagation cadence.
 			Expect(result.RequeueAfter).To(Equal(4 * time.Hour))
 
 			updated := &ntnv1alpha1.SatelliteEphemeris{}
@@ -358,7 +367,11 @@ var _ = Describe("SatelliteEphemeris Controller", func() {
 		})
 		AfterEach(func() { deleteResource() })
 
-		It("should clamp requeue interval to 2 hours", func() {
+		It("requeues on the short propagation cadence even when refreshInterval is below minimum", func() {
+			// The 2h clamp still gates the GP fetch (effectiveInterval), but since
+			// #179 the requeue is the short propagation cadence, not the fetch
+			// interval. The clamp's effect on fetch cadence is covered by the
+			// "re-propagating between GP refreshes" context below.
 			mock := &mockGPFetcher{
 				result: ephemeris.GPFetchResult{SatelliteCount: 100, FetchedAt: time.Now()},
 			}
@@ -368,7 +381,74 @@ var _ = Describe("SatelliteEphemeris Controller", func() {
 				NamespacedName: typeNamespacedName,
 			})
 			Expect(err).NotTo(HaveOccurred())
-			Expect(result.RequeueAfter).To(Equal(2 * time.Hour))
+			Expect(result.RequeueAfter).To(Equal(propagationRefreshInterval))
+		})
+	})
+
+	Context("When re-propagating between GP refreshes (#179)", func() {
+		BeforeEach(func() { createResource() })
+		AfterEach(func() { deleteResource() })
+
+		It("reuses cached OMMs without a second GP fetch within the refresh window", func() {
+			mock := &mockGPFetcher{result: ephemeris.GPFetchResult{
+				SatelliteCount: 1,
+				OMMs:           []sgp4.OMM{testISSOMM()},
+				FetchedAt:      time.Now(),
+			}}
+			// One reconciler instance so its ommCache persists across reconciles.
+			reconciler := newReconciler(mock)
+			req := reconcile.Request{NamespacedName: typeNamespacedName}
+
+			// 1st reconcile: cold cache → exactly one real GP fetch, short requeue.
+			r1, err := reconciler.Reconcile(context.Background(), req)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(mock.callCount()).To(Equal(1))
+			Expect(r1.RequeueAfter).To(Equal(propagationRefreshInterval))
+
+			// 2nd reconcile immediately (well within the 4h refresh window): it MUST
+			// re-propagate from cache with NO second GP-source request (#179 accept).
+			r2, err := reconciler.Reconcile(context.Background(), req)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(mock.callCount()).To(Equal(1)) // still 1 — the rate-limit guarantee
+			Expect(r2.RequeueAfter).To(Equal(propagationRefreshInterval))
+
+			// The runtime-push epoch is refreshed on the cached re-propagation and
+			// stays in the future, so an off-cycle consumer finds a fresh epoch.
+			updated := &ntnv1alpha1.SatelliteEphemeris{}
+			Expect(k8sClient.Get(context.Background(), typeNamespacedName, updated)).To(Succeed())
+			Expect(updated.Status.PropagatedStates).NotTo(BeEmpty())
+			Expect(updated.Status.PropagatedStates[0].EpochUnixMs).To(BeNumerically(">", time.Now().UnixMilli()))
+
+			// The cache-reuse path is reflected honestly in the condition reason.
+			cond := meta.FindStatusCondition(updated.Status.Conditions, ntnv1alpha1.ConditionGPDataFetched)
+			Expect(cond).NotTo(BeNil())
+			Expect(cond.Reason).To(Equal("CachedRepropagation"))
+		})
+
+		It("re-fetches after a spec change instead of serving stale cached OMMs", func() {
+			mock := &mockGPFetcher{result: ephemeris.GPFetchResult{
+				SatelliteCount: 1,
+				OMMs:           []sgp4.OMM{testISSOMM()},
+				FetchedAt:      time.Now(),
+			}}
+			reconciler := newReconciler(mock)
+			req := reconcile.Request{NamespacedName: typeNamespacedName}
+
+			_, err := reconciler.Reconcile(context.Background(), req)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(mock.callCount()).To(Equal(1))
+
+			// Edit the spec (bumps metadata.generation): change the source URL.
+			cur := &ntnv1alpha1.SatelliteEphemeris{}
+			Expect(k8sClient.Get(context.Background(), typeNamespacedName, cur)).To(Succeed())
+			cur.Spec.Source.URL = "https://celestrak.org/NORAD/elements/gp.php?GROUP=starlink&FORMAT=JSON"
+			Expect(k8sClient.Update(context.Background(), cur)).To(Succeed())
+
+			// The generation bump must invalidate the cache → a real fetch of the
+			// new source, not a stale reuse of the old one (#179 regression guard).
+			_, err = reconciler.Reconcile(context.Background(), req)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(mock.callCount()).To(Equal(2))
 		})
 	})
 
@@ -530,7 +610,7 @@ var _ = Describe("SatelliteEphemeris Controller", func() {
 				NamespacedName: typeNamespacedName,
 			})
 			Expect(err).NotTo(HaveOccurred())
-			Expect(result.RequeueAfter).To(Equal(4 * time.Hour))
+			Expect(result.RequeueAfter).To(Equal(propagationRefreshInterval))
 
 			updated := &ntnv1alpha1.SatelliteEphemeris{}
 			Expect(k8sClient.Get(context.Background(), typeNamespacedName, updated)).To(Succeed())
@@ -574,7 +654,7 @@ var _ = Describe("SatelliteEphemeris Controller", func() {
 				NamespacedName: typeNamespacedName,
 			})
 			Expect(err).NotTo(HaveOccurred())
-			Expect(result.RequeueAfter).To(Equal(4 * time.Hour))
+			Expect(result.RequeueAfter).To(Equal(propagationRefreshInterval))
 
 			updated := &ntnv1alpha1.SatelliteEphemeris{}
 			Expect(k8sClient.Get(context.Background(), typeNamespacedName, updated)).To(Succeed())

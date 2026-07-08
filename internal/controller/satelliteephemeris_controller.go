@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"sync"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -54,6 +55,13 @@ type SatelliteEphemerisReconciler struct {
 	MaxConcurrentReconciles int
 	Fetcher                 ephemeris.GPFetcher          // CelesTrak fetcher
 	SpaceTrackFetcher       *ephemeris.SpaceTrackFetcher // SpaceTrack fetcher (nil = disabled)
+
+	// ommCache holds the last real GP-fetch result per SatelliteEphemeris so the
+	// orbit can be re-propagated on a short cadence WITHOUT re-contacting the GP
+	// source (rate-limit etiquette; #179). Keyed by client.ObjectKey, evicted on
+	// CR deletion. In-memory only — a cold cache (e.g. after a restart) just forces
+	// one fetch on the next reconcile.
+	ommCache sync.Map
 }
 
 // +kubebuilder:rbac:groups=ntn.operators.dev,resources=satelliteephemeris,verbs=get;list;watch;create;update;patch;delete
@@ -77,8 +85,10 @@ func (r *SatelliteEphemerisReconciler) Reconcile(ctx context.Context, req ctrl.R
 	if err := r.Get(ctx, req.NamespacedName, eph); err != nil {
 		if apierrors.IsNotFound(err) {
 			// CR deleted — release its per-CR metric series so /metrics does not
-			// accumulate dead series across create/delete churn.
+			// accumulate dead series across create/delete churn, and drop its
+			// cached OMMs so the in-memory cache does not leak (#179).
 			ntnmetrics.GPSatelliteCount.DeletePartialMatch(prometheus.Labels{"namespace": req.Namespace, "ephemeris": req.Name})
+			r.ommCache.Delete(req.NamespacedName)
 		}
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
@@ -110,18 +120,37 @@ func (r *SatelliteEphemerisReconciler) Reconcile(ctx context.Context, req ctrl.R
 		return ctrl.Result{RequeueAfter: time.Minute}, nil
 	}
 
-	// Step 4b: Fetch GP data (with duration metric).
-	fetchStart := time.Now()
-	result, fetchErr := fetcher.Fetch(ctx, eph.Spec.Source.URL)
-	fetchStatus := "success"
-	if fetchErr != nil {
-		fetchStatus = "error"
-	}
-	ntnmetrics.GPFetchDuration.With(prometheus.Labels{"source_type": eph.Spec.Source.Type, "status": fetchStatus}).Observe(time.Since(fetchStart).Seconds())
+	// Step 4b: Obtain OMM data. Within the GP-refresh window, re-propagate from the
+	// cached OMMs of the last real fetch WITHOUT contacting the GP source — this is
+	// what keeps the runtime-push epoch fresh on a short cadence without re-hitting
+	// CelesTrak/SpaceTrack (their rate-limit etiquette is why the fetch is floored
+	// to effectiveInterval). Only fetch when the window has elapsed or the cache is
+	// cold (e.g. the first reconcile after a restart). (#179)
+	now := time.Now()
+	var result ephemeris.GPFetchResult
+	reusedCache := false
+	if c, ok := r.cachedOMMResult(req.NamespacedName); ok &&
+		c.generation == eph.Generation && c.uid == eph.UID &&
+		now.Sub(c.result.FetchedAt) < effectiveInterval {
+		result = c.result
+		reusedCache = true
+		log.V(1).Info("re-propagating from cached OMMs; GP source not contacted",
+			"cacheAge", now.Sub(c.result.FetchedAt).String(), "refreshInterval", effectiveInterval.String())
+	} else {
+		fetchStart := time.Now()
+		var fetchErr error
+		result, fetchErr = fetcher.Fetch(ctx, eph.Spec.Source.URL)
+		fetchStatus := "success"
+		if fetchErr != nil {
+			fetchStatus = "error"
+		}
+		ntnmetrics.GPFetchDuration.With(prometheus.Labels{"source_type": eph.Spec.Source.Type, "status": fetchStatus}).Observe(time.Since(fetchStart).Seconds())
 
-	// Step 5: Handle fetch errors.
-	if fetchErr != nil {
-		return r.handleFetchError(ctx, eph, fetchErr, effectiveInterval)
+		// Step 5: Handle fetch errors.
+		if fetchErr != nil {
+			return r.handleFetchError(ctx, eph, fetchErr, effectiveInterval)
+		}
+		r.ommCache.Store(req.NamespacedName, cachedFetch{result: result, generation: eph.Generation, uid: eph.UID})
 	}
 
 	// Step 6: Update status with new data.
@@ -140,7 +169,24 @@ func (r *SatelliteEphemerisReconciler) Reconcile(ctx context.Context, req ctrl.R
 	eph.Status.LastUpdated = &metav1.Time{Time: result.FetchedAt}
 	ntnmetrics.GPSatelliteCount.With(prometheus.Labels{"namespace": eph.Namespace, "ephemeris": eph.Name}).Set(float64(result.SatelliteCount))
 
-	if result.NotModified {
+	switch {
+	case reusedCache:
+		log.V(1).Info("GP data re-propagated from cache (no fetch)", "satelliteCount", result.SatelliteCount)
+		meta.SetStatusCondition(&eph.Status.Conditions, metav1.Condition{
+			Type:               ntnv1alpha1.ConditionGPDataFetched,
+			Status:             metav1.ConditionTrue,
+			Reason:             "CachedRepropagation",
+			Message:            fmt.Sprintf("Re-propagated %d satellites from cached OMMs; GP source not contacted within the refresh window", result.SatelliteCount),
+			ObservedGeneration: eph.Generation,
+		})
+		meta.SetStatusCondition(&eph.Status.Conditions, metav1.Condition{
+			Type:               ntnv1alpha1.ConditionGPDataParsed,
+			Status:             metav1.ConditionTrue,
+			Reason:             "CachedOMMs",
+			Message:            "Using cached OMM data from previous fetch",
+			ObservedGeneration: eph.Generation,
+		})
+	case result.NotModified:
 		log.Info("GP data unchanged (304 Not Modified)", "satelliteCount", result.SatelliteCount)
 		meta.SetStatusCondition(&eph.Status.Conditions, metav1.Condition{
 			Type:               ntnv1alpha1.ConditionGPDataFetched,
@@ -156,7 +202,7 @@ func (r *SatelliteEphemerisReconciler) Reconcile(ctx context.Context, req ctrl.R
 			Message:            "Using cached OMM data from previous fetch",
 			ObservedGeneration: eph.Generation,
 		})
-	} else {
+	default:
 		log.Info("Fetched GP data successfully", "satelliteCount", result.SatelliteCount)
 		meta.SetStatusCondition(&eph.Status.Conditions, metav1.Condition{
 			Type:               ntnv1alpha1.ConditionGPDataFetched,
@@ -206,17 +252,22 @@ func (r *SatelliteEphemerisReconciler) Reconcile(ctx context.Context, req ctrl.R
 	// an earlier version did) made OCUDU back-propagate hours from a position that
 	// was itself SGP4-propagated hours forward, compounding LEO error; a near-now
 	// epoch keeps OCUDU's internal propagation short and forward.
-	r.propagateStates(ctx, eph, result, time.Now().Add(propagationEpochLead))
+	r.propagateStates(ctx, eph, result, now.Add(propagationEpochLead))
 
 	if err := r.Status().Update(ctx, eph); err != nil {
 		return ctrl.Result{}, err
 	}
 
-	if r.Recorder != nil {
+	// Only emit the "fetched" event on a real fetch, not on the short-cadence
+	// cache re-propagations — otherwise they would flood the event stream (#179).
+	if r.Recorder != nil && !reusedCache {
 		r.Recorder.Eventf(eph, nil, "Normal", "GPDataFetched", "GPDataFetched", "Fetched %d satellites", result.SatelliteCount)
 	}
 
-	return ctrl.Result{RequeueAfter: effectiveInterval}, nil
+	// Requeue on the short propagation cadence (not the GP-refresh interval) so the
+	// runtime-push epoch stays fresh for off-cycle consumers; the fetch itself
+	// stays gated to effectiveInterval by the cache check above (#179).
+	return ctrl.Result{RequeueAfter: min(effectiveInterval, propagationRefreshInterval)}, nil
 }
 
 // maxPropagatedStates caps how many per-satellite propagated states are stored
@@ -230,6 +281,36 @@ const maxPropagatedStates = 128
 // LEO). The push happens on the watch-triggered reconcile right after this
 // propagation, so the epoch is fresh at push time.
 const propagationEpochLead = 5 * time.Minute
+
+// propagationRefreshInterval is how often the orbit is re-propagated (from cached
+// OMMs, WITHOUT a GP fetch) to keep the runtime-push epoch fresh between GP
+// refreshes (#179). It must be shorter than propagationEpochLead minus the
+// consumer's epochSkewMargin (10s) + delivery latency, so an off-cycle consumer
+// reconcile always finds a future epoch. The producer requeues at this cadence;
+// each re-propagation updates status.propagatedStates, which fans out (via the
+// NTNCellConfig watch) a fresh push to every referencing cell.
+const propagationRefreshInterval = 3 * time.Minute
+
+// cachedFetch is a per-CR OMM cache entry. generation+uid pin it to the exact
+// spec revision of the exact object: a spec/source edit (generation bump) or a
+// delete-recreate reusing the same name (uid change) invalidates the entry and
+// forces a fresh fetch, so an edited source.URL/type/credentials takes effect
+// immediately rather than after the refresh window (#179 regression guard).
+type cachedFetch struct {
+	result     ephemeris.GPFetchResult
+	generation int64
+	uid        types.UID
+}
+
+// cachedOMMResult returns the cached fetch for key, if any.
+func (r *SatelliteEphemerisReconciler) cachedOMMResult(key client.ObjectKey) (cachedFetch, bool) {
+	v, ok := r.ommCache.Load(key)
+	if !ok {
+		return cachedFetch{}, false
+	}
+	c, ok := v.(cachedFetch)
+	return c, ok
+}
 
 // maxSatelliteNameLen bounds the externally-sourced OMM ObjectName stored per
 // propagated state, so a malformed GP feed cannot bloat the status object.
