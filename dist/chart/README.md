@@ -5,7 +5,7 @@ Kubernetes Operators for Non-Terrestrial Network (NTN) management — satellite 
 ## Quick Start
 
 ```bash
-helm install ntn-operators oci://ghcr.io/thc1006/ntn-operators/charts/ntn-operators
+helm install ntn-operators oci://ghcr.io/thc1006/ntn-operators
 ```
 
 ## CRDs
@@ -87,5 +87,5 @@ networkPolicy:
 When upgrading, CRDs are updated automatically if `crd.enable: true`. To prevent CRD deletion on uninstall, keep `crd.keep: true` (default).
 
 ```bash
-helm upgrade ntn-operators oci://ghcr.io/thc1006/ntn-operators/charts/ntn-operators
+helm upgrade ntn-operators oci://ghcr.io/thc1006/ntn-operators
 ```
