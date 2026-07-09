@@ -184,6 +184,11 @@ const (
 	// rather than propagated into a wrong position; MEO/GEO support is a v1.1
 	// roadmap item. False means every tracked element set is near-earth.
 	ConditionUnsupportedOrbitRegime = "UnsupportedOrbitRegime"
+	// ConditionEphemerisEpochStale is True when one or more propagated element
+	// sets have an epoch older than the freshness bound, so the pushed ECEF is
+	// derived from stale elements and drifting (SGP4 in-track error grows with
+	// age from the element epoch). False means all propagated epochs are fresh.
+	ConditionEphemerisEpochStale = "EphemerisEpochStale"
 )
 
 // +kubebuilder:object:root=true

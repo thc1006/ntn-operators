@@ -52,6 +52,13 @@ import (
 
 const minRefreshInterval = 2 * time.Hour
 
+// maxRefreshInterval bounds how stale a fetched element set may become: GP data
+// is re-fetched at least this often, so SGP4 propagation never runs on an element
+// set older than roughly this age (LEO in-track error grows ~1–3 km/day from the
+// element epoch). CelesTrak/SpaceTrack publish updates well within a day, so a
+// daily floor on freshness costs nothing (findings.md I-17).
+const maxRefreshInterval = 24 * time.Hour
+
 // SatelliteEphemerisReconciler reconciles a SatelliteEphemeris object
 type SatelliteEphemerisReconciler struct {
 	client.Client
@@ -100,14 +107,27 @@ func (r *SatelliteEphemerisReconciler) Reconcile(ctx context.Context, req ctrl.R
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	// Step 2: Enforce minimum refresh interval.
+	// Step 2: Clamp the refresh interval into [minRefreshInterval, maxRefreshInterval].
+	// The floor honours the GP source's rate-limit etiquette; the ceiling bounds how
+	// stale the element set may get — an unbounded refreshInterval (e.g. 720h) would
+	// re-propagate a 30-day-old element set as if fresh, and LEO SGP4 error grows
+	// ~1–3 km/day from the element epoch (findings.md I-17). metav1.Duration
+	// serialises as a string, so both bounds are enforced here rather than via CEL.
 	effectiveInterval := eph.Spec.Source.RefreshInterval.Duration
-	if effectiveInterval < minRefreshInterval {
-		log.Info("RefreshInterval below minimum, clamping to 2h", "configured", effectiveInterval, "effective", minRefreshInterval)
+	switch {
+	case effectiveInterval < minRefreshInterval:
+		log.Info("RefreshInterval below minimum, clamping", "configured", effectiveInterval, "effective", minRefreshInterval)
 		effectiveInterval = minRefreshInterval
 		if r.Recorder != nil {
 			r.Recorder.Eventf(eph, nil, "Warning", "RefreshIntervalClamped", "RefreshIntervalClamped",
 				"refreshInterval %s is below minimum 2h; using 2h", eph.Spec.Source.RefreshInterval.Duration)
+		}
+	case effectiveInterval > maxRefreshInterval:
+		log.Info("RefreshInterval above maximum, clamping", "configured", effectiveInterval, "effective", maxRefreshInterval)
+		effectiveInterval = maxRefreshInterval
+		if r.Recorder != nil {
+			r.Recorder.Eventf(eph, nil, "Warning", "RefreshIntervalClamped", "RefreshIntervalClamped",
+				"refreshInterval %s exceeds maximum 24h; using 24h to keep the element set fresh", eph.Spec.Source.RefreshInterval.Duration)
 		}
 	}
 
@@ -366,6 +386,45 @@ func (r *SatelliteEphemerisReconciler) cachedOMMResult(key client.ObjectKey) (ca
 // propagated state, so a malformed GP feed cannot bloat the status object.
 const maxSatelliteNameLen = 64
 
+// maxEpochAge bounds how old a fetched element set's OWN epoch may be before its
+// SGP4 propagation is flagged unreliable (findings.md I-17). Independent of the
+// refresh cadence — a source can serve elements whose epoch is already stale. ~7
+// days keeps LEO in-track error to at most a few km.
+const maxEpochAge = 7 * 24 * time.Hour
+
+// parseOMMEpoch parses an OMM element-set epoch (ISO-8601, with or without a
+// fractional second or trailing Z), returning ok=false when unparseable.
+func parseOMMEpoch(s string) (time.Time, bool) {
+	for _, layout := range []string{"2006-01-02T15:04:05.000000", "2006-01-02T15:04:05", time.RFC3339Nano, time.RFC3339} {
+		if t, err := time.Parse(layout, s); err == nil {
+			return t.UTC(), true
+		}
+	}
+	return time.Time{}, false
+}
+
+// reportEphemerisEpochStale sets the EphemerisEpochStale condition: True when one
+// or more propagated satellites' element-set epoch is older than maxEpochAge, so
+// the pushed ECEF is derived from stale elements and drifting (I-17). Condition-
+// only (no event) — the durable signal for alerting; the 3-minute re-propagation
+// cadence would make an event noisy.
+func (r *SatelliteEphemerisReconciler) reportEphemerisEpochStale(eph *ntnv1alpha1.SatelliteEphemeris, stale, total int) {
+	c := metav1.Condition{
+		Type:               ntnv1alpha1.ConditionEphemerisEpochStale,
+		Status:             metav1.ConditionFalse,
+		Reason:             "EpochsFresh",
+		Message:            "All propagated element sets are within the freshness bound",
+		ObservedGeneration: eph.Generation,
+	}
+	if stale > 0 {
+		c.Status = metav1.ConditionTrue
+		c.Reason = "EpochStale"
+		c.Message = fmt.Sprintf("%d of %d tracked element set(s) have an epoch older than %s; the pushed ECEF is derived from stale elements and is drifting",
+			stale, total, maxEpochAge)
+	}
+	meta.SetStatusCondition(&eph.Status.Conditions, c)
+}
+
 // propagateStates propagates the tracked satellites' orbits (SGP4) to the given
 // future epoch and records the ECEF state vectors in status.propagatedStates for
 // downstream runtime ephemeris push (#176). The set is filtered by
@@ -390,6 +449,17 @@ func (r *SatelliteEphemerisReconciler) propagateStates(
 			"hint", "set spec.satellites.noradIDs to the satellites pushed at runtime")
 	}
 	epochMs := epoch.UnixMilli()
+
+	// I-17: count tracked element sets whose OWN epoch is stale — a data property
+	// independent of whether SGP4 propagation then succeeds.
+	now := epoch.Add(-propagationEpochLead) // epoch is now+lead; recover ~now
+	staleEpochs := 0
+	for i := range omms {
+		if t, ok := parseOMMEpoch(omms[i].EpochStr); ok && now.Sub(t) > maxEpochAge {
+			staleEpochs++
+		}
+	}
+
 	states := make([]ntnv1alpha1.PropagatedState, 0, len(omms))
 	for i := range omms {
 		if len(states) >= maxPropagatedStates {
@@ -413,6 +483,7 @@ func (r *SatelliteEphemerisReconciler) propagateStates(
 		})
 	}
 	eph.Status.PropagatedStates = states
+	r.reportEphemerisEpochStale(eph, staleEpochs, len(omms))
 }
 
 // reportOrbitRegime records the UnsupportedOrbitRegime condition and RETURNS the
