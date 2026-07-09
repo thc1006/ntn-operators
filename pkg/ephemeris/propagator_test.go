@@ -41,8 +41,8 @@ func parseEpoch(t *testing.T, s string) time.Time {
 const (
 	specPositionStep = 1.3
 	specVelocityStep = 0.06
-	specECEFPosMax   = 67108863
-	specECEFPosMin   = -67108864
+	specECEFPosMax   = 33554431  // 3GPP TS 38.331 positionX-r17 max: 2^25 - 1
+	specECEFPosMin   = -33554432 // 3GPP TS 38.331 positionX-r17 min: -2^25
 )
 
 // posMagnitudeKm computes the ECEF position vector magnitude in km.
@@ -107,8 +107,10 @@ func TestPropagateToECEF_GoldenVector(t *testing.T) {
 		t.Fatalf("PropagateToECEF failed: %v", err)
 	}
 
-	// Reference values generated from this implementation at epoch.
-	// If these change, the TEME→ECEF rotation or quantization has regressed.
+	// These ECEF values are self-generated: this test is a change detector for the
+	// TEME→ECEF rotation direction and 3GPP quantization. The underlying SGP4
+	// propagation is independently verified against Vallado's SGP4-VER reference in
+	// TestPropagateSGP4_ValladoReference (findings.md I-16).
 	want := struct{ PosX, PosY, PosZ, VelX, VelY, VelZ int }{
 		PosX: -2088154, PosY: 5544785, PosZ: -5042,
 		VelX: 4706, VelY: 1603, VelZ: 119837,
@@ -215,5 +217,72 @@ func TestPropagateToECEF_NonZeroResult(t *testing.T) {
 
 	if ecef.PosX == 0 && ecef.PosY == 0 && ecef.PosZ == 0 {
 		t.Error("all position fields are zero — propagation likely failed")
+	}
+}
+
+// valladoRefPoint is one TEME state-vector sample from Vallado's SGP4-VER reference
+// output (tsince in minutes; position km; velocity km/s).
+type valladoRefPoint struct{ tsince, x, y, z, vx, vy, vz float64 }
+
+// TestPropagateSGP4_ValladoReference verifies the SGP4 propagation that PropagateToECEF
+// relies on against Vallado's SGP4-VER suite (AIAA 2006-6753, "Revisiting Spacetrack
+// Report #3") — reference TEME position/velocity from the published tcppver.out. Unlike
+// TestPropagateToECEF_GoldenVector (self-generated ECEF), these vectors come from an
+// EXTERNAL authority, so a numerically-wrong-but-stable propagation regression can no
+// longer pass CI (findings.md I-16). NORAD 5 is the canonical TEME example; NORAD 88888
+// is the original Spacetrack Report #3 object. Both are near-earth (period < 225 min).
+//
+// Observed agreement of the bundled akhenakh/sgp4 propagator with these vectors is
+// ~1e-8 km / ~1e-9 km/s; the tolerances are deliberately loose to stay robust across
+// platforms while still catching any real (km-scale) regression.
+func TestPropagateSGP4_ValladoReference(t *testing.T) {
+	cases := []struct {
+		name   string
+		l1, l2 string
+		pts    []valladoRefPoint
+	}{
+		{
+			name: "NORAD 5 (TEME example)",
+			l1:   "1 00005U 58002B   00179.78495062  .00000023  00000-0  28098-4 0  4753",
+			l2:   "2 00005  34.2682 348.7242 1859667 331.7664  19.3264 10.82419157413667",
+			pts: []valladoRefPoint{
+				{0.0, 7022.46529266, -1400.08296755, 0.03995155, 1.893841015, 6.405893759, 4.534807250},
+				{360.0, -7154.03120202, -3783.17682504, -3536.19412294, 4.741887409, -4.151817765, -2.093935425},
+				{720.0, -7134.59340119, 6531.68641334, 3260.27186483, -4.113793027, -2.911922039, -2.557327851},
+				{1440.0, -938.55923943, -6268.18748831, -4294.02924751, 7.536105209, -0.427127707, 0.989878080},
+			},
+		},
+		{
+			name: "NORAD 88888 (Spacetrack Report #3)",
+			l1:   "1 88888U          80275.98708465  .00073094  13844-3  66816-4 0    87",
+			l2:   "2 88888  72.8435 115.9689 0086731  52.6988 110.5714 16.05824518  1058",
+			pts: []valladoRefPoint{
+				{0.0, 2328.96975262, -5995.22051338, 1719.97297192, 2.912073281, -0.983417956, -7.090816210},
+				{120.0, 1020.69234558, 2286.56260634, -6191.55565927, -3.746543902, 6.467532721, 1.827985678},
+				{240.0, -3226.54349155, 3503.70977525, 4532.80979343, 1.000992116, -5.788042888, 5.162585826},
+				{360.0, 2456.10706533, -6071.93855503, 1222.89768554, 2.679390040, -0.448290811, -7.228792155},
+			},
+		},
+	}
+	const posTol, velTol = 1e-4, 1e-6 // km, km/s
+
+	mag := func(a, b, c float64) float64 { return math.Sqrt(a*a + b*b + c*c) }
+	for _, c := range cases {
+		tle, err := sgp4.ParseTLELines([]string{c.l1, c.l2})
+		if err != nil {
+			t.Fatalf("%s: ParseTLELines: %v", c.name, err)
+		}
+		for _, p := range c.pts {
+			eci, err := tle.FindPosition(p.tsince)
+			if err != nil {
+				t.Fatalf("%s @ %.0f min: FindPosition: %v", c.name, p.tsince, err)
+			}
+			if dp := mag(eci.Position.X-p.x, eci.Position.Y-p.y, eci.Position.Z-p.z); dp > posTol {
+				t.Errorf("%s @ %.0f min: TEME position off by %.3e km (tol %.0e)", c.name, p.tsince, dp, posTol)
+			}
+			if dv := mag(eci.Velocity.X-p.vx, eci.Velocity.Y-p.vy, eci.Velocity.Z-p.vz); dv > velTol {
+				t.Errorf("%s @ %.0f min: TEME velocity off by %.3e km/s (tol %.0e)", c.name, p.tsince, dv, velTol)
+			}
+		}
 	}
 }
