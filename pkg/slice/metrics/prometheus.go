@@ -108,14 +108,20 @@ func (r *prometheusReader) Read(ctx context.Context, ns *ntnv1alpha1.NTNSlice) (
 		return Result{}, fmt.Errorf("prometheusReader: %w", err)
 	}
 
+	// Start with every field marked missing (I-10): a field is only "present"
+	// once a configured query returns a real value. An empty query leaves the
+	// placeholder AND the Missing flag, so a trigger over it is surfaced as inert
+	// rather than silently evaluated against the healthy default.
 	m := defaultMetrics
+	m.RSRPMissing, m.LatencyMissing, m.PacketLossMissing = true, true, true
 	fields := []struct {
-		query string
-		set   func(float64)
+		query   string
+		set     func(float64)
+		present func()
 	}{
-		{r.queries.RsrpDbm, func(v float64) { m.RSRP = v }},
-		{r.queries.LatencyMs, func(v float64) { m.LatencyMs = v }},
-		{r.queries.PacketLossPercent, func(v float64) { m.PacketLossPercent = v }},
+		{r.queries.RsrpDbm, func(v float64) { m.RSRP = v }, func() { m.RSRPMissing = false }},
+		{r.queries.LatencyMs, func(v float64) { m.LatencyMs = v }, func() { m.LatencyMissing = false }},
+		{r.queries.PacketLossPercent, func(v float64) { m.PacketLossPercent = v }, func() { m.PacketLossMissing = false }},
 	}
 	for _, f := range fields {
 		if f.query == "" {
@@ -131,6 +137,7 @@ func (r *prometheusReader) Read(ctx context.Context, ns *ntnv1alpha1.NTNSlice) (
 			return Result{}, err
 		}
 		f.set(v)
+		f.present() // real value obtained → the field is present (I-10)
 	}
 	return Result{Metrics: m}, nil
 }

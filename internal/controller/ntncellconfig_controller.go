@@ -29,6 +29,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	ctrlrt "sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
@@ -140,6 +141,7 @@ func ephemerisPushShouldRequeue(reason string) bool {
 // +kubebuilder:rbac:groups=ntn.operators.dev,resources=satelliteephemeris,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
+// +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
 
 // Reconcile applies NTN cell configuration to the specified provider backend.
 func (r *NTNCellConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -572,7 +574,13 @@ func ephemerisPushMarker(eph *ntnv1alpha1.SatelliteEphemeris) string {
 // when a referenced ephemeris is updated.
 func (r *NTNCellConfigReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&ntnv1alpha1.NTNCellConfig{}).
+		// reconcileTriggerPredicate (predicates.go) filters status-only self-writes
+		// but passes spec changes AND deletionTimestamp transitions — the latter is
+		// load-bearing here: the configmap-cleanup finalizer must run on delete even
+		// for a cell sitting on a no-requeue terminal path (e.g. a dangling
+		// ephemerisRef → EphemerisRefNotFound). The SatelliteEphemeris Watches below
+		// keep no predicate.
+		For(&ntnv1alpha1.NTNCellConfig{}, builder.WithPredicates(reconcileTriggerPredicate())).
 		Watches(&ntnv1alpha1.SatelliteEphemeris{},
 			handler.EnqueueRequestsFromMapFunc(r.ephemerisToNTNCellConfig),
 		).

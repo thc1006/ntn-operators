@@ -35,6 +35,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	ctrlrt "sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
@@ -92,6 +93,7 @@ type GroundStationLifecycleReconciler struct {
 // +kubebuilder:rbac:groups=ntn.operators.dev,resources=groundstationlifecycles/finalizers,verbs=update
 // +kubebuilder:rbac:groups="",resources=nodes,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
+// +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
 
 // Reconcile checks ground station health, manages firmware OTA, and records phase transitions.
 func (r *GroundStationLifecycleReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -585,7 +587,11 @@ func isNodeConditionTrue(node *corev1.Node, condType corev1.NodeConditionType) b
 // edge node's status changes.
 func (r *GroundStationLifecycleReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&ntnv1alpha1.GroundStationLifecycle{}).
+		// reconcileTriggerPredicate (predicates.go) stops the unconditional
+		// LastHealthCheck status write from re-enqueueing the controller every time
+		// a probe crosses a wall second, while still passing spec changes and
+		// deletions. The Node Watches below keep no predicate.
+		For(&ntnv1alpha1.GroundStationLifecycle{}, builder.WithPredicates(reconcileTriggerPredicate())).
 		Watches(&corev1.Node{},
 			handler.EnqueueRequestsFromMapFunc(r.nodeToGroundStation),
 		).

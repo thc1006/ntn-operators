@@ -61,7 +61,7 @@ graph TB
 
 **Failover engine**: NTNSlice evaluates trigger conditions (RSRP, latency, packet loss) and manages terrestrial-satellite path switching with configurable switchback delay. QoS, security, and billing parameters are tracked per active path.
 
-**Validation**: CEL `XValidation` rules cover most constraints at admission (lat/lon range, path priority consistency, MetricsSource shape, ECEF non-zero, credentials when SpaceTrack). When the optional validating webhook is enabled (`webhooks.enable=true` in the Helm chart; off by default), it additionally enforces cross-field rules CEL cannot express — notably `FailoverPolicy.triggers` syntax. With the webhook disabled, invalid trigger syntax is caught at runtime by the failover engine instead.
+**Validation**: CEL `XValidation` rules enforce all constraints at admission — lat/lon range, path priority consistency, MetricsSource shape, ECEF non-zero, credentials when SpaceTrack, and `FailoverPolicy.triggers` syntax. This ships in every install channel (kubectl, Helm, OLM) with no admission webhook and no cert-manager dependency, so malformed input is rejected at create/update time; the failover engine re-validates triggers at runtime as defense in depth.
 
 ## Quick Start
 

@@ -161,13 +161,23 @@ type SatellitePathSpec struct {
 }
 
 // FailoverPolicy defines the conditions for path switching.
+// The trigger-syntax rule below rejects malformed triggers at admission (in every
+// install channel, with no webhook/cert), so a typo cannot be silently skipped at
+// runtime (findings.md B-2/I-11). It mirrors pkg/slice.ParseTrigger; the regex is
+// intentionally a touch stricter for a few exotic value/whitespace forms (hex
+// floats, trailing-dot/underscore numbers, non-ASCII spaces) never used for
+// thresholds — the divergence test in pkg/slice enumerates them. maxItems=10
+// + maxLength keep the CEL cost within budget.
+// +kubebuilder:validation:XValidation:rule="self.triggers.all(t, t.matches('^ *(rsrp|latency|packetLoss|terrestrialRSRP|terrestrialLatency|terrestrialPacketLoss) *(<=|>=|<|>) *[-+]?([0-9]+([.][0-9]+)?|[.][0-9]+)([eE][-+]?[0-9]+)? *$'))",message="each failoverPolicy.trigger must be 'metric op value' where metric is one of rsrp/latency/packetLoss/terrestrialRSRP/terrestrialLatency/terrestrialPacketLoss, op is one of < <= > >=, and value is a finite number (e.g. 'rsrp < -120')"
 type FailoverPolicy struct {
 	// triggers defines conditions that initiate failover (OR logic).
 	// Format: "metric operator value" (e.g., "rsrp < -120").
-	// Validated at runtime by the failover engine (pkg/slice.ParseTrigger).
+	// Validated at admission by the XValidation rule on this type and at runtime by
+	// the failover engine (pkg/slice.ParseTrigger).
 	// Order is intentionally not significant; set merge semantics are desired.
 	// +kubebuilder:validation:MinItems=1
 	// +kubebuilder:validation:MaxItems=10
+	// +kubebuilder:validation:items:MaxLength=64
 	// +listType=set
 	Triggers []string `json:"triggers"`
 
@@ -288,6 +298,14 @@ const (
 	// Pairing the condition with an event emitted only on transition
 	// keeps the event stream quiet during long outages.
 	ConditionMetricsStale = "MetricsStale"
+
+	// ConditionTriggersReady is False when one or more failoverPolicy.triggers
+	// reference a metric that has no configured source (no Prometheus query, no
+	// annotation), so the trigger is armed-but-dead: it can never fire against
+	// the healthy placeholder (findings.md I-10). True when every trigger's
+	// metric is sourced. It surfaces a silent misconfiguration an operator would
+	// otherwise only discover when a failover that should have happened did not.
+	ConditionTriggersReady = "TriggersReady"
 )
 
 // +kubebuilder:object:root=true

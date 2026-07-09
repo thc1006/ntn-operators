@@ -364,3 +364,47 @@ func TestProviderPushRuntimeUpdate_Success(t *testing.T) {
 		t.Errorf("server did not receive converted physical values: %s", captured())
 	}
 }
+
+// TestProviderPushRuntimeUpdate_GNBRejectionIsPermanent verifies that a gNB
+// rejection ({"error": ...}) is classified as a permanent ErrRuntimePushRejected,
+// so the reconciler gives up rather than tight-requeueing a config the gNB will
+// never accept. This is the "give-up" path the audit (findings.md B-8) flagged as
+// untested — provider.go:264-265 wrapping a non-retryable wsError.
+func TestProviderPushRuntimeUpdate_GNBRejectionIsPermanent(t *testing.T) {
+	endpoint, _ := wsTestServer(t, `{"error":"invalid ntn config"}`)
+	p := &Provider{}
+	err := p.PushRuntimeUpdate(
+		context.Background(), provider.ResolvedRemoteControl{Endpoint: endpoint}, ecefRuntimeUpdate(),
+	)
+	if !errors.Is(err, provider.ErrRuntimePushRejected) {
+		t.Fatalf("gNB rejection must be permanent (ErrRuntimePushRejected), got %v", err)
+	}
+}
+
+// TestProviderPushRuntimeUpdate_UnreachableIsRetryable verifies the other side of
+// the classification: an unreachable endpoint must stay retryable (NOT
+// ErrRuntimePushRejected), so a transient gNB/network blip is requeued rather than
+// abandoned. A plain-HTTP server that never completes the WebSocket handshake
+// forces the dial to fail → wsUnreachable.
+func TestProviderPushRuntimeUpdate_UnreachableIsRetryable(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "not a websocket endpoint", http.StatusBadGateway)
+	}))
+	defer srv.Close()
+	endpoint := strings.TrimPrefix(srv.URL, "http://")
+
+	p := &Provider{}
+	err := p.PushRuntimeUpdate(
+		context.Background(), provider.ResolvedRemoteControl{Endpoint: endpoint}, ecefRuntimeUpdate(),
+	)
+	if err == nil {
+		t.Fatal("expected an error for an unreachable endpoint")
+	}
+	if errors.Is(err, provider.ErrRuntimePushRejected) {
+		t.Fatalf("an unreachable endpoint must be retryable, not permanent: %v", err)
+	}
+	var we *wsError
+	if !errors.As(err, &we) || !we.retryable() {
+		t.Fatalf("expected a retryable wsError (wsUnreachable), got %v", err)
+	}
+}

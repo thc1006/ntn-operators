@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"math"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -32,6 +33,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	ctrlrt "sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -50,6 +52,13 @@ import (
 
 const sliceRequeueInterval = 30 * time.Second
 
+// metricsMaxStaleness is how old a cached path-quality metric may be before the
+// failover engine stops trusting it for a switch decision. Beyond this bound the
+// reconcile fails static — it holds the current path (the orbital pass-window
+// signal is still honored) rather than act on possibly-hours-old telemetry
+// (findings.md B-4). Sized as a small multiple of a typical Prometheus scrape.
+const metricsMaxStaleness = 90 * time.Second
+
 // Reason labels for the FailoverReady=Unknown path. Matched on by
 // kubectl describe and dashboard filters, so keep them stable.
 const (
@@ -57,6 +66,16 @@ const (
 	reasonMetricsUnavailable = "MetricsUnavailable"
 	reasonEndpointNotAllowed = "EndpointNotAllowed"
 )
+
+// metricsReaderProvider is the subset of *slicemetrics.Provider the reconciler
+// needs. Extracted as an interface so tests can inject a reader that returns a
+// controlled Result (e.g. a value stale beyond the freshness bound) without a
+// live Prometheus or the staleCache's own clock. *slicemetrics.Provider satisfies
+// it, so production wiring is unchanged.
+type metricsReaderProvider interface {
+	For(ns *ntnv1alpha1.NTNSlice) (slicemetrics.Reader, error)
+	Evict(key client.ObjectKey)
+}
 
 // NTNSliceReconciler reconciles a NTNSlice object
 type NTNSliceReconciler struct {
@@ -71,21 +90,26 @@ type NTNSliceReconciler struct {
 	// Provider on first use so existing development tests that construct
 	// the reconciler directly continue to work without rebuilding pool +
 	// provider on every Reconcile call.
-	ReaderProvider *slicemetrics.Provider
+	ReaderProvider metricsReaderProvider
 
 	defaultProviderOnce sync.Once
-	defaultProvider     *slicemetrics.Provider
+	defaultProvider     metricsReaderProvider
 }
 
 // readerProvider returns the configured Provider, or a lazily-initialised
 // default one so the reconciler never churns a fresh pool per Reconcile.
 // Safe for concurrent callers via sync.Once.
-func (r *NTNSliceReconciler) readerProvider() *slicemetrics.Provider {
+func (r *NTNSliceReconciler) readerProvider() metricsReaderProvider {
 	if r.ReaderProvider != nil {
 		return r.ReaderProvider
 	}
 	r.defaultProviderOnce.Do(func() {
-		r.defaultProvider = slicemetrics.NewProvider(slicemetrics.NewClientPool())
+		// Lazy/test default. Wire the SSRF-safe dialer even here (strict: an
+		// empty allowlist blocks every private/reserved IP) so a reconciler
+		// built without an explicit ReaderProvider is not a silent SSRF hole.
+		// Production wires the flag-configured allowlist via cmd/main.go (I-24).
+		r.defaultProvider = slicemetrics.NewProvider(
+			slicemetrics.NewClientPool(slicemetrics.WithSafeClient(netutil.EndpointAllowlist{})))
 	})
 	return r.defaultProvider
 }
@@ -95,6 +119,7 @@ func (r *NTNSliceReconciler) readerProvider() *slicemetrics.Provider {
 // +kubebuilder:rbac:groups=ntn.operators.dev,resources=ntnslices/finalizers,verbs=update
 // +kubebuilder:rbac:groups=ntn.operators.dev,resources=satelliteephemeris,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
+// +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
 
 // Reconcile evaluates failover policy and manages path switching.
 func (r *NTNSliceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -128,128 +153,126 @@ func (r *NTNSliceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 
 	now := r.now()
 
-	// Step 2: Read path quality metrics via the configured source.
-	reader, err := r.readerProvider().For(ns)
-	if err != nil {
-		// Distinguish admin-configured endpoint rejection from other
-		// build errors so kubectl describe surfaces a specific reason
-		// rather than a generic MetricsReaderError.
-		reason := reasonMetricsReaderError
-		if errors.Is(err, netutil.ErrEndpointNotAllowed) {
-			reason = reasonEndpointNotAllowed
-		}
-		log.Error(err, "failed to build metrics reader", "reason", reason)
-		return r.setMetricsUnknown(ctx, ns, reason, err.Error())
-	}
-	readResult, err := reader.Read(ctx, ns)
-	if err != nil {
-		reason := reasonMetricsUnavailable
-		if !errors.Is(err, slicemetrics.ErrNoMetrics) {
-			reason = reasonMetricsReaderError
-		}
-		log.Info("metrics unavailable; holding current path", "reason", reason, "err", err.Error())
-		return r.setMetricsUnknown(ctx, ns, reason, err.Error())
-	}
-	metrics := readResult.Metrics
-	// Track stale-ness as a Condition and emit an Event only on the
-	// transition into stale. A prolonged outage therefore produces one
-	// event, not one per reconcile interval, while dashboards and
-	// admission tooling can still observe the current state via the
-	// MetricsStale condition directly.
-	prevStale := meta.FindStatusCondition(ns.Status.Conditions, ntnv1alpha1.ConditionMetricsStale)
-	if readResult.Stale {
-		log.Info("metrics source returned stale value", "lastFreshAt", readResult.LastFreshAt)
-		meta.SetStatusCondition(&ns.Status.Conditions, metav1.Condition{
-			Type:               ntnv1alpha1.ConditionMetricsStale,
-			Status:             metav1.ConditionTrue,
-			Reason:             "StaleValue",
-			Message:            fmt.Sprintf("Using stale metrics last observed at %s", readResult.LastFreshAt.Format(time.RFC3339)),
-			ObservedGeneration: ns.Generation,
-		})
-		transitioned := prevStale == nil || prevStale.Status != metav1.ConditionTrue
-		if r.Recorder != nil && transitioned {
-			r.Recorder.Eventf(ns, nil, "Warning", "MetricsStale", "MetricsStale",
-				"Using stale metrics last observed at %s", readResult.LastFreshAt.Format(time.RFC3339))
-		}
-	} else {
-		meta.SetStatusCondition(&ns.Status.Conditions, metav1.Condition{
-			Type:               ntnv1alpha1.ConditionMetricsStale,
-			Status:             metav1.ConditionFalse,
-			Reason:             "FreshValue",
-			Message:            "Metrics source returned a fresh observation",
-			ObservedGeneration: ns.Generation,
-		})
-	}
-	log.V(2).Info("metrics read", "rsrp", metrics.RSRP, "latencyMs", metrics.LatencyMs, "packetLossPercent", metrics.PacketLossPercent, "stale", readResult.Stale)
+	// Step 2: Read path-quality metrics and determine whether they are reliable
+	// enough to drive a switch. Unreliable metrics fail static in Step 4 (the engine
+	// is replaced by EvaluateSafeHold, which holds the current path but still honors
+	// the orbital signal from Step 3) — findings.md B-4 / I-8. readPathQuality never
+	// early-returns on a metrics failure, so Step 3's orbital check always runs.
+	metrics, qualityReliable := r.readPathQuality(ctx, ns, now)
 
-	// Step 3: Check satellite availability via SatelliteEphemeris.
-	satelliteAvailable := r.checkSatelliteAvailability(ctx, ns, now)
-	log.V(1).Info("satellite availability", "available", satelliteAvailable, "ephemerisRef", ns.Spec.SatellitePath.EphemerisRef)
+	// Step 3: Check satellite availability via SatelliteEphemeris. satelliteKnown is
+	// false on a transient ephemeris read error — availability is unknown and the
+	// current path is held rather than switched off satellite (I-13).
+	satelliteAvailable, satelliteKnown := r.checkSatelliteAvailability(ctx, ns, now)
+	log.V(1).Info("satellite availability", "available", satelliteAvailable, "known", satelliteKnown,
+		"ephemerisRef", ns.Spec.SatellitePath.EphemerisRef)
 
-	// Set FailoverReady condition based on satellite availability.
-	failoverReadyStatus := metav1.ConditionTrue
-	failoverReadyReason := "SatelliteAvailable"
-	failoverReadyMsg := "Satellite pass window active"
-	if !satelliteAvailable {
-		failoverReadyStatus = metav1.ConditionFalse
-		failoverReadyReason = "SatelliteUnavailable"
-		failoverReadyMsg = "No satellite pass window active or SatelliteEphemeris not found"
+	// FailoverReady tracks whether quality-driven failover can operate. When metrics
+	// are reliable it reflects satellite availability; when they are not,
+	// setMetricsDegraded already set it Unknown (with the metrics-failure reason), so
+	// we must not overwrite it here.
+	if qualityReliable {
+		var c metav1.Condition
+		switch {
+		case !satelliteKnown:
+			// Transient ephemeris read failure: cannot determine the failover target.
+			c = metav1.Condition{Status: metav1.ConditionUnknown, Reason: "SatelliteReadFailed",
+				Message: "Satellite availability unknown: transient SatelliteEphemeris read error; holding current path"}
+		case satelliteAvailable:
+			c = metav1.Condition{Status: metav1.ConditionTrue, Reason: "SatelliteAvailable",
+				Message: "Satellite pass window active"}
+		default:
+			c = metav1.Condition{Status: metav1.ConditionFalse, Reason: "SatelliteUnavailable",
+				Message: "No satellite pass window active or SatelliteEphemeris not found"}
+		}
+		c.Type = ntnv1alpha1.ConditionFailoverReady
+		c.ObservedGeneration = ns.Generation
+		meta.SetStatusCondition(&ns.Status.Conditions, c)
+
+		// I-10: surface any trigger whose metric has no configured source — it is
+		// armed-but-dead (never fires against the healthy placeholder). Only
+		// meaningful once metrics were actually read (qualityReliable).
+		r.reportInertTriggers(ns, slice.InertTriggers(ns.Spec.FailoverPolicy.Triggers, metrics))
 	}
-	meta.SetStatusCondition(&ns.Status.Conditions, metav1.Condition{
-		Type:               ntnv1alpha1.ConditionFailoverReady,
-		Status:             failoverReadyStatus,
-		Reason:             failoverReadyReason,
-		Message:            failoverReadyMsg,
-		ObservedGeneration: ns.Generation,
-	})
 
-	// Step 4: Evaluate failover decision.
+	// Step 4: Evaluate the failover decision. With reliable metrics the full
+	// hysteresis engine runs; when metrics are unreliable we fail static via
+	// EvaluateSafeHold — it holds the current path but still switches off a satellite
+	// whose pass has ended (satelliteAvailable from Step 3).
 	currentPath := slice.PathType(ns.Status.ActivePathType)
 	if currentPath == "" {
 		currentPath = slice.PathTerrestrial // default
 	}
 
-	var lastFailover time.Time
-	if ns.Status.LastFailover != nil {
-		lastFailover = ns.Status.LastFailover.Time
-	}
-
-	// Parse hysteresis margin from spec (string → float64, default 0).
-	var hysteresisMargin float64
-	if ns.Spec.FailoverPolicy.HysteresisMargin != "" {
-		if v, err := strconv.ParseFloat(ns.Spec.FailoverPolicy.HysteresisMargin, 64); err != nil {
-			log.Error(err, "invalid failoverPolicy.hysteresisMargin; defaulting to 0",
-				"hysteresisMargin", ns.Spec.FailoverPolicy.HysteresisMargin)
-		} else if math.IsNaN(v) || math.IsInf(v, 0) || v < 0 {
-			log.Info("non-finite or negative failoverPolicy.hysteresisMargin; defaulting to 0",
-				"hysteresisMargin", ns.Spec.FailoverPolicy.HysteresisMargin)
-		} else {
-			hysteresisMargin = v
+	var result slice.FailoverResult
+	switch {
+	case !satelliteKnown:
+		// I-13: satellite availability is unknown (transient ephemeris read error).
+		// Hold the current path — never switch OFF satellite on an unread pass
+		// window, and never fail OVER to a satellite we cannot confirm is overhead.
+		// This mirrors the metrics fail-static contract; the next reconcile re-reads
+		// the ephemeris and resumes normal evaluation.
+		result = slice.FailoverResult{
+			Decision:   slice.DecisionStay,
+			TargetPath: currentPath,
+			Reason:     "SatelliteAvailabilityUnknown",
 		}
-	}
+		log.Info("satellite availability unknown; holding current path",
+			"path", currentPath, "reason", result.Reason)
+	case qualityReliable:
+		var lastFailover time.Time
+		if ns.Status.LastFailover != nil {
+			lastFailover = ns.Status.LastFailover.Time
+		}
 
-	result := slice.EvaluateFailoverWithHysteresis(
-		ctx,
-		currentPath,
-		ns.Spec.FailoverPolicy.Triggers,
-		metrics,
-		satelliteAvailable,
-		ns.Spec.FailoverPolicy.SwitchbackDelay.Duration,
-		lastFailover,
-		now,
-		hysteresisMargin,
-	)
+		// Parse hysteresis margin from spec (string → float64, default 0).
+		var hysteresisMargin float64
+		if ns.Spec.FailoverPolicy.HysteresisMargin != "" {
+			if v, err := strconv.ParseFloat(ns.Spec.FailoverPolicy.HysteresisMargin, 64); err != nil {
+				log.Error(err, "invalid failoverPolicy.hysteresisMargin; defaulting to 0",
+					"hysteresisMargin", ns.Spec.FailoverPolicy.HysteresisMargin)
+			} else if math.IsNaN(v) || math.IsInf(v, 0) || v < 0 {
+				log.Info("non-finite or negative failoverPolicy.hysteresisMargin; defaulting to 0",
+					"hysteresisMargin", ns.Spec.FailoverPolicy.HysteresisMargin)
+			} else {
+				hysteresisMargin = v
+			}
+		}
+
+		result = slice.EvaluateFailoverWithHysteresis(
+			ctx,
+			currentPath,
+			ns.Spec.FailoverPolicy.Triggers,
+			metrics,
+			satelliteAvailable,
+			ns.Spec.FailoverPolicy.SwitchbackDelay.Duration,
+			lastFailover,
+			now,
+			hysteresisMargin,
+		)
+	default:
+		// Metrics unreliable but satellite availability known: fail static —
+		// EvaluateSafeHold holds the current path yet still honors the orbital
+		// signal (a genuine end-of-pass switches off satellite; I-8).
+		result = slice.EvaluateSafeHold(currentPath, satelliteAvailable)
+		log.Info("metrics unreliable; failing static",
+			"decision", result.Decision, "targetPath", result.TargetPath, "reason", result.Reason)
+	}
 
 	// Step 5: Apply decision.
 	previousPath := string(currentPath)
 	ns.Status.ActivePathType = string(result.TargetPath)
 
-	// Update satellite availability metric (keyed by namespace+ephemeris).
-	passLabels := prometheus.Labels{"namespace": ns.Namespace, "ephemeris": ns.Spec.SatellitePath.EphemerisRef}
-	if satelliteAvailable {
-		ntnmetrics.SatellitePassAvailable.With(passLabels).Set(1)
-	} else {
-		ntnmetrics.SatellitePassAvailable.With(passLabels).Set(0)
+	// Update satellite availability metric (keyed by namespace+ephemeris). Only
+	// write it when availability is KNOWN — on a transient read error (unknown)
+	// leave the gauge at its last value rather than reporting a misleading 0 (I-13).
+	if satelliteKnown {
+		passLabels := prometheus.Labels{"namespace": ns.Namespace, "ephemeris": ns.Spec.SatellitePath.EphemerisRef}
+		if satelliteAvailable {
+			ntnmetrics.SatellitePassAvailable.With(passLabels).Set(1)
+		} else {
+			ntnmetrics.SatellitePassAvailable.With(passLabels).Set(0)
+		}
 	}
 
 	// The FailoverTotal counter increment is deferred until after the status write
@@ -390,15 +413,95 @@ func (r *NTNSliceReconciler) applyBillingStatus(ns *ntnv1alpha1.NTNSlice, active
 	})
 }
 
-// setMetricsUnknown marks FailoverReady=Unknown with the supplied reason,
-// also resets MetricsStale=Unknown because "we could not read metrics"
-// means neither fresh nor stale was served this reconcile and leaving
-// MetricsStale=True from the previous reconcile would be a lie, then
-// persists the status update and requeues. Used whenever the metrics
-// source cannot deliver a value: a broken spec or an unreachable
-// Prometheus must hold the slice in its current path rather than let
-// the failover engine decide on invented data.
-func (r *NTNSliceReconciler) setMetricsUnknown(ctx context.Context, ns *ntnv1alpha1.NTNSlice, reason, msg string) (ctrl.Result, error) {
+// readPathQuality reads path-quality metrics for ns and reports whether they are
+// reliable enough to drive a switch decision. On unreliable metrics — reader-build
+// failure, read failure, or a value stale beyond metricsMaxStaleness — it records
+// the degraded conditions and returns qualityReliable=false so the caller fails
+// static (findings.md B-4/I-8). It mutates conditions on ns in memory; the caller
+// persists them once at the end of the reconcile.
+func (r *NTNSliceReconciler) readPathQuality(ctx context.Context, ns *ntnv1alpha1.NTNSlice, now time.Time) (slice.Metrics, bool) {
+	log := logf.FromContext(ctx)
+
+	reader, err := r.readerProvider().For(ns)
+	if err != nil {
+		// Distinguish admin-configured endpoint rejection from other build errors
+		// so kubectl describe surfaces a specific reason.
+		reason := reasonMetricsReaderError
+		if errors.Is(err, netutil.ErrEndpointNotAllowed) {
+			reason = reasonEndpointNotAllowed
+		}
+		log.Error(err, "failed to build metrics reader; failing static", "reason", reason)
+		r.setMetricsDegraded(ns, reason, err.Error())
+		return slice.Metrics{}, false
+	}
+	readResult, err := reader.Read(ctx, ns)
+	if err != nil {
+		reason := reasonMetricsUnavailable
+		if !errors.Is(err, slicemetrics.ErrNoMetrics) {
+			reason = reasonMetricsReaderError
+		}
+		log.Info("metrics unavailable; failing static (holding current path)", "reason", reason, "err", err.Error())
+		r.setMetricsDegraded(ns, reason, err.Error())
+		return slice.Metrics{}, false
+	}
+
+	// Fresh read: record freshness. The stale Event is emitted only on the
+	// transition into stale (one event per outage, not one per interval).
+	prevStale := meta.FindStatusCondition(ns.Status.Conditions, ntnv1alpha1.ConditionMetricsStale)
+	if !readResult.Stale {
+		meta.SetStatusCondition(&ns.Status.Conditions, metav1.Condition{
+			Type:               ntnv1alpha1.ConditionMetricsStale,
+			Status:             metav1.ConditionFalse,
+			Reason:             "FreshValue",
+			Message:            "Metrics source returned a fresh observation",
+			ObservedGeneration: ns.Generation,
+		})
+		log.V(2).Info("metrics read", "rsrp", readResult.Metrics.RSRP, "latencyMs", readResult.Metrics.LatencyMs, "packetLossPercent", readResult.Metrics.PacketLossPercent, "stale", false)
+		return readResult.Metrics, true
+	}
+
+	age := now.Sub(readResult.LastFreshAt)
+	log.Info("metrics source returned stale value", "lastFreshAt", readResult.LastFreshAt, "age", age)
+	meta.SetStatusCondition(&ns.Status.Conditions, metav1.Condition{
+		Type:               ntnv1alpha1.ConditionMetricsStale,
+		Status:             metav1.ConditionTrue,
+		Reason:             "StaleValue",
+		Message:            fmt.Sprintf("Using stale metrics last observed at %s (age %s)", readResult.LastFreshAt.Format(time.RFC3339), age.Round(time.Second)),
+		ObservedGeneration: ns.Generation,
+	})
+	if r.Recorder != nil && (prevStale == nil || prevStale.Status != metav1.ConditionTrue) {
+		r.Recorder.Eventf(ns, nil, "Warning", "MetricsStale", "MetricsStale",
+			"Using stale metrics last observed at %s", readResult.LastFreshAt.Format(time.RFC3339))
+	}
+	if age <= metricsMaxStaleness {
+		// Stale but within the freshness bound — still usable for a decision.
+		log.V(2).Info("metrics read", "rsrp", readResult.Metrics.RSRP, "latencyMs", readResult.Metrics.LatencyMs, "packetLossPercent", readResult.Metrics.PacketLossPercent, "stale", true)
+		return readResult.Metrics, true
+	}
+
+	// Too stale to drive a switch → fail static. Surface it like the other
+	// unreliable-metrics cases; the caller gates its FailoverReady True/False set on
+	// the returned flag, so it will not overwrite this. (MetricsStale stays True —
+	// the age is known here, unlike the source-unavailable case.)
+	log.Info("metrics stale beyond freshness bound; failing static", "age", age, "maxStaleness", metricsMaxStaleness)
+	meta.SetStatusCondition(&ns.Status.Conditions, metav1.Condition{
+		Type:               ntnv1alpha1.ConditionFailoverReady,
+		Status:             metav1.ConditionUnknown,
+		Reason:             "MetricsStale",
+		Message:            fmt.Sprintf("Metrics stale beyond %s; quality-driven failover suspended (fail static)", metricsMaxStaleness),
+		ObservedGeneration: ns.Generation,
+	})
+	return slice.Metrics{}, false
+}
+
+// setMetricsDegraded records that path-quality metrics are unusable for a switch
+// decision: FailoverReady=Unknown (failover cannot be quality-evaluated) and
+// MetricsStale=Unknown (freshness unknown — neither fresh nor stale was served, so
+// leaving MetricsStale=True from a prior reconcile would be a lie). It only mutates
+// conditions in memory; the reconcile fall-through persists them once at the end,
+// after also applying the fail-static decision (so the orbital signal can still
+// switch off a set satellite — findings.md I-8).
+func (r *NTNSliceReconciler) setMetricsDegraded(ns *ntnv1alpha1.NTNSlice, reason, msg string) {
 	meta.SetStatusCondition(&ns.Status.Conditions, metav1.Condition{
 		Type:               ntnv1alpha1.ConditionFailoverReady,
 		Status:             metav1.ConditionUnknown,
@@ -413,34 +516,75 @@ func (r *NTNSliceReconciler) setMetricsUnknown(ctx context.Context, ns *ntnv1alp
 		Message:            "Metric freshness unknown: " + msg,
 		ObservedGeneration: ns.Generation,
 	})
-	if err := r.Status().Update(ctx, ns); err != nil && !apierrors.IsConflict(err) {
-		return ctrl.Result{}, err
-	}
-	return ctrl.Result{RequeueAfter: sliceRequeueInterval}, nil
 }
 
-// checkSatelliteAvailability checks if any satellite pass window is currently active.
+// reportInertTriggers sets the TriggersReady condition and, only on the first
+// transition into the not-ready state, emits a Warning event listing the inert
+// triggers — those whose metric has no configured source and can never fire
+// (findings.md I-10). True/AllTriggersSourced otherwise. The transition gate keeps
+// the event stream quiet across steady reconciles.
+func (r *NTNSliceReconciler) reportInertTriggers(ns *ntnv1alpha1.NTNSlice, inert []string) {
+	if len(inert) == 0 {
+		meta.SetStatusCondition(&ns.Status.Conditions, metav1.Condition{
+			Type:               ntnv1alpha1.ConditionTriggersReady,
+			Status:             metav1.ConditionTrue,
+			Reason:             "AllTriggersSourced",
+			Message:            "All failover triggers reference a sourced metric",
+			ObservedGeneration: ns.Generation,
+		})
+		return
+	}
+	firstTransition := !meta.IsStatusConditionPresentAndEqual(
+		ns.Status.Conditions, ntnv1alpha1.ConditionTriggersReady, metav1.ConditionFalse)
+	msg := fmt.Sprintf("failover triggers reference metrics with no configured source and will never fire: %s",
+		strings.Join(inert, "; "))
+	meta.SetStatusCondition(&ns.Status.Conditions, metav1.Condition{
+		Type:               ntnv1alpha1.ConditionTriggersReady,
+		Status:             metav1.ConditionFalse,
+		Reason:             "InertTriggers",
+		Message:            msg,
+		ObservedGeneration: ns.Generation,
+	})
+	if firstTransition && r.Recorder != nil {
+		r.Recorder.Eventf(ns, nil, "Warning", "InertTriggers", "InertTriggers", "%s", msg)
+	}
+}
+
+// checkSatelliteAvailability reports whether a satellite pass window is currently
+// active (available) and whether that answer is trustworthy (known). A transient
+// ephemeris read error (informer-cache blip / apiserver hiccup) returns
+// known=false so the caller HOLDS the current path instead of yanking traffic off
+// satellite on an unread pass window — mirroring the metrics fail-static contract
+// (findings.md I-13). A NotFound (dangling ephemerisRef) and a found-but-no-active-
+// pass are genuine orbital signals (known=true): the former has no ephemeris to
+// serve the satellite path, the latter is a real end-of-pass, and both may switch
+// back off satellite.
 func (r *NTNSliceReconciler) checkSatelliteAvailability(
 	ctx context.Context,
 	ns *ntnv1alpha1.NTNSlice,
 	now time.Time,
-) bool {
+) (available, known bool) {
 	eph := &ntnv1alpha1.SatelliteEphemeris{}
 	key := client.ObjectKey{Namespace: ns.Namespace, Name: ns.Spec.SatellitePath.EphemerisRef}
 	if err := r.Get(ctx, key, eph); err != nil {
-		if !apierrors.IsNotFound(err) {
-			log := logf.FromContext(ctx)
-			log.Error(err, "failed to get SatelliteEphemeris", "ref", ns.Spec.SatellitePath.EphemerisRef)
+		if apierrors.IsNotFound(err) {
+			// Dangling ephemerisRef: no ephemeris to drive the satellite path. This
+			// is a genuine (persistent) signal, not a transient blip — allow switchback.
+			return false, true
 		}
-		return false
+		// Transient read error: availability is UNKNOWN. Do NOT force a switch off
+		// satellite; the caller holds the current path (I-13).
+		logf.FromContext(ctx).Error(err, "failed to get SatelliteEphemeris; holding current path",
+			"ref", ns.Spec.SatellitePath.EphemerisRef)
+		return false, false
 	}
 
 	for _, pw := range eph.Status.NextPassWindows {
 		if !pw.AOS.After(now) && pw.LOS.After(now) {
-			return true // currently in a pass window
+			return true, true // currently in a pass window
 		}
 	}
-	return false
+	return false, true // found, no active pass — a genuine end-of-pass signal
 }
 
 // now returns the current time (injectable for testing).
@@ -456,7 +600,14 @@ func (r *NTNSliceReconciler) now() time.Time {
 // pass windows change.
 func (r *NTNSliceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&ntnv1alpha1.NTNSlice{}).
+		// reconcileTriggerPredicate (predicates.go) stops the controller's own
+		// status writes (e.g. the switchback-countdown message) from re-enqueueing
+		// it, while still passing spec changes and deletionTimestamp transitions
+		// (the metrics-cleanup finalizer must run on delete). Annotation-only
+		// changes (the simulated-metrics dev backdoor) no longer trigger an
+		// immediate reconcile but are caught within the 30s RequeueAfter. The
+		// SatelliteEphemeris Watches below keep no predicate.
+		For(&ntnv1alpha1.NTNSlice{}, builder.WithPredicates(reconcileTriggerPredicate())).
 		Watches(&ntnv1alpha1.SatelliteEphemeris{},
 			handler.EnqueueRequestsFromMapFunc(r.ephemerisToSlice),
 		).

@@ -51,16 +51,20 @@ func (annotationReader) Read(_ context.Context, ns *ntnv1alpha1.NTNSlice) (Resul
 	if ns == nil {
 		return Result{}, errors.New("annotationReader: nil NTNSlice")
 	}
+	// Mark every field missing first; an absent annotation leaves the healthy
+	// placeholder AND the Missing flag, so a trigger over it is surfaced as inert
+	// rather than silently evaluated against the default (I-10).
 	m := defaultMetrics
+	m.RSRPMissing, m.LatencyMissing, m.PacketLossMissing = true, true, true
 	if ns.Annotations != nil {
 		if v, ok := parseFinite(ns.Annotations[annotationRSRP]); ok {
-			m.RSRP = v
+			m.RSRP, m.RSRPMissing = v, false
 		}
 		if v, ok := parseFinite(ns.Annotations[annotationLatency]); ok {
-			m.LatencyMs = v
+			m.LatencyMs, m.LatencyMissing = v, false
 		}
 		if v, ok := parseFinite(ns.Annotations[annotationPacketLoss]); ok {
-			m.PacketLossPercent = v
+			m.PacketLossPercent, m.PacketLossMissing = v, false
 		}
 	}
 	return Result{Metrics: m}, nil
