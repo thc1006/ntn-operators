@@ -30,7 +30,10 @@ import (
 )
 
 // privateRanges are CIDR blocks that should never be accessed by the operator.
-// Includes RFC 1918, loopback, link-local, cloud metadata, and IPv6 equivalents.
+// Includes RFC 1918, loopback, link-local, cloud metadata, IPv4 multicast/
+// reserved/broadcast, the unspecified addresses, and IPv6 equivalents. NAT64 and
+// 6to4 are handled separately (see embeddedIPv4) because they carry an IPv4
+// destination that must be checked on its own merits.
 var privateRanges []*net.IPNet
 
 func init() {
@@ -39,14 +42,19 @@ func init() {
 		"172.16.0.0/12",  // RFC 1918
 		"192.168.0.0/16", // RFC 1918
 		"127.0.0.0/8",    // Loopback
-		"169.254.0.0/16", // Link-local / cloud metadata
-		"0.0.0.0/8",      // Current network
+		"169.254.0.0/16", // Link-local / cloud metadata (169.254.169.254)
+		"0.0.0.0/8",      // Current network (incl. 0.0.0.0 unspecified)
 		"100.64.0.0/10",  // Carrier-grade NAT
 		"192.0.0.0/24",   // IETF protocol assignments
 		"198.18.0.0/15",  // Benchmarking
+		"224.0.0.0/4",    // IPv4 multicast (224.0.0.1 all-hosts, etc.)  [I-25]
+		"240.0.0.0/4",    // IPv4 reserved/class-E incl. 255.255.255.255 broadcast [I-25]
 		"fc00::/7",       // IPv6 unique local
 		"fe80::/10",      // IPv6 link-local
 		"::1/128",        // IPv6 loopback
+		"::/128",         // IPv6 unspecified [I-25]
+		"ff00::/8",       // IPv6 multicast [I-25]
+		"64:ff9b:1::/48", // NAT64 local-use (RFC 8215) — conservative blanket [I-25]
 	}
 	for _, cidr := range cidrs {
 		_, ipNet, err := net.ParseCIDR(cidr)
@@ -57,12 +65,44 @@ func init() {
 	}
 }
 
-// IsPrivateIP checks if an IP falls within any private/reserved range.
+// embeddedIPv4 extracts the IPv4 address carried inside an IPv6 transition
+// address — 6to4 (2002::/16) and the well-known NAT64 prefix (64:ff9b::/96) —
+// or nil. These embed an IPv4 destination inside an otherwise "global" IPv6
+// address, so 64:ff9b::a00:1 and 2002:a00:1::1 both reach 10.0.0.1 and would
+// bypass the range check above. Extracting the embedded IPv4 and re-checking it
+// (rather than blanket-blocking the whole prefix) blocks the private-embedding
+// SSRF vectors while still permitting a PUBLIC IPv4 reached via NAT64/6to4, so
+// IPv6-only clusters fetching public CelesTrak/Prometheus are not broken (I-25).
+func embeddedIPv4(ip net.IP) net.IP {
+	ip16 := ip.To16()
+	if ip16 == nil || ip.To4() != nil {
+		return nil // not IPv6, or already IPv4 / IPv4-mapped (handled directly)
+	}
+	// 6to4: 2002:VVVV:VVVV::/48 — embedded IPv4 is bytes 2..5.
+	if ip16[0] == 0x20 && ip16[1] == 0x02 {
+		return net.IPv4(ip16[2], ip16[3], ip16[4], ip16[5]).To4()
+	}
+	// Well-known NAT64: 64:ff9b::/96 — embedded IPv4 is the last 32 bits.
+	if ip16[0] == 0x00 && ip16[1] == 0x64 && ip16[2] == 0xff && ip16[3] == 0x9b &&
+		ip16[4] == 0 && ip16[5] == 0 && ip16[6] == 0 && ip16[7] == 0 &&
+		ip16[8] == 0 && ip16[9] == 0 && ip16[10] == 0 && ip16[11] == 0 {
+		return net.IPv4(ip16[12], ip16[13], ip16[14], ip16[15]).To4()
+	}
+	return nil
+}
+
+// IsPrivateIP checks if an IP falls within any private/reserved range, or (for
+// NAT64/6to4 transition addresses) whether the embedded IPv4 is private.
 func IsPrivateIP(ip net.IP) bool {
 	for _, r := range privateRanges {
 		if r.Contains(ip) {
 			return true
 		}
+	}
+	// NAT64/6to4: re-check the embedded IPv4 (one level; the recursion bottoms
+	// out because embeddedIPv4 returns nil for an IPv4/IPv4-mapped address).
+	if v4 := embeddedIPv4(ip); v4 != nil {
+		return IsPrivateIP(v4)
 	}
 	return false
 }
