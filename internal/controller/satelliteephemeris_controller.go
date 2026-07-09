@@ -20,7 +20,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
+	neturl "net/url"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -32,6 +35,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	ctrlrt "sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
@@ -43,6 +47,7 @@ import (
 	ntnv1alpha1 "github.com/thc1006/ntn-operators/api/v1alpha1"
 	"github.com/thc1006/ntn-operators/pkg/ephemeris"
 	ntnmetrics "github.com/thc1006/ntn-operators/pkg/metrics"
+	"github.com/thc1006/ntn-operators/pkg/netutil"
 )
 
 const minRefreshInterval = 2 * time.Hour
@@ -70,6 +75,7 @@ type SatelliteEphemerisReconciler struct {
 // +kubebuilder:rbac:groups=ntn.operators.dev,resources=groundstationlifecycles,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
+// +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
 
 // Reconcile fetches GP data, computes pass predictions, and updates status.
 func (r *SatelliteEphemerisReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -138,6 +144,14 @@ func (r *SatelliteEphemerisReconciler) Reconcile(ctx context.Context, req ctrl.R
 		log.V(1).Info("re-propagating from cached OMMs; GP source not contacted",
 			"cacheAge", now.Sub(c.result.FetchedAt).String(), "refreshInterval", effectiveInterval.String())
 	} else {
+		// Refuse a cleartext http:// source that resolves to a PUBLIC IP: an
+		// on-path attacker could inject forged OMM JSON that is propagated into
+		// SIB19 (findings.md I-21). In-cluster http mirrors and E2E mocks (which
+		// resolve to private IPs, behind NetworkPolicy) stay allowed, and https
+		// is always fine.
+		if ip, insecure := r.publicHTTPSource(ctx, eph.Spec.Source.URL); insecure {
+			return r.handleInsecureURL(ctx, eph, ip)
+		}
 		fetchStart := time.Now()
 		var fetchErr error
 		result, fetchErr = fetcher.Fetch(ctx, eph.Spec.Source.URL)
@@ -544,6 +558,59 @@ func (r *SatelliteEphemerisReconciler) predictPasses(
 	return nil
 }
 
+// publicHTTPSource reports whether raw is a cleartext http:// URL whose host
+// resolves to a public IP, and if so returns that IP. Cleartext http to a
+// private/in-cluster host (a NetworkPolicy-protected mirror or an E2E mock) is
+// permitted; https is always fine. It fails OPEN when the host cannot be
+// resolved (returns false): the fetch's own SSRF-safe client still blocks
+// private-IP dials, and a public host that momentarily fails DNS is re-checked
+// on the next reconcile — so a transient resolver blip never wedges a valid
+// https source, and never silently downgrades a public one for long. A literal
+// public IP (e.g. http://203.0.113.5) resolves to itself and is rejected;
+// a literal private IP is allowed (findings.md I-21).
+func (r *SatelliteEphemerisReconciler) publicHTTPSource(ctx context.Context, raw string) (string, bool) {
+	u, err := neturl.Parse(raw)
+	if err != nil || strings.ToLower(u.Scheme) != "http" {
+		return "", false
+	}
+	ips, err := net.DefaultResolver.LookupIPAddr(ctx, u.Hostname())
+	if err != nil || len(ips) == 0 {
+		return "", false // cannot classify — fail open
+	}
+	for _, ip := range ips {
+		if !netutil.IsPrivateIP(ip.IP) {
+			return ip.IP.String(), true
+		}
+	}
+	return "", false
+}
+
+// handleInsecureURL records the InsecureURL condition + a Warning event for a
+// rejected cleartext-http public source and requeues without fetching (I-21).
+func (r *SatelliteEphemerisReconciler) handleInsecureURL(
+	ctx context.Context,
+	eph *ntnv1alpha1.SatelliteEphemeris,
+	ip string,
+) (ctrl.Result, error) {
+	msg := fmt.Sprintf(
+		"cleartext http source resolves to public IP %s; use https to prevent forged OMM injection into SIB19",
+		ip)
+	meta.SetStatusCondition(&eph.Status.Conditions, metav1.Condition{
+		Type:               ntnv1alpha1.ConditionGPDataFetched,
+		Status:             metav1.ConditionFalse,
+		Reason:             "InsecureURL",
+		Message:            msg,
+		ObservedGeneration: eph.Generation,
+	})
+	if err := r.Status().Update(ctx, eph); err != nil {
+		return ctrl.Result{}, err
+	}
+	if r.Recorder != nil {
+		r.Recorder.Eventf(eph, nil, "Warning", "InsecureURL", "InsecureURL", "%s", msg)
+	}
+	return ctrl.Result{RequeueAfter: time.Minute}, nil
+}
+
 // handleFetchError records the error as a Condition and Event, then requeues.
 func (r *SatelliteEphemerisReconciler) handleFetchError(
 	ctx context.Context,
@@ -661,7 +728,12 @@ func (b *boundSpaceTrackFetcher) Fetch(ctx context.Context, url string) (ephemer
 // when ground stations are added, modified, or deleted.
 func (r *SatelliteEphemerisReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&ntnv1alpha1.SatelliteEphemeris{}).
+		// reconcileTriggerPredicate (predicates.go) filters this controller's own
+		// status writes (a fresh push epoch every reconcile) so they don't
+		// re-enqueue it, while still delivering spec changes and deletions. The
+		// GroundStationLifecycle Watches below deliberately have NO predicate,
+		// since fan-in must react to status changes.
+		For(&ntnv1alpha1.SatelliteEphemeris{}, builder.WithPredicates(reconcileTriggerPredicate())).
 		Watches(&ntnv1alpha1.GroundStationLifecycle{},
 			handler.EnqueueRequestsFromMapFunc(r.groundStationToEphemeris),
 		).

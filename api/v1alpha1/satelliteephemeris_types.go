@@ -32,7 +32,11 @@ type EphemerisSource struct {
 	// +kubebuilder:validation:Enum=CelesTrak;SpaceTrack
 	Type string `json:"type"`
 
-	// url is the endpoint to fetch GP data from.
+	// url is the endpoint to fetch GP data from. Use https for any public
+	// source: a cleartext http:// URL that resolves to a public IP is refused
+	// at runtime (InsecureURL condition) because an on-path attacker could
+	// inject forged OMM data that is propagated into SIB19. http:// is permitted
+	// only for a private/in-cluster mirror (NetworkPolicy-protected).
 	// For CelesTrak: https://celestrak.org/NORAD/elements/gp.php?GROUP=oneweb&FORMAT=JSON
 	// For SpaceTrack: https://www.space-track.org/basicspacedata/query/class/gp/...
 	// +kubebuilder:validation:MinLength=1

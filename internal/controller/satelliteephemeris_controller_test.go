@@ -343,6 +343,46 @@ var _ = Describe("SatelliteEphemeris Controller", func() {
 		})
 	})
 
+	Context("When the source is a cleartext http:// URL resolving to a public IP (I-21)", func() {
+		// A public http source is a forged-OMM-into-SIB19 vector; it must be
+		// refused BEFORE any fetch. In-cluster http mirrors (private-resolving)
+		// stay allowed and are covered by the TestPublicHTTPSource unit table.
+		insecureName := types.NamespacedName{Name: "eph-insecure-http", Namespace: namespace}
+		AfterEach(func() {
+			r := &ntnv1alpha1.SatelliteEphemeris{}
+			if err := k8sClient.Get(context.Background(), insecureName, r); err == nil {
+				Expect(k8sClient.Delete(context.Background(), r)).To(Succeed())
+			}
+		})
+
+		It("rejects with InsecureURL and never calls the fetcher", func() {
+			resource := &ntnv1alpha1.SatelliteEphemeris{
+				ObjectMeta: metav1.ObjectMeta{Name: insecureName.Name, Namespace: namespace},
+				Spec: ntnv1alpha1.SatelliteEphemerisSpec{
+					Source: ntnv1alpha1.EphemerisSource{
+						Type:            "CelesTrak",
+						URL:             "http://8.8.8.8/gp.json", // literal public IP over cleartext
+						RefreshInterval: metav1.Duration{Duration: 4 * time.Hour},
+					},
+				},
+			}
+			Expect(k8sClient.Create(context.Background(), resource)).To(Succeed())
+
+			mock := &mockGPFetcher{result: ephemeris.GPFetchResult{SatelliteCount: 1, FetchedAt: time.Now()}}
+			_, err := newReconciler(mock).Reconcile(context.Background(), reconcile.Request{NamespacedName: insecureName})
+			Expect(err).NotTo(HaveOccurred())
+
+			updated := &ntnv1alpha1.SatelliteEphemeris{}
+			Expect(k8sClient.Get(context.Background(), insecureName, updated)).To(Succeed())
+			cond := meta.FindStatusCondition(updated.Status.Conditions, ntnv1alpha1.ConditionGPDataFetched)
+			Expect(cond).NotTo(BeNil())
+			Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+			Expect(cond.Reason).To(Equal("InsecureURL"))
+			// The fetch must NOT have happened — the guard runs before it.
+			Expect(mock.callCount()).To(Equal(0))
+		})
+	})
+
 	Context("When a deep-space set is in the feed but excluded via spec.satellites.noradIDs", func() {
 		// The operator narrows tracking to LEO sats; the upstream feed still carries
 		// a GEO. The guard must NOT raise UnsupportedOrbitRegime for a bird the
