@@ -293,8 +293,16 @@ func (r *NTNCellConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			if err := r.Status().Update(ctx, cc); err != nil {
 				return ctrl.Result{}, err
 			}
-			if conditionChanged && r.Recorder != nil {
-				r.Recorder.Eventf(cc, nil, "Warning", "EphemerisPushFailed", "EphemerisPushFailed", "%s", message)
+			if conditionChanged {
+				// Count distinct push-failure episodes by reason (I-19). Gated on
+				// conditionChanged like the event, so a steady non-ready state
+				// (e.g. PayloadMissing) is counted once per entry, not per reconcile.
+				ntnmetrics.EphemerisPushErrorsTotal.With(prometheus.Labels{
+					"namespace": cc.Namespace, "config": cc.Name, "reason": reason,
+				}).Inc()
+				if r.Recorder != nil {
+					r.Recorder.Eventf(cc, nil, "Warning", "EphemerisPushFailed", "EphemerisPushFailed", "%s", message)
+				}
 			}
 			if !ephemerisPushShouldRequeue(reason) {
 				return ctrl.Result{}, nil
@@ -337,6 +345,7 @@ func (r *NTNCellConfigReconciler) handleFinalizer(
 		// Release the CR's per-CR metric series on deletion so /metrics does not
 		// accumulate dead series across create/delete churn (idempotent).
 		ntnmetrics.ConfigApplyErrorsTotal.DeletePartialMatch(prometheus.Labels{"namespace": cc.Namespace, "config": cc.Name})
+		ntnmetrics.EphemerisPushErrorsTotal.DeletePartialMatch(prometheus.Labels{"namespace": cc.Namespace, "config": cc.Name})
 		if controllerutil.ContainsFinalizer(cc, finalizerName) {
 			if prov == nil {
 				// Best-effort cleanup using Status.ConfigMapRef when provider is missing.

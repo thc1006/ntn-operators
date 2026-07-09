@@ -445,3 +445,52 @@ func TestGPDeepSpaceRejectedCount_WriteDeleteRoundTrip(t *testing.T) {
 		t.Errorf("deep-space series leaked (write/delete key drift): base=%d afterDelete=%d", base, afterDelete)
 	}
 }
+
+// TestEphemerisEpochStaleCount_WriteDeleteRoundTrip guards the staleness gauge's
+// write/delete key consistency (I-19): a reconcile over a stale-epoch element set
+// writes the {namespace,ephemeris} series, and the NotFound reconcile releases it.
+func TestEphemerisEpochStaleCount_WriteDeleteRoundTrip(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := ntnv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme: %v", err)
+	}
+	const ns, name = "team-stale", "eph-stale"
+	eph := &ntnv1alpha1.SatelliteEphemeris{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+		Spec: ntnv1alpha1.SatelliteEphemerisSpec{
+			Source: ntnv1alpha1.EphemerisSource{
+				Type: "CelesTrak", URL: "https://celestrak.org/test",
+				RefreshInterval: metav1.Duration{Duration: 4 * time.Hour},
+			},
+		},
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(eph).WithStatusSubresource(eph).Build()
+	r := &SatelliteEphemerisReconciler{
+		Client: c, Scheme: scheme, Recorder: events.NewFakeRecorder(10),
+		Fetcher: &mockGPFetcher{result: ephemeris.GPFetchResult{
+			OMMs: []sgp4.OMM{issOMMWithEpoch(30 * 24 * time.Hour)}, SatelliteCount: 1, FetchedAt: time.Now(),
+		}},
+	}
+	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: name, Namespace: ns}}
+	labels := prometheus.Labels{"namespace": ns, "ephemeris": name}
+	base := testutil.CollectAndCount(ntnmetrics.EphemerisEpochStaleCount)
+
+	if _, err := r.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if got := testutil.ToFloat64(ntnmetrics.EphemerisEpochStaleCount.With(labels)); got != 1 {
+		t.Fatalf("reconcile did not set the stale-count series to 1: got %v", got)
+	}
+	if afterWrite := testutil.CollectAndCount(ntnmetrics.EphemerisEpochStaleCount); afterWrite != base+1 {
+		t.Fatalf("reconcile did not emit exactly one series: base=%d afterWrite=%d", base, afterWrite)
+	}
+	if err := c.Delete(context.Background(), eph); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if _, err := r.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("notfound reconcile: %v", err)
+	}
+	if afterDelete := testutil.CollectAndCount(ntnmetrics.EphemerisEpochStaleCount); afterDelete != base {
+		t.Errorf("stale series leaked (write/delete key drift): base=%d afterDelete=%d", base, afterDelete)
+	}
+}

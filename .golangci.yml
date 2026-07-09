@@ -50,6 +50,7 @@ linters:
       ignore-string-values:
         - '^namespace$'
         - '^ephemeris$'
+        - '^config$'
   exclusions:
     generated: lax
     rules:

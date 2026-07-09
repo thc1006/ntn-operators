@@ -102,6 +102,7 @@ func (r *SatelliteEphemerisReconciler) Reconcile(ctx context.Context, req ctrl.R
 			// cached OMMs so the in-memory cache does not leak (#179).
 			ntnmetrics.GPSatelliteCount.DeletePartialMatch(prometheus.Labels{"namespace": req.Namespace, "ephemeris": req.Name})
 			ntnmetrics.GPDeepSpaceRejectedCount.DeletePartialMatch(prometheus.Labels{"namespace": req.Namespace, "ephemeris": req.Name})
+			ntnmetrics.EphemerisEpochStaleCount.DeletePartialMatch(prometheus.Labels{"namespace": req.Namespace, "ephemeris": req.Name})
 			r.ommCache.Delete(req.NamespacedName)
 		}
 		return ctrl.Result{}, client.IgnoreNotFound(err)
@@ -423,6 +424,7 @@ func (r *SatelliteEphemerisReconciler) reportEphemerisEpochStale(eph *ntnv1alpha
 			stale, total, maxEpochAge)
 	}
 	meta.SetStatusCondition(&eph.Status.Conditions, c)
+	ntnmetrics.EphemerisEpochStaleCount.With(prometheus.Labels{"namespace": eph.Namespace, "ephemeris": eph.Name}).Set(float64(stale))
 }
 
 // propagateStates propagates the tracked satellites' orbits (SGP4) to the given

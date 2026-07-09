@@ -109,6 +109,31 @@ var (
 		[]string{"namespace", "ephemeris"},
 	)
 
+	// EphemerisEpochStaleCount reports how many tracked element sets have an epoch
+	// older than the freshness bound (findings.md I-17/I-19). It is the durable,
+	// alertable pairing of the EphemerisEpochStale condition — a fleet propagating
+	// stale elements pushes a drifting ECEF into SIB19. Alert on > 0. Same
+	// namespace+ephemeris keying and delete-on-CR-removal as GPSatelliteCount.
+	EphemerisEpochStaleCount = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "ntn_operators_ephemeris_epoch_stale_count",
+			Help: "Number of tracked element sets whose epoch is older than the freshness bound in the latest reconcile.",
+		},
+		[]string{"namespace", "ephemeris"},
+	)
+
+	// EphemerisPushErrorsTotal counts runtime NTN-ephemeris push failures to the
+	// gNB, split by reason (findings.md I-19). ConfigApplyErrorsTotal covers only
+	// the static ConfigMap apply path, leaving the v0.6 runtime WebSocket push
+	// (#176/#177) with no error signal to alert on. Keyed by namespace+config.
+	EphemerisPushErrorsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "ntn_operators_ephemeris_push_errors_total",
+			Help: "Total runtime NTN ephemeris push failures to the gNB, by reason.",
+		},
+		[]string{"namespace", "config", "reason"},
+	)
+
 	// ReaderQueryDuration measures how long a single PromQL fetch made
 	// through a pkg/slice/metrics Reader takes, split by source
 	// ("prometheus") and outcome ("success" or "error"). A higher-level
@@ -171,6 +196,8 @@ func init() {
 		GPFetchDuration,
 		GPSatelliteCount,
 		GPDeepSpaceRejectedCount,
+		EphemerisEpochStaleCount,
+		EphemerisPushErrorsTotal,
 		ReaderQueryDuration,
 		ReaderErrorsTotal,
 		ReaderStaleUsedTotal,
