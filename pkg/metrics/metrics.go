@@ -94,6 +94,21 @@ var (
 		[]string{"namespace", "ephemeris"},
 	)
 
+	// GPDeepSpaceRejectedCount reports how many TRACKED element sets the latest
+	// reconcile rejected as deep-space (orbital period >= 225 min) because the
+	// near-earth SGP4 propagator cannot handle them (findings.md B-5; v1.0 is
+	// LEO-only). It is the durable, alertable signal that a fleet's MEO/GEO birds
+	// are being dropped — the UnsupportedOrbitRegime event is transition-gated and
+	// ages out of etcd, so alerting keys on this gauge (> 0). Same namespace+
+	// ephemeris keying and delete-on-CR-removal as GPSatelliteCount.
+	GPDeepSpaceRejectedCount = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "ntn_operators_gp_deep_space_rejected_count",
+			Help: "Number of tracked element sets rejected as deep-space (unsupported orbit regime) in the latest reconcile.",
+		},
+		[]string{"namespace", "ephemeris"},
+	)
+
 	// ReaderQueryDuration measures how long a single PromQL fetch made
 	// through a pkg/slice/metrics Reader takes, split by source
 	// ("prometheus") and outcome ("success" or "error"). A higher-level
@@ -155,6 +170,7 @@ func init() {
 		ConfigApplyErrorsTotal,
 		GPFetchDuration,
 		GPSatelliteCount,
+		GPDeepSpaceRejectedCount,
 		ReaderQueryDuration,
 		ReaderErrorsTotal,
 		ReaderStaleUsedTotal,

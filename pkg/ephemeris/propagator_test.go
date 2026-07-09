@@ -144,23 +144,27 @@ func TestPropagateToECEF_LEO_PositionInRange(t *testing.T) {
 	}
 }
 
-func TestPropagateToECEF_GEO_LowVelocity(t *testing.T) {
+// TestPropagateToECEF_GEO_RejectedAsDeepSpace replaces the former
+// "GEO_LowVelocity" test, which propagated a GEO element set through the
+// near-earth SGP4 model and asserted plausible-looking magnitudes. That was
+// exactly the silent-error trap (findings.md B-5): the bundled propagator
+// (github.com/akhenakh/sgp4) has no deep-space (SDP4) branch, so its GEO output
+// is wrong even when the magnitude lands in a believable range. v1.0 is LEO-only,
+// so the geoOMM() vector is now asserted to classify as deep-space (and partition
+// out) instead of being propagated. This test guards only the classification the
+// controller relies on; the controller's actual exclusion of deep-space sets from
+// propagation and pass prediction is covered by the SatelliteEphemeris envtest
+// Contexts (internal/controller).
+func TestPropagateToECEF_GEO_RejectedAsDeepSpace(t *testing.T) {
 	omm := geoOMM()
-	epoch := parseEpoch(t, omm.EpochStr)
-
-	ecef, err := PropagateToECEF(omm, epoch.Add(1*time.Hour))
-	if err != nil {
-		t.Fatalf("PropagateToECEF failed: %v", err)
+	if !IsDeepSpace(omm) {
+		t.Fatalf("GEO element set %q (period %.0f min) must be classified deep-space and rejected, not propagated",
+			omm.ObjectName, OrbitalPeriodMinutes(omm))
 	}
-
-	posKm := posMagnitudeKm(ecef.PosX, ecef.PosY, ecef.PosZ)
-	if posKm < 35000 || posKm > 50000 {
-		t.Errorf("GEO position magnitude out of range: %.0f km (expected 35000-50000)", posKm)
-	}
-
-	velKmS := velMagnitudeKmS(ecef.VelX, ecef.VelY, ecef.VelZ)
-	if velKmS > 1.0 {
-		t.Errorf("GEO ECEF velocity too high: %.2f km/s (expected near 0 for true GEO)", velKmS)
+	// It must land in the deepSpace partition only, never near-earth.
+	nearEarth, deepSpace := SplitByOrbitRegime([]sgp4.OMM{omm})
+	if len(nearEarth) != 0 || len(deepSpace) != 1 {
+		t.Errorf("GEO element set must partition to deepSpace only: near=%d deep=%d", len(nearEarth), len(deepSpace))
 	}
 }
 

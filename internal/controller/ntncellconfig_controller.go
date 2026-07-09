@@ -475,10 +475,18 @@ func (r *NTNCellConfigReconciler) pushRuntimeEphemeris(
 ) (bool, string, error) {
 	state := selectPropagatedState(eph.Status.PropagatedStates, spec.EphemerisNoradID)
 	if state == nil {
+		// A referenced satellite that the SatelliteEphemeris rejected as deep-space
+		// (near-earth SGP4 can't propagate it) has no propagated state — surface that
+		// cross-CR cause so the operator isn't left correlating a bare "payload
+		// missing" against the other object's condition (deep-review A-NIT-1).
+		hint := ""
+		if meta.IsStatusConditionTrue(eph.Status.Conditions, ntnv1alpha1.ConditionUnsupportedOrbitRegime) {
+			hint = " (the referenced SatelliteEphemeris reports UnsupportedOrbitRegime: deep-space element sets are rejected because the near-earth SGP4 propagator cannot handle them)"
+		}
 		return false, marker, newEphemerisPushError(
 			ephemerisReasonPayloadMissing,
-			fmt.Errorf("no propagated state in SatelliteEphemeris %q for noradID selector %v",
-				eph.Name, spec.EphemerisNoradID),
+			fmt.Errorf("no propagated state in SatelliteEphemeris %q for noradID selector %v%s",
+				eph.Name, spec.EphemerisNoradID, hint),
 		)
 	}
 	// Skip a stale (past / about-to-expire) epoch rather than push a value OCUDU

@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/akhenakh/sgp4"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -383,5 +384,64 @@ func TestSatelliteEphemerisReconcile_FetchWritesThenDeleteReleasesLiveSeries(t *
 	}
 	if afterDelete := testutil.CollectAndCount(ntnmetrics.GPSatelliteCount); afterDelete != base {
 		t.Errorf("live series leaked (write/delete key drift): base=%d afterDelete=%d", base, afterDelete)
+	}
+}
+
+// TestGPDeepSpaceRejectedCount_WriteDeleteRoundTrip guards the deep-space-rejected
+// gauge's write/delete key consistency (deep-review D-observability): a reconcile
+// over a feed with a tracked deep-space bird writes the {namespace,ephemeris}
+// series to the rejected count, and the NotFound reconcile releases the SAME series.
+func TestGPDeepSpaceRejectedCount_WriteDeleteRoundTrip(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := ntnv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme: %v", err)
+	}
+	const ns, name = "team-deepspace", "eph-deepspace"
+	eph := &ntnv1alpha1.SatelliteEphemeris{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+		Spec: ntnv1alpha1.SatelliteEphemerisSpec{
+			Source: ntnv1alpha1.EphemerisSource{
+				Type:            "CelesTrak",
+				URL:             "https://celestrak.org/test",
+				RefreshInterval: metav1.Duration{Duration: 4 * time.Hour},
+			},
+		},
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(eph).WithStatusSubresource(eph).Build()
+	r := &SatelliteEphemerisReconciler{
+		Client:   c,
+		Scheme:   scheme,
+		Recorder: events.NewFakeRecorder(10),
+		Fetcher: &mockGPFetcher{result: ephemeris.GPFetchResult{
+			// One LEO + one GEO (deep space); no noradIDs → the GEO is tracked & rejected.
+			OMMs:           []sgp4.OMM{testISSOMM(), testGEOOMM()},
+			SatelliteCount: 2,
+			FetchedAt:      time.Now(),
+		}},
+	}
+	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: name, Namespace: ns}}
+	labels := prometheus.Labels{"namespace": ns, "ephemeris": name}
+	base := testutil.CollectAndCount(ntnmetrics.GPDeepSpaceRejectedCount)
+
+	// Live reconcile → Sets GPDeepSpaceRejectedCount{namespace,ephemeris} to 1 (one GEO).
+	if _, err := r.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("fetch reconcile: %v", err)
+	}
+	if got := testutil.ToFloat64(ntnmetrics.GPDeepSpaceRejectedCount.With(labels)); got != 1 {
+		t.Fatalf("reconcile did not set the rejected-count series to 1: got %v", got)
+	}
+	if afterWrite := testutil.CollectAndCount(ntnmetrics.GPDeepSpaceRejectedCount); afterWrite != base+1 {
+		t.Fatalf("reconcile did not emit exactly one series: base=%d afterWrite=%d", base, afterWrite)
+	}
+
+	// Delete → the NotFound reconcile must release the SAME series.
+	if err := c.Delete(context.Background(), eph); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if _, err := r.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("notfound reconcile: %v", err)
+	}
+	if afterDelete := testutil.CollectAndCount(ntnmetrics.GPDeepSpaceRejectedCount); afterDelete != base {
+		t.Errorf("deep-space series leaked (write/delete key drift): base=%d afterDelete=%d", base, afterDelete)
 	}
 }

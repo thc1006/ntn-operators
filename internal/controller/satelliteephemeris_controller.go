@@ -88,6 +88,7 @@ func (r *SatelliteEphemerisReconciler) Reconcile(ctx context.Context, req ctrl.R
 			// accumulate dead series across create/delete churn, and drop its
 			// cached OMMs so the in-memory cache does not leak (#179).
 			ntnmetrics.GPSatelliteCount.DeletePartialMatch(prometheus.Labels{"namespace": req.Namespace, "ephemeris": req.Name})
+			ntnmetrics.GPDeepSpaceRejectedCount.DeletePartialMatch(prometheus.Labels{"namespace": req.Namespace, "ephemeris": req.Name})
 			r.ommCache.Delete(req.NamespacedName)
 		}
 		return ctrl.Result{}, client.IgnoreNotFound(err)
@@ -220,6 +221,32 @@ func (r *SatelliteEphemerisReconciler) Reconcile(ctx context.Context, req ctrl.R
 		})
 	}
 
+	// Step 6b: Orbit-regime guard (findings.md B-5). The bundled SGP4 propagator
+	// (github.com/akhenakh/sgp4) is near-earth only — it hardcodes
+	// use_deep_space_ = false — so an element set whose orbital period is >= 225
+	// min (roughly MEO and up) would be propagated into a silently-wrong ECEF.
+	// Reject those explicitly here so only the near-earth set reaches pass
+	// prediction and the runtime-push propagation below. v1.0 is LEO-only; MEO/GEO
+	// support is a v1.1 roadmap item. SplitByOrbitRegime allocates fresh slices, so
+	// the cached OMMs stored above are not mutated by reassigning result.OMMs.
+	nearEarth, deepSpace := ephemeris.SplitByOrbitRegime(result.OMMs)
+	result.OMMs = nearEarth
+	// Report only on the tracked (spec.satellites.noradIDs) deep-space sets. A
+	// broad/mixed upstream feed (e.g. a CelesTrak group with LEO + MEO + GEO) must
+	// not raise UnsupportedOrbitRegime for MEO/GEO birds the operator explicitly
+	// excluded via noradIDs — that would be a false alarm on satellites they never
+	// intended to propagate. An unset selector tracks the whole feed, so every
+	// deep-space set is reported. Propagation is already deep-space-free (result.OMMs
+	// above); propagateStates / predictPasses then apply this same noradIDs selector,
+	// so only tracked near-earth sats are ever propagated.
+	var trackedNorad []int
+	if eph.Spec.Satellites != nil {
+		trackedNorad = eph.Spec.Satellites.NoradIDs
+	}
+	trackedDeepSpace := ephemeris.FilterOMMs(deepSpace, trackedNorad)
+	orbitRegimeEvent := r.reportOrbitRegime(ctx, eph, len(trackedDeepSpace), ephemeris.DeepSpaceSummary(trackedDeepSpace))
+	ntnmetrics.GPDeepSpaceRejectedCount.With(prometheus.Labels{"namespace": eph.Namespace, "ephemeris": eph.Name}).Set(float64(len(trackedDeepSpace)))
+
 	// Step 7: Compute pass predictions if configured; clear stale data if disabled.
 	if eph.Spec.PassPrediction != nil && len(eph.Spec.PassPrediction.GroundStations) > 0 {
 		if err := r.predictPasses(ctx, eph, result); err != nil {
@@ -256,6 +283,15 @@ func (r *SatelliteEphemerisReconciler) Reconcile(ctx context.Context, req ctrl.R
 
 	if err := r.Status().Update(ctx, eph); err != nil {
 		return ctrl.Result{}, err
+	}
+
+	// Emit the orbit-regime Warning ONLY after the status persisted, so a failed
+	// update does not fire an event for a transition that rolled back (it would
+	// re-fire on the next reconcile, defeating the transition gate). This also
+	// suppresses a spurious event on a terminating object, whose Status().Update
+	// fails NotFound above. (findings.md B-5; deep-review C-#4)
+	if orbitRegimeEvent != "" && r.Recorder != nil {
+		r.Recorder.Eventf(eph, nil, "Warning", "UnsupportedOrbitRegime", "OrbitRegimeGuard", "%s", orbitRegimeEvent)
 	}
 
 	// Only emit the "fetched" event on a real fetch, not on the short-cadence
@@ -363,6 +399,56 @@ func (r *SatelliteEphemerisReconciler) propagateStates(
 		})
 	}
 	eph.Status.PropagatedStates = states
+}
+
+// reportOrbitRegime records the UnsupportedOrbitRegime condition and RETURNS the
+// Warning-event note the caller must emit only AFTER a successful Status().Update
+// ("" = emit nothing). Element sets whose orbital period is >=
+// ephemeris.DeepSpacePeriodMinutes need the deep-space (SDP4) model this operator
+// does not implement, so they are rejected upstream rather than propagated into a
+// wrong ECEF (findings.md B-5). rejectedCount and summary come from the caller's
+// ephemeris.SplitByOrbitRegime / DeepSpaceSummary, keeping this method free of the
+// sgp4 element type.
+//
+// The event is DEFERRED to post-persist (returned, not emitted here) so a failed
+// Status().Update cannot fire an event for a transition that never persisted —
+// otherwise the next reconcile, re-reading the old status, would re-fire it and
+// defeat the transition gate. This mirrors handleFetchError's update-then-event
+// ordering. The note is non-empty only on the first transition into the rejected
+// state, so the short re-propagation cadence (#179) does not flood the stream.
+func (r *SatelliteEphemerisReconciler) reportOrbitRegime(
+	ctx context.Context,
+	eph *ntnv1alpha1.SatelliteEphemeris,
+	rejectedCount int,
+	summary string,
+) string {
+	if rejectedCount == 0 {
+		meta.SetStatusCondition(&eph.Status.Conditions, metav1.Condition{
+			Type:               ntnv1alpha1.ConditionUnsupportedOrbitRegime,
+			Status:             metav1.ConditionFalse,
+			Reason:             "AllNearEarth",
+			Message:            "No deep-space element sets among the tracked satellites",
+			ObservedGeneration: eph.Generation,
+		})
+		return ""
+	}
+
+	// Read the persisted state before mutating it, so the returned note is
+	// non-empty once per entry into the rejected state rather than every reconcile.
+	firstTransition := !meta.IsStatusConditionTrue(eph.Status.Conditions, ntnv1alpha1.ConditionUnsupportedOrbitRegime)
+	meta.SetStatusCondition(&eph.Status.Conditions, metav1.Condition{
+		Type:               ntnv1alpha1.ConditionUnsupportedOrbitRegime,
+		Status:             metav1.ConditionTrue,
+		Reason:             "DeepSpaceElementsRejected",
+		Message:            summary,
+		ObservedGeneration: eph.Generation,
+	})
+	logf.FromContext(ctx).Info("rejected deep-space element sets; near-earth SGP4 cannot propagate them",
+		"rejected", rejectedCount, "detail", summary)
+	if firstTransition {
+		return summary
+	}
+	return ""
 }
 
 // predictPasses resolves ground stations and computes pass windows.

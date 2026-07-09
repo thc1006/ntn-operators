@@ -174,6 +174,12 @@ const (
 	ConditionGPDataFetched   = "GPDataFetched"
 	ConditionGPDataParsed    = "GPDataParsed"
 	ConditionPassesPredicted = "PassesPredicted"
+	// ConditionUnsupportedOrbitRegime is True when the source contained element
+	// sets whose orbital period is >= 225 min (deep space, roughly MEO and up).
+	// The v1.0 propagator is near-earth SGP4 only, so those sets are rejected
+	// rather than propagated into a wrong position; MEO/GEO support is a v1.1
+	// roadmap item. False means every tracked element set is near-earth.
+	ConditionUnsupportedOrbitRegime = "UnsupportedOrbitRegime"
 )
 
 // +kubebuilder:object:root=true
@@ -186,6 +192,12 @@ const (
 // SatelliteEphemeris manages GP data fetching (OMM JSON from CelesTrak/SpaceTrack),
 // orbital propagation (SGP4 via akhenakh/sgp4), and pass prediction for a set of
 // satellites against ground stations.
+//
+// Orbit-regime support: v1.0 is LEO-only. The propagator is the near-earth SGP4
+// model; element sets whose orbital period is >= 225 minutes (deep space —
+// roughly MEO and above, e.g. O3b or GEO) are rejected rather than propagated
+// into a wrong position, and surface as the UnsupportedOrbitRegime status
+// condition. Multi-orbit (MEO/GEO) support is a v1.1 roadmap item.
 type SatelliteEphemeris struct {
 	metav1.TypeMeta `json:",inline"`
 
