@@ -338,7 +338,7 @@ docs/                   # API reference (auto-generated)
 
 ## Grafana Dashboard
 
-Import `config/grafana/ntn-operators-dashboard.json` into your Grafana instance to visualize all 6 custom metrics (failover events, satellite pass availability, ground station health, fetch duration, satellite count, config errors).
+Import `config/grafana/ntn-operators-dashboard.json` into your Grafana instance to visualize 9 custom metrics (failover events, satellite pass availability, ground station health, GP fetch duration, satellite count, config-apply errors, reader errors, reader query duration, stale-read usage).
 
 ## API Reference
 

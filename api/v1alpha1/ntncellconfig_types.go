@@ -442,8 +442,9 @@ type SatSwitchNTNConfig struct {
 	// +optional
 	KMac *int `json:"kMac,omitempty"`
 
-	// cellSpecificKoffset is the target cell-specific K_offset in milliseconds
-	// (1-1023), same semantics as NTNParams.cellSpecificKoffset. 0 omits it.
+	// cellSpecificKoffset is the target cell-specific K_offset in milliseconds,
+	// same semantics as NTNParams.cellSpecificKoffset: 1-1023, with Minimum 1
+	// because OCUDU rejects 0. Omit the field to leave it unset.
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=1023
 	// +optional
