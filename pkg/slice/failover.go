@@ -542,6 +542,140 @@ func EvaluateFailoverWithHysteresis(
 	})
 }
 
+// AntiFlapConfig holds the per-slice anti-flap tunables (from FailoverPolicy).
+// The zero value (ConfirmationSamples 0/1, MinTerrestrialDwell 0) reproduces the
+// prior immediate-failover behavior, so anti-flap is strictly opt-in.
+type AntiFlapConfig struct {
+	// ConfirmationSamples is N: a failover requires the terrestrial triggers to
+	// fire on N CONSECUTIVE reliable samples. <=1 means no confirmation gate.
+	ConfirmationSamples int
+	// MinTerrestrialDwell holds terrestrial for at least this long after a
+	// quality-driven switchback before another failover. 0 disables it.
+	MinTerrestrialDwell time.Duration
+}
+
+// AntiFlapState is the per-slice, in-memory flap-suppression state. It is safe
+// to lose: a reset re-requires N consecutive confirmations and restarts the
+// recovery/dwell clocks, which only ever DELAYS a switch, never advances one
+// (so a controller restart or leader-election handoff cannot cause a spurious
+// flap). Per the Kubernetes API convention, such transient history is best-effort
+// and need not be persisted.
+type AntiFlapState struct {
+	// ConsecutiveDegraded counts consecutive reliable samples on which the
+	// terrestrial triggers fired. Reset to 0 by any healthy/unreliable sample.
+	ConsecutiveDegraded int
+	// RecoveryObservedAt is when terrestrial began its current continuous healthy
+	// streak (zero while degraded). The switchback delay is measured from here, so
+	// a re-degradation resets the switchback clock (a switchback then requires a
+	// fresh switchbackDelay of continuous recovery — the anti-flap-correct
+	// semantics; an absolute window measured from the last failover would switch
+	// back onto a just-recovered, still-unstable terrestrial).
+	RecoveryObservedAt time.Time
+	// LastSwitchback is when the slice last switched back to terrestrial from an
+	// available satellite (a quality-driven, ping-pong-prone hand-back — NOT a
+	// pass-ended forced switchback). Min-dwell is measured from here.
+	LastSwitchback time.Time
+}
+
+// terrestrialDegraded reports whether any valid, live (non-inert) trigger fires
+// against the current metrics — the same OR logic parseTriggerSet uses, but
+// without the logging/parse-accounting. It drives the N-consecutive counter.
+func terrestrialDegraded(triggers []string, m Metrics) bool {
+	for _, s := range triggers {
+		t, err := ParseTrigger(s)
+		if err != nil {
+			continue
+		}
+		if t.metricMissing(m) { // I-10: inert trigger, never evaluate the placeholder
+			continue
+		}
+		if t.Evaluate(m) {
+			return true
+		}
+	}
+	return false
+}
+
+// EvaluateFailoverWithAntiFlap wraps EvaluateFailoverWithHysteresis with the
+// in-memory anti-flap gates. It must be called ONLY with reliable metrics (the
+// caller fails static via EvaluateSafeHold otherwise). It:
+//
+//   - tracks a consecutive-degraded counter and a continuous-recovery timestamp;
+//   - measures the switchback delay from that recovery timestamp (reset on
+//     re-degradation), fixing the premature-switchback flap where the absolute
+//     now-lastFailover timer elapses while terrestrial has only just recovered;
+//   - gates a raw failover behind N-consecutive confirmation and the
+//     post-switchback min-terrestrial-dwell (both bounded — a sustained
+//     degradation still fails over once the gates clear).
+//
+// It returns the decision and the updated state; the caller owns (and may drop)
+// the state. Gating only ever downgrades a Failover to Stay on the current path;
+// it never fabricates a switch.
+func EvaluateFailoverWithAntiFlap(
+	ctx context.Context,
+	currentPath PathType,
+	triggers []string,
+	metrics Metrics,
+	satelliteAvailable bool,
+	switchbackDelay time.Duration,
+	now time.Time,
+	hysteresisMargin float64,
+	cfg AntiFlapConfig,
+	st AntiFlapState,
+) (FailoverResult, AntiFlapState) {
+	// 1. Update the confirmation + recovery clocks from this sample.
+	if terrestrialDegraded(triggers, metrics) {
+		st.ConsecutiveDegraded++
+		st.RecoveryObservedAt = time.Time{} // re-degraded → reset the switchback clock
+	} else {
+		st.ConsecutiveDegraded = 0
+		if st.RecoveryObservedAt.IsZero() {
+			st.RecoveryObservedAt = now // a fresh continuous-recovery streak begins
+		}
+	}
+
+	// 2. Run the base engine, measuring the switchback delay from the recovery
+	//    streak start rather than the absolute last-failover time.
+	res := EvaluateFailoverWithHysteresis(
+		ctx, currentPath, triggers, metrics,
+		satelliteAvailable, switchbackDelay, st.RecoveryObservedAt, now, hysteresisMargin,
+	)
+
+	// 3. Gate a raw failover: require N consecutive confirmations, then honor the
+	//    post-switchback dwell. Both only DELAY a failover; a sustained degradation
+	//    clears them and fails over. Gate only the terrestrial→satellite direction
+	//    (the ping-pong-prone one); a failover FROM an unavailable/uninitialized
+	//    path onto an available satellite is not a flap and must not be delayed.
+	if res.Decision == DecisionFailover && currentPath == PathTerrestrial {
+		switch {
+		case cfg.ConfirmationSamples > 1 && st.ConsecutiveDegraded < cfg.ConfirmationSamples:
+			res = FailoverResult{
+				Decision:   DecisionStay,
+				TargetPath: currentPath,
+				Reason: fmt.Sprintf("Terrestrial degraded, failover unconfirmed (%d/%d consecutive samples)",
+					st.ConsecutiveDegraded, cfg.ConfirmationSamples),
+			}
+		case cfg.MinTerrestrialDwell > 0 && !st.LastSwitchback.IsZero() &&
+			now.Sub(st.LastSwitchback) < cfg.MinTerrestrialDwell:
+			res = FailoverResult{
+				Decision:   DecisionStay,
+				TargetPath: currentPath,
+				Reason: fmt.Sprintf("Terrestrial degraded but within min dwell after switchback (%s remaining)",
+					cfg.MinTerrestrialDwell-now.Sub(st.LastSwitchback)),
+			}
+		}
+	}
+
+	// 4. Start the dwell clock only on a quality-driven hand-back (satellite still
+	//    available). A pass-ended forced switchback (satellite gone) is orbital, not
+	//    a ping-pong, so it must not block the next pass's legitimate re-failover.
+	if res.Decision == DecisionSwitchback && satelliteAvailable {
+		st.LastSwitchback = now
+	}
+
+	return res, st
+}
+
 // EvaluateSafeHold is the fail-static decision used when path-quality metrics are
 // unreliable — the metrics source is unavailable, or the last observed value is
 // stale beyond the freshness bound. Quality-driven transitions (failover on
