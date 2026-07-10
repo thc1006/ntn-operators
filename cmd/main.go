@@ -31,12 +31,10 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
-	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	ntnv1alpha1 "github.com/thc1006/ntn-operators/api/v1alpha1"
 	"github.com/thc1006/ntn-operators/internal/controller"
@@ -45,8 +43,6 @@ import (
 	"github.com/thc1006/ntn-operators/pkg/provider"
 	"github.com/thc1006/ntn-operators/pkg/provider/ocudu"
 	slicemetrics "github.com/thc1006/ntn-operators/pkg/slice/metrics"
-
-	ntnwebhook "github.com/thc1006/ntn-operators/internal/webhook/v1alpha1"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -66,7 +62,6 @@ func init() {
 func main() {
 	var metricsAddr string
 	var metricsCertPath, metricsCertName, metricsCertKey string
-	var webhookCertPath, webhookCertName, webhookCertKey string
 	var enableLeaderElection bool
 	var probeAddr string
 	var secureMetrics bool
@@ -80,24 +75,24 @@ func main() {
 			"Recommended for production to prevent duplicate reconciliations.")
 	flag.BoolVar(&secureMetrics, "metrics-secure", true,
 		"If set, the metrics endpoint is served securely via HTTPS. Use --metrics-secure=false to use HTTP instead.")
-	flag.StringVar(&webhookCertPath, "webhook-cert-path", "", "The directory that contains the webhook certificate.")
-	flag.StringVar(&webhookCertName, "webhook-cert-name", "tls.crt", "The name of the webhook certificate file.")
-	flag.StringVar(&webhookCertKey, "webhook-cert-key", "tls.key", "The name of the webhook key file.")
 	flag.StringVar(&metricsCertPath, "metrics-cert-path", "",
 		"The directory that contains the metrics server certificate.")
 	flag.StringVar(&metricsCertName, "metrics-cert-name", "tls.crt", "The name of the metrics server certificate file.")
 	flag.StringVar(&metricsCertKey, "metrics-cert-key", "tls.key", "The name of the metrics server key file.")
 	flag.BoolVar(&enableHTTP2, "enable-http2", false,
-		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
+		"If set, HTTP/2 will be enabled for the metrics server")
 	var maxConcurrentReconciles int
 	flag.IntVar(&maxConcurrentReconciles, "max-concurrent-reconciles", 1,
 		"Maximum number of concurrent reconciles per controller.")
 	var prometheusAllowedHosts string
 	flag.StringVar(&prometheusAllowedHosts, "prometheus-allowed-endpoint-hosts", "",
 		"Comma-separated list of hostnames that NTNSlice.spec.metricsSource.prometheus.endpoint "+
-			"is allowed to target. Empty (default) is permit-all, which matches the pre-flag "+
-			"behaviour for single-tenant deployments. Set this in multi-tenant clusters so a "+
-			"tenant cannot aim the operator at arbitrary cluster-internal services.")
+			"is allowed to target. This gates the hostname AND exempts that host from the "+
+			"dial-level SSRF guard. Empty (default) permits any PUBLIC Prometheus but BLOCKS "+
+			"dials to private/reserved IPs (cloud metadata, internal ClusterIP services). "+
+			"An in-cluster Prometheus at a private ClusterIP must be listed here (by host), "+
+			"and multi-tenant clusters should list only the sanctioned endpoints so a tenant "+
+			"cannot aim the operator at arbitrary cluster-internal services.")
 	var ephemerisAllowedPrivateHosts string
 	flag.StringVar(&ephemerisAllowedPrivateHosts, "ephemeris-allowed-private-hosts", "",
 		"Comma-separated list of hostnames whose resolved private/reserved IPs are "+
@@ -132,23 +127,6 @@ func main() {
 	if !enableHTTP2 {
 		tlsOpts = append(tlsOpts, disableHTTP2)
 	}
-
-	// Initial webhook TLS options
-	webhookTLSOpts := tlsOpts
-	webhookServerOptions := webhook.Options{
-		TLSOpts: webhookTLSOpts,
-	}
-
-	if len(webhookCertPath) > 0 {
-		setupLog.Info("Initializing webhook certificate watcher using provided certificates",
-			"webhook-cert-path", webhookCertPath, "webhook-cert-name", webhookCertName, "webhook-cert-key", webhookCertKey)
-
-		webhookServerOptions.CertDir = webhookCertPath
-		webhookServerOptions.CertName = webhookCertName
-		webhookServerOptions.KeyName = webhookCertKey
-	}
-
-	webhookServer := webhook.NewServer(webhookServerOptions)
 
 	// Metrics endpoint is enabled in 'config/default/kustomization.yaml'. The Metrics options configure the server.
 	// More info:
@@ -188,7 +166,6 @@ func main() {
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme:                 scheme,
 		Metrics:                metricsServerOptions,
-		WebhookServer:          webhookServer,
 		HealthProbeBindAddress: probeAddr,
 		LeaderElection:         enableLeaderElection,
 		LeaderElectionID:       "b1076767.operators.dev",
@@ -253,10 +230,17 @@ func main() {
 	}
 	// Shared across NTNSlice reconciles: one pool of Prometheus clients
 	// keyed by endpoint, and one Provider that picks the right Reader
-	// (annotations | prometheus) based on each NTNSlice spec.
-	metricsPool := slicemetrics.NewClientPool()
+	// (annotations | prometheus) based on each NTNSlice spec. The same
+	// allowlist serves both layers: the Provider's hostname gate (permit-all
+	// when empty) and the pool's SSRF-safe dialer's private-host bypass
+	// (permit-nothing when empty). So by default the operator reaches any
+	// PUBLIC Prometheus but is blocked from dialing private/reserved IPs
+	// (cloud metadata, internal ClusterIP services) — an in-cluster Prometheus
+	// must be allow-listed by host (findings.md I-24).
+	promAllow := netutil.ParseEndpointAllowlist(prometheusAllowedHosts)
+	metricsPool := slicemetrics.NewClientPool(slicemetrics.WithSafeClient(promAllow))
 	metricsProvider := slicemetrics.NewProvider(metricsPool,
-		slicemetrics.WithEndpointAllowlist(netutil.ParseEndpointAllowlist(prometheusAllowedHosts)))
+		slicemetrics.WithEndpointAllowlist(promAllow))
 	if err := (&controller.NTNSliceReconciler{
 		Client:                  mgr.GetClient(),
 		Scheme:                  mgr.GetScheme(),
@@ -269,16 +253,9 @@ func main() {
 	}
 	// +kubebuilder:scaffold:builder
 
-	// Validating webhooks — only register when webhook certificates are configured.
-	if len(webhookCertPath) > 0 {
-		if err := builder.WebhookManagedBy(mgr, &ntnv1alpha1.NTNSlice{}).
-			WithValidator(&ntnwebhook.NTNSliceCustomValidator{}).
-			Complete(); err != nil {
-			setupLog.Error(err, "unable to create webhook", "webhook", "NTNSlice")
-			os.Exit(1)
-		}
-		setupLog.Info("Validating webhooks enabled")
-	}
+	// NTNSlice failover-trigger syntax is validated at admission by the CEL
+	// x-kubernetes-validations rule on the CRD (api/v1alpha1), so no validating
+	// webhook (and no cert-manager dependency) is needed — see findings.md B-2.
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
 		setupLog.Error(err, "Failed to set up health check")

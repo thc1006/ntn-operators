@@ -11,9 +11,14 @@ You may obtain a copy of the License at
 package metrics_test
 
 import (
+	"context"
+	"errors"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 
+	"github.com/thc1006/ntn-operators/pkg/netutil"
 	"github.com/thc1006/ntn-operators/pkg/slice/metrics"
 )
 
@@ -55,6 +60,62 @@ func TestClientPool_InvalidEndpointIsRejected(t *testing.T) {
 	_, err := p.Get("::not a url::")
 	if err == nil {
 		t.Fatal("expected error for malformed endpoint")
+	}
+}
+
+// TestClientPool_SafeClientBlocksPrivateIP proves the dial-level SSRF guard
+// (findings.md I-24): with WithSafeClient and an empty allowlist, a query to the
+// cloud-metadata / link-local address is blocked at DIAL (building the client
+// still succeeds — the block is not at construction).
+func TestClientPool_SafeClientBlocksPrivateIP(t *testing.T) {
+	p := metrics.NewClientPool(metrics.WithSafeClient(netutil.EndpointAllowlist{}))
+	c, err := p.Get("http://169.254.169.254:9090") // AWS/GCP/Azure IMDS
+	if err != nil {
+		t.Fatalf("building the client must succeed (SSRF block is at dial, not build): %v", err)
+	}
+	_, qerr := c.Query(context.Background(), "up", time.Unix(0, 0))
+	if qerr == nil {
+		t.Fatal("a query to the link-local metadata IP must be blocked at dial")
+	}
+	if !errors.Is(qerr, netutil.ErrPrivateIP) && !strings.Contains(qerr.Error(), "private") {
+		t.Errorf("expected a private-IP block, got: %v", qerr)
+	}
+}
+
+// TestClientPool_SafeClientAllowsListedHost proves an allow-listed host bypasses
+// the private-IP block, so an in-cluster Prometheus keeps working once its host
+// is listed. localhost resolves to loopback (a private IP); with it allow-listed
+// the dial proceeds and fails for a NON-SSRF reason (connection refused), never
+// ErrPrivateIP.
+func TestClientPool_SafeClientAllowsListedHost(t *testing.T) {
+	allow := netutil.ParseEndpointAllowlist("localhost")
+	p := metrics.NewClientPool(metrics.WithSafeClient(allow))
+	c, err := p.Get("http://localhost:9090")
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	_, qerr := c.Query(context.Background(), "up", time.Unix(0, 0))
+	if qerr != nil && errors.Is(qerr, netutil.ErrPrivateIP) {
+		t.Errorf("an allow-listed host must bypass the private-IP block, got: %v", qerr)
+	}
+}
+
+// TestClientPool_NoSafeClientDoesNotBlock documents that WITHOUT WithSafeClient
+// (the test/lazy-default construction) there is no dial guard — this is why
+// production MUST pass WithSafeClient.
+func TestClientPool_NoSafeClientDoesNotBlock(t *testing.T) {
+	p := metrics.NewClientPool() // no safe client
+	c, err := p.Get("http://169.254.169.254:9090")
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	// The dial is NOT blocked by an SSRF guard; it fails only by connect
+	// error/timeout. Assert it is not the ErrPrivateIP sentinel.
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	_, qerr := c.Query(ctx, "up", time.Unix(0, 0))
+	if qerr != nil && errors.Is(qerr, netutil.ErrPrivateIP) {
+		t.Errorf("plain pool must not apply the SSRF guard, got ErrPrivateIP: %v", qerr)
 	}
 }
 

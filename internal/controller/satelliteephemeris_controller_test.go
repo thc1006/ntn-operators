@@ -82,6 +82,49 @@ func testISSOMM() sgp4.OMM {
 	}
 }
 
+// testMEOOMM creates a deep-space MEO (period ~288 min, O3b-class) inclined to
+// transit Taipei, with epoch now. Unlike a GEO — which is never visible from
+// Taipei, so a leak leaves no observable trace — a wrongly near-earth-propagated
+// MEO DOES produce pass windows over the test ground station (probe-verified:
+// ≥3 windows for any 24h start). It therefore gives the pass-prediction exclusion
+// test real teeth: if the guard stopped filtering it, it would surface in
+// NextPassWindows and fail the assertion.
+func testMEOOMM() sgp4.OMM {
+	return sgp4.OMM{
+		ObjectName:      "O3B-TEST (MEO)",
+		ObjectID:        "2020-001A",
+		EpochStr:        time.Now().UTC().Format("2006-01-02T15:04:05.000000"),
+		MeanMotion:      5.0, // ~288 min period → deep space
+		Eccentricity:    0.001,
+		Inclination:     55.0, // transits Taipei (25°N)
+		RAOfAscNode:     60.0,
+		ArgOfPericenter: 0.0,
+		MeanAnomaly:     0.0,
+		NoradCatID:      49999,
+	}
+}
+
+// testGEOOMM creates a deep-space (GEO, ~1436 min period) OMM with epoch now.
+// It drives the orbit-regime guard (findings.md B-5): the near-earth SGP4
+// propagator must reject it rather than propagate it into a wrong position.
+func testGEOOMM() sgp4.OMM {
+	return sgp4.OMM{
+		ObjectName:      "INTELSAT-10 (TEST)",
+		ObjectID:        "2004-022A",
+		EpochStr:        time.Now().UTC().Format("2006-01-02T15:04:05.000000"),
+		MeanMotion:      1.00272, // ~1436 min period → deep space
+		Eccentricity:    0.0003,
+		Inclination:     0.05,
+		RAOfAscNode:     75.0,
+		ArgOfPericenter: 0.0,
+		MeanAnomaly:     0.0,
+		NoradCatID:      28358,
+		BStar:           0.0,
+		MeanMotionDot:   0,
+		MeanMotionDDot:  0,
+	}
+}
+
 var _ = Describe("SatelliteEphemeris Controller", func() {
 	const resourceName = "test-ephemeris"
 	const gsName = "gs-taipei-01"
@@ -104,6 +147,21 @@ var _ = Describe("SatelliteEphemeris Controller", func() {
 					URL:             "https://celestrak.org/NORAD/elements/gp.php?GROUP=oneweb&FORMAT=JSON",
 					RefreshInterval: metav1.Duration{Duration: 4 * time.Hour},
 				},
+			},
+		}
+		Expect(k8sClient.Create(context.Background(), resource)).To(Succeed())
+	}
+
+	createResourceTrackingNoradIDs := func(ids ...int) {
+		resource := &ntnv1alpha1.SatelliteEphemeris{
+			ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: namespace},
+			Spec: ntnv1alpha1.SatelliteEphemerisSpec{
+				Source: ntnv1alpha1.EphemerisSource{
+					Type:            "CelesTrak",
+					URL:             "https://celestrak.org/NORAD/elements/gp.php?GROUP=oneweb&FORMAT=JSON",
+					RefreshInterval: metav1.Duration{Duration: 4 * time.Hour},
+				},
+				Satellites: &ntnv1alpha1.SatelliteSelector{NoradIDs: ids},
 			},
 		}
 		Expect(k8sClient.Create(context.Background(), resource)).To(Succeed())
@@ -217,6 +275,189 @@ var _ = Describe("SatelliteEphemeris Controller", func() {
 			parsedCond := meta.FindStatusCondition(updated.Status.Conditions, ntnv1alpha1.ConditionGPDataParsed)
 			Expect(parsedCond).NotTo(BeNil())
 			Expect(parsedCond.Status).To(Equal(metav1.ConditionTrue))
+		})
+	})
+
+	// --- Orbit-regime guard (findings.md B-5): reject deep-space element sets ---
+
+	Context("When the source contains deep-space element sets", func() {
+		BeforeEach(func() { createResource() })
+		AfterEach(func() { deleteResource() })
+
+		It("rejects them, propagates only near-earth sats, and sets UnsupportedOrbitRegime", func() {
+			mock := &mockGPFetcher{
+				result: ephemeris.GPFetchResult{
+					// One LEO (ISS, propagatable) + one GEO (deep space, must be rejected).
+					OMMs:           []sgp4.OMM{testISSOMM(), testGEOOMM()},
+					SatelliteCount: 2,
+					FetchedAt:      time.Now(),
+				},
+			}
+			reconciler := newReconciler(mock)
+
+			_, err := reconciler.Reconcile(context.Background(), reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			updated := &ntnv1alpha1.SatelliteEphemeris{}
+			Expect(k8sClient.Get(context.Background(), typeNamespacedName, updated)).To(Succeed())
+
+			// The guard condition is True with the deep-space reason.
+			cond := meta.FindStatusCondition(updated.Status.Conditions, ntnv1alpha1.ConditionUnsupportedOrbitRegime)
+			Expect(cond).NotTo(BeNil())
+			Expect(cond.Status).To(Equal(metav1.ConditionTrue))
+			Expect(cond.Reason).To(Equal("DeepSpaceElementsRejected"))
+
+			// SatelliteCount stays the honest fetched count (2), but only the LEO
+			// satellite is propagated — the GEO one never reaches the propagator.
+			Expect(updated.Status.SatelliteCount).To(Equal(2))
+			Expect(updated.Status.PropagatedStates).To(HaveLen(1))
+			Expect(updated.Status.PropagatedStates[0].NoradID).To(Equal(25544)) // ISS, not the GEO 28358
+		})
+	})
+
+	Context("When the source is entirely near-earth", func() {
+		BeforeEach(func() { createResource() })
+		AfterEach(func() { deleteResource() })
+
+		It("sets UnsupportedOrbitRegime to False (AllNearEarth)", func() {
+			mock := &mockGPFetcher{
+				result: ephemeris.GPFetchResult{
+					OMMs:           []sgp4.OMM{testISSOMM()},
+					SatelliteCount: 1,
+					FetchedAt:      time.Now(),
+				},
+			}
+			reconciler := newReconciler(mock)
+
+			_, err := reconciler.Reconcile(context.Background(), reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			updated := &ntnv1alpha1.SatelliteEphemeris{}
+			Expect(k8sClient.Get(context.Background(), typeNamespacedName, updated)).To(Succeed())
+
+			cond := meta.FindStatusCondition(updated.Status.Conditions, ntnv1alpha1.ConditionUnsupportedOrbitRegime)
+			Expect(cond).NotTo(BeNil())
+			Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+			Expect(cond.Reason).To(Equal("AllNearEarth"))
+			Expect(updated.Status.PropagatedStates).To(HaveLen(1))
+		})
+	})
+
+	Context("When the source is a cleartext http:// URL resolving to a public IP (I-21)", func() {
+		// A public http source is a forged-OMM-into-SIB19 vector; it must be
+		// refused BEFORE any fetch. In-cluster http mirrors (private-resolving)
+		// stay allowed and are covered by the TestPublicHTTPSource unit table.
+		insecureName := types.NamespacedName{Name: "eph-insecure-http", Namespace: namespace}
+		AfterEach(func() {
+			r := &ntnv1alpha1.SatelliteEphemeris{}
+			if err := k8sClient.Get(context.Background(), insecureName, r); err == nil {
+				Expect(k8sClient.Delete(context.Background(), r)).To(Succeed())
+			}
+		})
+
+		It("rejects with InsecureURL and never calls the fetcher", func() {
+			resource := &ntnv1alpha1.SatelliteEphemeris{
+				ObjectMeta: metav1.ObjectMeta{Name: insecureName.Name, Namespace: namespace},
+				Spec: ntnv1alpha1.SatelliteEphemerisSpec{
+					Source: ntnv1alpha1.EphemerisSource{
+						Type:            "CelesTrak",
+						URL:             "http://8.8.8.8/gp.json", // literal public IP over cleartext
+						RefreshInterval: metav1.Duration{Duration: 4 * time.Hour},
+					},
+				},
+			}
+			Expect(k8sClient.Create(context.Background(), resource)).To(Succeed())
+
+			mock := &mockGPFetcher{result: ephemeris.GPFetchResult{SatelliteCount: 1, FetchedAt: time.Now()}}
+			_, err := newReconciler(mock).Reconcile(context.Background(), reconcile.Request{NamespacedName: insecureName})
+			Expect(err).NotTo(HaveOccurred())
+
+			updated := &ntnv1alpha1.SatelliteEphemeris{}
+			Expect(k8sClient.Get(context.Background(), insecureName, updated)).To(Succeed())
+			cond := meta.FindStatusCondition(updated.Status.Conditions, ntnv1alpha1.ConditionGPDataFetched)
+			Expect(cond).NotTo(BeNil())
+			Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+			Expect(cond.Reason).To(Equal("InsecureURL"))
+			// The fetch must NOT have happened — the guard runs before it.
+			Expect(mock.callCount()).To(Equal(0))
+		})
+	})
+
+	Context("When a deep-space set is in the feed but excluded via spec.satellites.noradIDs", func() {
+		// The operator narrows tracking to LEO sats; the upstream feed still carries
+		// a GEO. The guard must NOT raise UnsupportedOrbitRegime for a bird the
+		// operator explicitly excluded (adversarial-review IMPORTANT: tracked-scoped
+		// reporting, not source-scoped).
+		BeforeEach(func() { createResourceTrackingNoradIDs(25544) }) // ISS only
+		AfterEach(func() { deleteResource() })
+
+		It("does not false-alarm; condition is False and only the tracked LEO is propagated", func() {
+			mock := &mockGPFetcher{
+				result: ephemeris.GPFetchResult{
+					OMMs:           []sgp4.OMM{testISSOMM(), testGEOOMM()}, // GEO 28358 is NOT tracked
+					SatelliteCount: 2,
+					FetchedAt:      time.Now(),
+				},
+			}
+			reconciler := newReconciler(mock)
+
+			_, err := reconciler.Reconcile(context.Background(), reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			updated := &ntnv1alpha1.SatelliteEphemeris{}
+			Expect(k8sClient.Get(context.Background(), typeNamespacedName, updated)).To(Succeed())
+
+			cond := meta.FindStatusCondition(updated.Status.Conditions, ntnv1alpha1.ConditionUnsupportedOrbitRegime)
+			Expect(cond).NotTo(BeNil())
+			Expect(cond.Status).To(Equal(metav1.ConditionFalse), "excluded GEO must not raise the condition")
+			Expect(cond.Reason).To(Equal("AllNearEarth"))
+
+			Expect(updated.Status.PropagatedStates).To(HaveLen(1))
+			Expect(updated.Status.PropagatedStates[0].NoradID).To(Equal(25544))
+		})
+	})
+
+	Context("When pass prediction is configured and the feed contains a deep-space set", func() {
+		// Locks in that deep-space sets are excluded from pass prediction, not just
+		// from propagated states (adversarial-review NIT: the pass-prediction path
+		// shares result.OMMs but was previously unasserted).
+		BeforeEach(func() {
+			createGroundStation()
+			createResourceWithPassPrediction()
+		})
+		AfterEach(func() {
+			deleteResource()
+			deleteGroundStation()
+		})
+
+		It("rejects the deep-space set and never lists it in NextPassWindows", func() {
+			// Use a MEO (not a GEO): a wrongly near-earth-propagated MEO WOULD
+			// produce Taipei pass windows, so removing the guard makes this test
+			// fail (real teeth). A GEO never rises over Taipei, so it could not.
+			mock := &mockGPFetcher{
+				result: ephemeris.GPFetchResult{
+					OMMs:           []sgp4.OMM{testISSOMM(), testMEOOMM()},
+					SatelliteCount: 2,
+					FetchedAt:      time.Now(),
+				},
+			}
+			reconciler := newReconciler(mock)
+
+			_, err := reconciler.Reconcile(context.Background(), reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			updated := &ntnv1alpha1.SatelliteEphemeris{}
+			Expect(k8sClient.Get(context.Background(), typeNamespacedName, updated)).To(Succeed())
+
+			// The MEO was in scope (no noradIDs) and rejected...
+			cond := meta.FindStatusCondition(updated.Status.Conditions, ntnv1alpha1.ConditionUnsupportedOrbitRegime)
+			Expect(cond).NotTo(BeNil())
+			Expect(cond.Status).To(Equal(metav1.ConditionTrue))
+			// ...and never reaches pass prediction: no window may reference it,
+			// even though it would produce windows if it had leaked through.
+			for _, w := range updated.Status.NextPassWindows {
+				Expect(w.Satellite).NotTo(Equal("O3B-TEST (MEO)"), "deep-space sat leaked into pass prediction")
+			}
 		})
 	})
 

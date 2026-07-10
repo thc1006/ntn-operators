@@ -32,7 +32,11 @@ type EphemerisSource struct {
 	// +kubebuilder:validation:Enum=CelesTrak;SpaceTrack
 	Type string `json:"type"`
 
-	// url is the endpoint to fetch GP data from.
+	// url is the endpoint to fetch GP data from. Use https for any public
+	// source: a cleartext http:// URL that resolves to a public IP is refused
+	// at runtime (InsecureURL condition) because an on-path attacker could
+	// inject forged OMM data that is propagated into SIB19. http:// is permitted
+	// only for a private/in-cluster mirror (NetworkPolicy-protected).
 	// For CelesTrak: https://celestrak.org/NORAD/elements/gp.php?GROUP=oneweb&FORMAT=JSON
 	// For SpaceTrack: https://www.space-track.org/basicspacedata/query/class/gp/...
 	// +kubebuilder:validation:MinLength=1
@@ -174,6 +178,17 @@ const (
 	ConditionGPDataFetched   = "GPDataFetched"
 	ConditionGPDataParsed    = "GPDataParsed"
 	ConditionPassesPredicted = "PassesPredicted"
+	// ConditionUnsupportedOrbitRegime is True when the source contained element
+	// sets whose orbital period is >= 225 min (deep space, roughly MEO and up).
+	// The v1.0 propagator is near-earth SGP4 only, so those sets are rejected
+	// rather than propagated into a wrong position; MEO/GEO support is a v1.1
+	// roadmap item. False means every tracked element set is near-earth.
+	ConditionUnsupportedOrbitRegime = "UnsupportedOrbitRegime"
+	// ConditionEphemerisEpochStale is True when one or more propagated element
+	// sets have an epoch older than the freshness bound, so the pushed ECEF is
+	// derived from stale elements and drifting (SGP4 in-track error grows with
+	// age from the element epoch). False means all propagated epochs are fresh.
+	ConditionEphemerisEpochStale = "EphemerisEpochStale"
 )
 
 // +kubebuilder:object:root=true
@@ -186,6 +201,12 @@ const (
 // SatelliteEphemeris manages GP data fetching (OMM JSON from CelesTrak/SpaceTrack),
 // orbital propagation (SGP4 via akhenakh/sgp4), and pass prediction for a set of
 // satellites against ground stations.
+//
+// Orbit-regime support: v1.0 is LEO-only. The propagator is the near-earth SGP4
+// model; element sets whose orbital period is >= 225 minutes (deep space —
+// roughly MEO and above, e.g. O3b or GEO) are rejected rather than propagated
+// into a wrong position, and surface as the UnsupportedOrbitRegime status
+// condition. Multi-orbit (MEO/GEO) support is a v1.1 roadmap item.
 type SatelliteEphemeris struct {
 	metav1.TypeMeta `json:",inline"`
 

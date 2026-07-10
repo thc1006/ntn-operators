@@ -102,7 +102,7 @@ spec:
 
     ### Prerequisites
     - Kubernetes 1.29+
-    - cert-manager (optional, for webhook TLS)
+    - cert-manager (optional, for metrics TLS)
   displayName: NTN Operators
   icon:
     - base64data: PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA2NCA2NCI+PGNpcmNsZSBjeD0iMzIiIGN5PSIzMiIgcj0iMzAiIGZpbGw9IiMxYTczZTgiLz48dGV4dCB4PSIzMiIgeT0iNDAiIGZvbnQtc2l6ZT0iMjAiIGZpbGw9IndoaXRlIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LWZhbWlseT0ic2Fucy1zZXJpZiI+TlROPC90ZXh0Pjwvc3ZnPg==
@@ -115,6 +115,9 @@ spec:
               resources: [configmaps]
               verbs: [create, delete, get, list, patch, update, watch]
             - apiGroups: [""]
+              resources: [events]
+              verbs: [create, patch]
+            - apiGroups: [events.k8s.io]
               resources: [events]
               verbs: [create, patch]
             - apiGroups: [""]

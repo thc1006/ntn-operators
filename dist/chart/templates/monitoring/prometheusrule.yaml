@@ -1,0 +1,92 @@
+{{- if .Values.prometheus.enable }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+    app.kubernetes.io/name: {{ include "ntn-operators.name" . }}
+    helm.sh/chart: {{ .Chart.Name }}-{{ .Chart.Version | replace "+" "_" }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    control-plane: controller-manager
+    {{- with .Values.prometheus.ruleLabels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  name: {{ include "ntn-operators.resourceName" (dict "suffix" "alerts" "context" $) }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  groups:
+    - name: ntn-operators.ephemeris
+      rules:
+        # An element set old enough that its SGP4 propagation is drifting is being
+        # pushed into SIB19 (findings.md I-17/I-19). Pairs with EphemerisEpochStale.
+        - alert: NTNEphemerisEpochStale
+          expr: ntn_operators_ephemeris_epoch_stale_count > 0
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "SatelliteEphemeris {{`{{ $labels.namespace }}/{{ $labels.ephemeris }}`}} is propagating stale elements"
+            description: "{{`{{ $value }}`}} tracked element set(s) have an epoch older than the freshness bound; the ECEF pushed to the gNB is drifting."
+        # Deep-space (MEO/GEO) element sets are being dropped by the LEO-only guard
+        # (findings.md B-5). A fleet expecting MEO/GEO coverage would silently lose it.
+        - alert: NTNDeepSpaceElementsRejected
+          expr: ntn_operators_gp_deep_space_rejected_count > 0
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "SatelliteEphemeris {{`{{ $labels.namespace }}/{{ $labels.ephemeris }}`}} is rejecting deep-space element sets"
+            description: "{{`{{ $value }}`}} tracked element set(s) are MEO/GEO (period >= 225 min); v1.0 is LEO-only."
+        # No successful GP fetch is producing satellites — the pipeline is dark.
+        - alert: NTNNoSatellitesTracked
+          expr: ntn_operators_gp_satellite_count == 0
+          for: 30m
+          labels:
+            severity: warning
+          annotations:
+            summary: "SatelliteEphemeris {{`{{ $labels.namespace }}/{{ $labels.ephemeris }}`}} tracks zero satellites"
+            description: "The latest GP fetch produced no satellites for 30m."
+    - name: ntn-operators.gnb-push
+      rules:
+        # Runtime NTN ephemeris push to the gNB is failing (findings.md I-19). This
+        # is the v0.6 WebSocket push path that ConfigApplyErrorsTotal does not cover.
+        - alert: NTNEphemerisPushFailing
+          expr: increase(ntn_operators_ephemeris_push_errors_total[15m]) > 0
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "NTNCellConfig {{`{{ $labels.namespace }}/{{ $labels.config }}`}} ephemeris push is failing ({{`{{ $labels.reason }}`}})"
+            description: "Runtime NTN ephemeris push to the gNB has failed in the last 15m."
+        # Static provider config apply is erroring.
+        - alert: NTNConfigApplyErrors
+          expr: increase(ntn_operators_config_apply_errors_total[15m]) > 0
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "NTNCellConfig {{`{{ $labels.namespace }}/{{ $labels.config }}`}} provider apply is erroring"
+            description: "Static provider config apply has failed in the last 15m."
+    - name: ntn-operators.failover
+      rules:
+        # Sustained failover churn — flapping between terrestrial and satellite.
+        - alert: NTNSliceFailoverFlapping
+          expr: increase(ntn_operators_failover_total[15m]) > 4
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "NTNSlice {{`{{ $labels.namespace }}/{{ $labels.slice }}`}} is flapping"
+            description: "More than 4 path switches in 15m ({{`{{ $value }}`}})."
+    - name: ntn-operators.controller
+      rules:
+        # Elevated reconcile error rate across any controller.
+        - alert: NTNControllerReconcileErrors
+          expr: sum by (controller) (rate(controller_runtime_reconcile_errors_total[5m])) > 0.1
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Controller {{`{{ $labels.controller }}`}} reconcile error rate is elevated"
+            description: "Reconcile errors > 0.1/s for 15m."
+{{- end }}

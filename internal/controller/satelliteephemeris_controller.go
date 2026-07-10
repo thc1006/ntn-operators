@@ -20,7 +20,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
+	neturl "net/url"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -32,6 +35,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	ctrlrt "sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
@@ -43,9 +47,17 @@ import (
 	ntnv1alpha1 "github.com/thc1006/ntn-operators/api/v1alpha1"
 	"github.com/thc1006/ntn-operators/pkg/ephemeris"
 	ntnmetrics "github.com/thc1006/ntn-operators/pkg/metrics"
+	"github.com/thc1006/ntn-operators/pkg/netutil"
 )
 
 const minRefreshInterval = 2 * time.Hour
+
+// maxRefreshInterval bounds how stale a fetched element set may become: GP data
+// is re-fetched at least this often, so SGP4 propagation never runs on an element
+// set older than roughly this age (LEO in-track error grows ~1–3 km/day from the
+// element epoch). CelesTrak/SpaceTrack publish updates well within a day, so a
+// daily floor on freshness costs nothing (findings.md I-17).
+const maxRefreshInterval = 24 * time.Hour
 
 // SatelliteEphemerisReconciler reconciles a SatelliteEphemeris object
 type SatelliteEphemerisReconciler struct {
@@ -70,6 +82,7 @@ type SatelliteEphemerisReconciler struct {
 // +kubebuilder:rbac:groups=ntn.operators.dev,resources=groundstationlifecycles,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
+// +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
 
 // Reconcile fetches GP data, computes pass predictions, and updates status.
 func (r *SatelliteEphemerisReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -88,19 +101,34 @@ func (r *SatelliteEphemerisReconciler) Reconcile(ctx context.Context, req ctrl.R
 			// accumulate dead series across create/delete churn, and drop its
 			// cached OMMs so the in-memory cache does not leak (#179).
 			ntnmetrics.GPSatelliteCount.DeletePartialMatch(prometheus.Labels{"namespace": req.Namespace, "ephemeris": req.Name})
+			ntnmetrics.GPDeepSpaceRejectedCount.DeletePartialMatch(prometheus.Labels{"namespace": req.Namespace, "ephemeris": req.Name})
+			ntnmetrics.EphemerisEpochStaleCount.DeletePartialMatch(prometheus.Labels{"namespace": req.Namespace, "ephemeris": req.Name})
 			r.ommCache.Delete(req.NamespacedName)
 		}
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	// Step 2: Enforce minimum refresh interval.
+	// Step 2: Clamp the refresh interval into [minRefreshInterval, maxRefreshInterval].
+	// The floor honours the GP source's rate-limit etiquette; the ceiling bounds how
+	// stale the element set may get — an unbounded refreshInterval (e.g. 720h) would
+	// re-propagate a 30-day-old element set as if fresh, and LEO SGP4 error grows
+	// ~1–3 km/day from the element epoch (findings.md I-17). metav1.Duration
+	// serialises as a string, so both bounds are enforced here rather than via CEL.
 	effectiveInterval := eph.Spec.Source.RefreshInterval.Duration
-	if effectiveInterval < minRefreshInterval {
-		log.Info("RefreshInterval below minimum, clamping to 2h", "configured", effectiveInterval, "effective", minRefreshInterval)
+	switch {
+	case effectiveInterval < minRefreshInterval:
+		log.Info("RefreshInterval below minimum, clamping", "configured", effectiveInterval, "effective", minRefreshInterval)
 		effectiveInterval = minRefreshInterval
 		if r.Recorder != nil {
 			r.Recorder.Eventf(eph, nil, "Warning", "RefreshIntervalClamped", "RefreshIntervalClamped",
 				"refreshInterval %s is below minimum 2h; using 2h", eph.Spec.Source.RefreshInterval.Duration)
+		}
+	case effectiveInterval > maxRefreshInterval:
+		log.Info("RefreshInterval above maximum, clamping", "configured", effectiveInterval, "effective", maxRefreshInterval)
+		effectiveInterval = maxRefreshInterval
+		if r.Recorder != nil {
+			r.Recorder.Eventf(eph, nil, "Warning", "RefreshIntervalClamped", "RefreshIntervalClamped",
+				"refreshInterval %s exceeds maximum 24h; using 24h to keep the element set fresh", eph.Spec.Source.RefreshInterval.Duration)
 		}
 	}
 
@@ -137,6 +165,14 @@ func (r *SatelliteEphemerisReconciler) Reconcile(ctx context.Context, req ctrl.R
 		log.V(1).Info("re-propagating from cached OMMs; GP source not contacted",
 			"cacheAge", now.Sub(c.result.FetchedAt).String(), "refreshInterval", effectiveInterval.String())
 	} else {
+		// Refuse a cleartext http:// source that resolves to a PUBLIC IP: an
+		// on-path attacker could inject forged OMM JSON that is propagated into
+		// SIB19 (findings.md I-21). In-cluster http mirrors and E2E mocks (which
+		// resolve to private IPs, behind NetworkPolicy) stay allowed, and https
+		// is always fine.
+		if ip, insecure := r.publicHTTPSource(ctx, eph.Spec.Source.URL); insecure {
+			return r.handleInsecureURL(ctx, eph, ip)
+		}
 		fetchStart := time.Now()
 		var fetchErr error
 		result, fetchErr = fetcher.Fetch(ctx, eph.Spec.Source.URL)
@@ -220,6 +256,32 @@ func (r *SatelliteEphemerisReconciler) Reconcile(ctx context.Context, req ctrl.R
 		})
 	}
 
+	// Step 6b: Orbit-regime guard (findings.md B-5). The bundled SGP4 propagator
+	// (github.com/akhenakh/sgp4) is near-earth only — it hardcodes
+	// use_deep_space_ = false — so an element set whose orbital period is >= 225
+	// min (roughly MEO and up) would be propagated into a silently-wrong ECEF.
+	// Reject those explicitly here so only the near-earth set reaches pass
+	// prediction and the runtime-push propagation below. v1.0 is LEO-only; MEO/GEO
+	// support is a v1.1 roadmap item. SplitByOrbitRegime allocates fresh slices, so
+	// the cached OMMs stored above are not mutated by reassigning result.OMMs.
+	nearEarth, deepSpace := ephemeris.SplitByOrbitRegime(result.OMMs)
+	result.OMMs = nearEarth
+	// Report only on the tracked (spec.satellites.noradIDs) deep-space sets. A
+	// broad/mixed upstream feed (e.g. a CelesTrak group with LEO + MEO + GEO) must
+	// not raise UnsupportedOrbitRegime for MEO/GEO birds the operator explicitly
+	// excluded via noradIDs — that would be a false alarm on satellites they never
+	// intended to propagate. An unset selector tracks the whole feed, so every
+	// deep-space set is reported. Propagation is already deep-space-free (result.OMMs
+	// above); propagateStates / predictPasses then apply this same noradIDs selector,
+	// so only tracked near-earth sats are ever propagated.
+	var trackedNorad []int
+	if eph.Spec.Satellites != nil {
+		trackedNorad = eph.Spec.Satellites.NoradIDs
+	}
+	trackedDeepSpace := ephemeris.FilterOMMs(deepSpace, trackedNorad)
+	orbitRegimeEvent := r.reportOrbitRegime(ctx, eph, len(trackedDeepSpace), ephemeris.DeepSpaceSummary(trackedDeepSpace))
+	ntnmetrics.GPDeepSpaceRejectedCount.With(prometheus.Labels{"namespace": eph.Namespace, "ephemeris": eph.Name}).Set(float64(len(trackedDeepSpace)))
+
 	// Step 7: Compute pass predictions if configured; clear stale data if disabled.
 	if eph.Spec.PassPrediction != nil && len(eph.Spec.PassPrediction.GroundStations) > 0 {
 		if err := r.predictPasses(ctx, eph, result); err != nil {
@@ -256,6 +318,15 @@ func (r *SatelliteEphemerisReconciler) Reconcile(ctx context.Context, req ctrl.R
 
 	if err := r.Status().Update(ctx, eph); err != nil {
 		return ctrl.Result{}, err
+	}
+
+	// Emit the orbit-regime Warning ONLY after the status persisted, so a failed
+	// update does not fire an event for a transition that rolled back (it would
+	// re-fire on the next reconcile, defeating the transition gate). This also
+	// suppresses a spurious event on a terminating object, whose Status().Update
+	// fails NotFound above. (findings.md B-5; deep-review C-#4)
+	if orbitRegimeEvent != "" && r.Recorder != nil {
+		r.Recorder.Eventf(eph, nil, "Warning", "UnsupportedOrbitRegime", "OrbitRegimeGuard", "%s", orbitRegimeEvent)
 	}
 
 	// Only emit the "fetched" event on a real fetch, not on the short-cadence
@@ -316,6 +387,46 @@ func (r *SatelliteEphemerisReconciler) cachedOMMResult(key client.ObjectKey) (ca
 // propagated state, so a malformed GP feed cannot bloat the status object.
 const maxSatelliteNameLen = 64
 
+// maxEpochAge bounds how old a fetched element set's OWN epoch may be before its
+// SGP4 propagation is flagged unreliable (findings.md I-17). Independent of the
+// refresh cadence — a source can serve elements whose epoch is already stale. ~7
+// days keeps LEO in-track error to at most a few km.
+const maxEpochAge = 7 * 24 * time.Hour
+
+// parseOMMEpoch parses an OMM element-set epoch (ISO-8601, with or without a
+// fractional second or trailing Z), returning ok=false when unparseable.
+func parseOMMEpoch(s string) (time.Time, bool) {
+	for _, layout := range []string{"2006-01-02T15:04:05.000000", "2006-01-02T15:04:05", time.RFC3339Nano, time.RFC3339} {
+		if t, err := time.Parse(layout, s); err == nil {
+			return t.UTC(), true
+		}
+	}
+	return time.Time{}, false
+}
+
+// reportEphemerisEpochStale sets the EphemerisEpochStale condition: True when one
+// or more propagated satellites' element-set epoch is older than maxEpochAge, so
+// the pushed ECEF is derived from stale elements and drifting (I-17). Condition-
+// only (no event) — the durable signal for alerting; the 3-minute re-propagation
+// cadence would make an event noisy.
+func (r *SatelliteEphemerisReconciler) reportEphemerisEpochStale(eph *ntnv1alpha1.SatelliteEphemeris, stale, total int) {
+	c := metav1.Condition{
+		Type:               ntnv1alpha1.ConditionEphemerisEpochStale,
+		Status:             metav1.ConditionFalse,
+		Reason:             "EpochsFresh",
+		Message:            "All propagated element sets are within the freshness bound",
+		ObservedGeneration: eph.Generation,
+	}
+	if stale > 0 {
+		c.Status = metav1.ConditionTrue
+		c.Reason = "EpochStale"
+		c.Message = fmt.Sprintf("%d of %d tracked element set(s) have an epoch older than %s; the pushed ECEF is derived from stale elements and is drifting",
+			stale, total, maxEpochAge)
+	}
+	meta.SetStatusCondition(&eph.Status.Conditions, c)
+	ntnmetrics.EphemerisEpochStaleCount.With(prometheus.Labels{"namespace": eph.Namespace, "ephemeris": eph.Name}).Set(float64(stale))
+}
+
 // propagateStates propagates the tracked satellites' orbits (SGP4) to the given
 // future epoch and records the ECEF state vectors in status.propagatedStates for
 // downstream runtime ephemeris push (#176). The set is filtered by
@@ -340,6 +451,17 @@ func (r *SatelliteEphemerisReconciler) propagateStates(
 			"hint", "set spec.satellites.noradIDs to the satellites pushed at runtime")
 	}
 	epochMs := epoch.UnixMilli()
+
+	// I-17: count tracked element sets whose OWN epoch is stale — a data property
+	// independent of whether SGP4 propagation then succeeds.
+	now := epoch.Add(-propagationEpochLead) // epoch is now+lead; recover ~now
+	staleEpochs := 0
+	for i := range omms {
+		if t, ok := parseOMMEpoch(omms[i].EpochStr); ok && now.Sub(t) > maxEpochAge {
+			staleEpochs++
+		}
+	}
+
 	states := make([]ntnv1alpha1.PropagatedState, 0, len(omms))
 	for i := range omms {
 		if len(states) >= maxPropagatedStates {
@@ -363,6 +485,57 @@ func (r *SatelliteEphemerisReconciler) propagateStates(
 		})
 	}
 	eph.Status.PropagatedStates = states
+	r.reportEphemerisEpochStale(eph, staleEpochs, len(omms))
+}
+
+// reportOrbitRegime records the UnsupportedOrbitRegime condition and RETURNS the
+// Warning-event note the caller must emit only AFTER a successful Status().Update
+// ("" = emit nothing). Element sets whose orbital period is >=
+// ephemeris.DeepSpacePeriodMinutes need the deep-space (SDP4) model this operator
+// does not implement, so they are rejected upstream rather than propagated into a
+// wrong ECEF (findings.md B-5). rejectedCount and summary come from the caller's
+// ephemeris.SplitByOrbitRegime / DeepSpaceSummary, keeping this method free of the
+// sgp4 element type.
+//
+// The event is DEFERRED to post-persist (returned, not emitted here) so a failed
+// Status().Update cannot fire an event for a transition that never persisted —
+// otherwise the next reconcile, re-reading the old status, would re-fire it and
+// defeat the transition gate. This mirrors handleFetchError's update-then-event
+// ordering. The note is non-empty only on the first transition into the rejected
+// state, so the short re-propagation cadence (#179) does not flood the stream.
+func (r *SatelliteEphemerisReconciler) reportOrbitRegime(
+	ctx context.Context,
+	eph *ntnv1alpha1.SatelliteEphemeris,
+	rejectedCount int,
+	summary string,
+) string {
+	if rejectedCount == 0 {
+		meta.SetStatusCondition(&eph.Status.Conditions, metav1.Condition{
+			Type:               ntnv1alpha1.ConditionUnsupportedOrbitRegime,
+			Status:             metav1.ConditionFalse,
+			Reason:             "AllNearEarth",
+			Message:            "No deep-space element sets among the tracked satellites",
+			ObservedGeneration: eph.Generation,
+		})
+		return ""
+	}
+
+	// Read the persisted state before mutating it, so the returned note is
+	// non-empty once per entry into the rejected state rather than every reconcile.
+	firstTransition := !meta.IsStatusConditionTrue(eph.Status.Conditions, ntnv1alpha1.ConditionUnsupportedOrbitRegime)
+	meta.SetStatusCondition(&eph.Status.Conditions, metav1.Condition{
+		Type:               ntnv1alpha1.ConditionUnsupportedOrbitRegime,
+		Status:             metav1.ConditionTrue,
+		Reason:             "DeepSpaceElementsRejected",
+		Message:            summary,
+		ObservedGeneration: eph.Generation,
+	})
+	logf.FromContext(ctx).Info("rejected deep-space element sets; near-earth SGP4 cannot propagate them",
+		"rejected", rejectedCount, "detail", summary)
+	if firstTransition {
+		return summary
+	}
+	return ""
 }
 
 // predictPasses resolves ground stations and computes pass windows.
@@ -456,6 +629,59 @@ func (r *SatelliteEphemerisReconciler) predictPasses(
 	}
 
 	return nil
+}
+
+// publicHTTPSource reports whether raw is a cleartext http:// URL whose host
+// resolves to a public IP, and if so returns that IP. Cleartext http to a
+// private/in-cluster host (a NetworkPolicy-protected mirror or an E2E mock) is
+// permitted; https is always fine. It fails OPEN when the host cannot be
+// resolved (returns false): the fetch's own SSRF-safe client still blocks
+// private-IP dials, and a public host that momentarily fails DNS is re-checked
+// on the next reconcile — so a transient resolver blip never wedges a valid
+// https source, and never silently downgrades a public one for long. A literal
+// public IP (e.g. http://203.0.113.5) resolves to itself and is rejected;
+// a literal private IP is allowed (findings.md I-21).
+func (r *SatelliteEphemerisReconciler) publicHTTPSource(ctx context.Context, raw string) (string, bool) {
+	u, err := neturl.Parse(raw)
+	if err != nil || strings.ToLower(u.Scheme) != "http" {
+		return "", false
+	}
+	ips, err := net.DefaultResolver.LookupIPAddr(ctx, u.Hostname())
+	if err != nil || len(ips) == 0 {
+		return "", false // cannot classify — fail open
+	}
+	for _, ip := range ips {
+		if !netutil.IsPrivateIP(ip.IP) {
+			return ip.IP.String(), true
+		}
+	}
+	return "", false
+}
+
+// handleInsecureURL records the InsecureURL condition + a Warning event for a
+// rejected cleartext-http public source and requeues without fetching (I-21).
+func (r *SatelliteEphemerisReconciler) handleInsecureURL(
+	ctx context.Context,
+	eph *ntnv1alpha1.SatelliteEphemeris,
+	ip string,
+) (ctrl.Result, error) {
+	msg := fmt.Sprintf(
+		"cleartext http source resolves to public IP %s; use https to prevent forged OMM injection into SIB19",
+		ip)
+	meta.SetStatusCondition(&eph.Status.Conditions, metav1.Condition{
+		Type:               ntnv1alpha1.ConditionGPDataFetched,
+		Status:             metav1.ConditionFalse,
+		Reason:             "InsecureURL",
+		Message:            msg,
+		ObservedGeneration: eph.Generation,
+	})
+	if err := r.Status().Update(ctx, eph); err != nil {
+		return ctrl.Result{}, err
+	}
+	if r.Recorder != nil {
+		r.Recorder.Eventf(eph, nil, "Warning", "InsecureURL", "InsecureURL", "%s", msg)
+	}
+	return ctrl.Result{RequeueAfter: time.Minute}, nil
 }
 
 // handleFetchError records the error as a Condition and Event, then requeues.
@@ -575,7 +801,12 @@ func (b *boundSpaceTrackFetcher) Fetch(ctx context.Context, url string) (ephemer
 // when ground stations are added, modified, or deleted.
 func (r *SatelliteEphemerisReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&ntnv1alpha1.SatelliteEphemeris{}).
+		// reconcileTriggerPredicate (predicates.go) filters this controller's own
+		// status writes (a fresh push epoch every reconcile) so they don't
+		// re-enqueue it, while still delivering spec changes and deletions. The
+		// GroundStationLifecycle Watches below deliberately have NO predicate,
+		// since fan-in must react to status changes.
+		For(&ntnv1alpha1.SatelliteEphemeris{}, builder.WithPredicates(reconcileTriggerPredicate())).
 		Watches(&ntnv1alpha1.GroundStationLifecycle{},
 			handler.EnqueueRequestsFromMapFunc(r.groundStationToEphemeris),
 		).

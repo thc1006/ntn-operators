@@ -122,10 +122,11 @@ func PredictPasses(
 		return nil, firstErr
 	}
 
-	// Sort by AOS time ascending.
-	sort.Slice(allPasses, func(i, j int) bool {
-		return allPasses[i].AOS.Before(allPasses[j].AOS)
-	})
+	// Sort by the total order lessPass (I-15): AOS alone is not a total order and
+	// the workers append concurrently, so an AOS-only unstable sort yields a
+	// run-to-run-nondeterministic order, defeating idempotent status convergence
+	// and any DeepEqual-based reconcile skip (#188).
+	sort.Slice(allPasses, func(i, j int) bool { return lessPass(allPasses[i], allPasses[j]) })
 
 	// Cap to MaxPassWindows (etcd object-size limit) while keeping each
 	// satellite's EARLIEST windows first. A naive earliest-N-overall truncation
@@ -174,8 +175,25 @@ func capPerSatellite(passes []PassResult, limit int) []PassResult {
 		}
 		kept = append(kept, p)
 	}
-	sort.Slice(kept, func(i, j int) bool { return kept[i].AOS.Before(kept[j].AOS) })
+	sort.Slice(kept, func(i, j int) bool { return lessPass(kept[i], kept[j]) })
 	return kept
+}
+
+// lessPass is the total order for pass windows: AOS, then satellite, then ground
+// station, then LOS. AOS alone is not a total order (passes from different
+// satellites/stations can share an AOS), so this makes PredictPasses output
+// deterministic across runs despite concurrent worker appends (findings.md I-15).
+func lessPass(a, b PassResult) bool {
+	if !a.AOS.Equal(b.AOS) {
+		return a.AOS.Before(b.AOS)
+	}
+	if a.Satellite != b.Satellite {
+		return a.Satellite < b.Satellite
+	}
+	if a.GroundStation != b.GroundStation {
+		return a.GroundStation < b.GroundStation
+	}
+	return a.LOS.Before(b.LOS)
 }
 
 // predictSingle computes pass windows for a single satellite over a single ground station.

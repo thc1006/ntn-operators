@@ -71,6 +71,33 @@ type Metrics struct {
 	RSRP              float64 // dBm, e.g., -110
 	LatencyMs         float64 // ms, e.g., 50
 	PacketLossPercent float64 // percent, e.g., 2.5
+
+	// *Missing flags mark a field that was NOT sourced from real data (no
+	// Prometheus query configured, no annotation set) and is therefore left at a
+	// healthy placeholder. A trigger over a missing metric must NOT be evaluated
+	// against that placeholder — it would silently never fire, or (for a "> good"
+	// threshold) fire spuriously. The zero value is false = present, so callers
+	// and tests that build Metrics from real values are unaffected (findings.md
+	// I-10). terrestrialRSRP/RSRP share RSRPMissing, etc. (they read one field).
+	RSRPMissing       bool
+	LatencyMissing    bool
+	PacketLossMissing bool
+}
+
+// metricMissing reports whether the metric this trigger reads was left at a
+// placeholder (no real source). Unknown metric names are treated as not-missing;
+// they are already rejected by ParseTrigger / admission CEL.
+func (t Trigger) metricMissing(m Metrics) bool {
+	switch t.Metric {
+	case metricRSRP, metricTerrestrialRSRP:
+		return m.RSRPMissing
+	case metricLatency, metricTerrestrialLatency:
+		return m.LatencyMissing
+	case metricPacketLoss, metricTerrestrialPacketLoss:
+		return m.PacketLossMissing
+	default:
+		return false
+	}
 }
 
 // Trigger represents a parsed failover trigger expression.
@@ -173,6 +200,26 @@ func (t Trigger) Evaluate(m Metrics) bool {
 	}
 }
 
+// InertTriggers returns the trigger expressions whose metric has no real source
+// in m (findings.md I-10). Such triggers are silently non-functional: evaluated
+// against a healthy placeholder they never fire (or a ">good" threshold fires
+// spuriously). The reconciler surfaces the returned list so an operator does not
+// trust an armed-but-dead failover policy. Unparseable triggers are ignored here
+// (they are handled by the parse-error path and rejected at admission).
+func InertTriggers(triggers []string, m Metrics) []string {
+	var inert []string
+	for _, s := range triggers {
+		t, err := ParseTrigger(s)
+		if err != nil {
+			continue
+		}
+		if t.metricMissing(m) {
+			inert = append(inert, s)
+		}
+	}
+	return inert
+}
+
 // EvaluateFailover determines whether to failover, stay, or switchback.
 //
 // Parameters:
@@ -227,6 +274,15 @@ func parseTriggerSet(log logr.Logger, triggers []string, metrics Metrics) trigge
 				log.V(1).Info("invalid trigger expression",
 					"trigger", triggerStr, "error", err.Error())
 			}
+			continue
+		}
+		// I-10: a trigger whose metric was not sourced from real data must not be
+		// evaluated against the healthy placeholder — that silently disarms it (or
+		// spuriously fires a ">good" threshold). Skip it; the reconciler surfaces
+		// inert triggers separately via InertTriggers.
+		if trigger.metricMissing(metrics) {
+			log.V(1).Info("trigger references a metric with no configured source; it is inert",
+				"trigger", triggerStr, "metric", trigger.Metric)
 			continue
 		}
 		result.parsed = append(result.parsed, trigger)
@@ -484,4 +540,38 @@ func EvaluateFailoverWithHysteresis(
 		Reason:     "Terrestrial recovered past hysteresis dead-band, switchback delay elapsed" + ts.parseSuffix,
 		TargetPath: PathTerrestrial,
 	})
+}
+
+// EvaluateSafeHold is the fail-static decision used when path-quality metrics are
+// unreliable — the metrics source is unavailable, or the last observed value is
+// stale beyond the freshness bound. Quality-driven transitions (failover on
+// degradation, switchback on recovery) are suppressed: the slice holds its
+// current path rather than act on unverified telemetry (the SRE "fail static"
+// principle).
+//
+// The one transition still honored is orbital: a satellite path whose pass window
+// has ended is switched back to terrestrial (the safe default), because staying on
+// a satellite that has physically set would black-hole traffic. The pass-window
+// signal is computed locally from ephemeris and does NOT depend on the metrics
+// source, so it stays trustworthy while metrics are degraded.
+//
+// This fixes findings.md B-4 (no switch on arbitrarily old data) and I-8 (no
+// indefinite parking on a satellite whose pass has ended when metrics are down).
+func EvaluateSafeHold(currentPath PathType, satelliteAvailable bool) FailoverResult {
+	// Normalize unknown currentPath to terrestrial (mirrors EvaluateFailoverWithContext).
+	if currentPath != PathTerrestrial && currentPath != PathSatellite && currentPath != PathUnavailable {
+		currentPath = PathTerrestrial
+	}
+	if currentPath == PathSatellite && !satelliteAvailable {
+		return FailoverResult{
+			Decision:   DecisionSwitchback,
+			Reason:     "metrics unreliable; switching back to terrestrial because the satellite pass window has ended",
+			TargetPath: PathTerrestrial,
+		}
+	}
+	return FailoverResult{
+		Decision:   DecisionStay,
+		Reason:     "metrics unreliable; holding current path (fail static; orbital signal honored)",
+		TargetPath: currentPath,
+	}
 }

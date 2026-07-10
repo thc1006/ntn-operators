@@ -36,6 +36,12 @@ spec:
           SatelliteEphemeris manages GP data fetching (OMM JSON from CelesTrak/SpaceTrack),
           orbital propagation (SGP4 via akhenakh/sgp4), and pass prediction for a set of
           satellites against ground stations.
+
+          Orbit-regime support: v1.0 is LEO-only. The propagator is the near-earth SGP4
+          model; element sets whose orbital period is >= 225 minutes (deep space —
+          roughly MEO and above, e.g. O3b or GEO) are rejected rather than propagated
+          into a wrong position, and surface as the UnsupportedOrbitRegime status
+          condition. Multi-orbit (MEO/GEO) support is a v1.1 roadmap item.
         properties:
           apiVersion:
             description: |-
@@ -131,7 +137,11 @@ spec:
                     type: string
                   url:
                     description: |-
-                      url is the endpoint to fetch GP data from.
+                      url is the endpoint to fetch GP data from. Use https for any public
+                      source: a cleartext http:// URL that resolves to a public IP is refused
+                      at runtime (InsecureURL condition) because an on-path attacker could
+                      inject forged OMM data that is propagated into SIB19. http:// is permitted
+                      only for a private/in-cluster mirror (NetworkPolicy-protected).
                       For CelesTrak: https://celestrak.org/NORAD/elements/gp.php?GROUP=oneweb&FORMAT=JSON
                       For SpaceTrack: https://www.space-track.org/basicspacedata/query/class/gp/...
                     minLength: 1

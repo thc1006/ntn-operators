@@ -97,11 +97,19 @@ var _ = Describe("NTNSlice Controller", func() {
 	}
 
 	newReconciler := func() *NTNSliceReconciler {
+		// Wire the SSRF-safe metrics provider (the production I-24 path) but
+		// allow-list loopback so the httptest mock Prometheus (bound to
+		// 127.0.0.1, a private IP) is reachable. This exercises the real
+		// dial-guarded transport rather than the lazy default; a non-loopback
+		// private IP would still be blocked.
+		loopback := netutil.ParseEndpointAllowlist("127.0.0.1,localhost")
 		return &NTNSliceReconciler{
 			Client:   k8sClient,
 			Scheme:   k8sClient.Scheme(),
 			Recorder: events.NewFakeRecorder(10),
 			Now:      func() time.Time { return time.Date(2026, 4, 17, 12, 0, 0, 0, time.UTC) },
+			ReaderProvider: slicemetrics.NewProvider(
+				slicemetrics.NewClientPool(slicemetrics.WithSafeClient(loopback))),
 		}
 	}
 
@@ -945,6 +953,106 @@ var _ = Describe("NTNSlice Controller", func() {
 			Expect(cond.Status).To(Equal(metav1.ConditionUnknown))
 			Expect(cond.Reason).To(SatisfyAny(Equal("MetricsReaderError"), Equal("MetricsUnavailable")),
 				"unreachable Prometheus must surface as one of the metrics-failure reasons")
+		})
+	})
+
+	Context("Fail static: metrics down while on satellite and the pass has ended (I-8)", func() {
+		It("switches back to terrestrial via the orbital signal even though metrics are unavailable", func() {
+			// Metrics source is down: an empty values map makes every query 500.
+			server := httptest.NewServer(promHandler(map[string]float64{}))
+			DeferCleanup(server.Close)
+
+			// Ephemeris whose only pass window is in the past (pass ended by now=12:00).
+			eph := &ntnv1alpha1.SatelliteEphemeris{
+				ObjectMeta: metav1.ObjectMeta{Name: "oneweb-constellation", Namespace: namespace},
+				Spec: ntnv1alpha1.SatelliteEphemerisSpec{
+					Source: ntnv1alpha1.EphemerisSource{
+						Type: "CelesTrak", URL: "https://celestrak.org/test",
+						RefreshInterval: metav1.Duration{Duration: 4 * time.Hour},
+					},
+				},
+			}
+			Expect(k8sClient.Create(context.Background(), eph)).To(Succeed())
+			eph.Status.SatelliteCount = 651
+			eph.Status.NextPassWindows = []ntnv1alpha1.PassWindow{{
+				Satellite: "ONEWEB-0012", GroundStation: "gs-taipei-01",
+				AOS:          metav1.Time{Time: time.Date(2026, 4, 17, 8, 0, 0, 0, time.UTC)},
+				LOS:          metav1.Time{Time: time.Date(2026, 4, 17, 9, 0, 0, 0, time.UTC)},
+				MaxElevation: "45.0",
+			}}
+			Expect(k8sClient.Status().Update(context.Background(), eph)).To(Succeed())
+			DeferCleanup(func() { _ = k8sClient.Delete(context.Background(), eph) })
+
+			spec := baseSpec()
+			spec.MetricsSource = &ntnv1alpha1.MetricsSource{
+				Type: ntnv1alpha1.MetricsSourcePrometheus,
+				Prometheus: &ntnv1alpha1.PrometheusMetricsSource{
+					Endpoint: server.URL,
+					Queries:  ntnv1alpha1.PrometheusQueries{RsrpDbm: "rsrp_q"},
+				},
+			}
+			key := types.NamespacedName{Name: "failstatic-satellite", Namespace: namespace}
+			ns := &ntnv1alpha1.NTNSlice{ObjectMeta: metav1.ObjectMeta{Name: key.Name, Namespace: namespace}, Spec: spec}
+			Expect(k8sClient.Create(context.Background(), ns)).To(Succeed())
+			DeferCleanup(func() { _ = k8sClient.Delete(context.Background(), ns) })
+
+			// Put the slice on satellite, as if a prior failover had occurred.
+			Expect(k8sClient.Get(context.Background(), key, ns)).To(Succeed())
+			ns.Status.ActivePathType = pathSatellite
+			ns.Status.FailoverCount = 1
+			ns.Status.LastFailover = &metav1.Time{Time: time.Date(2026, 4, 17, 11, 0, 0, 0, time.UTC)}
+			Expect(k8sClient.Status().Update(context.Background(), ns)).To(Succeed())
+
+			_, err := newReconciler().Reconcile(context.Background(), reconcile.Request{NamespacedName: key})
+			Expect(err).NotTo(HaveOccurred())
+
+			updated := &ntnv1alpha1.NTNSlice{}
+			Expect(k8sClient.Get(context.Background(), key, updated)).To(Succeed())
+
+			// I-8: with the pass ended, the slice must NOT be parked on the (now set)
+			// satellite just because metrics are down — the orbital signal, which is
+			// independent of the metrics source, switches it back to terrestrial.
+			Expect(updated.Status.ActivePathType).To(Equal("terrestrial"),
+				"fail-static must still honor the orbital pass-end signal (I-8)")
+			// A switchback must not touch the failover counter (only DecisionFailover does).
+			Expect(updated.Status.FailoverCount).To(BeEquivalentTo(1),
+				"a fail-static switchback must not increment FailoverCount")
+			// Metrics degraded -> FailoverReady=Unknown (quality can't be evaluated).
+			fr := meta.FindStatusCondition(updated.Status.Conditions, ntnv1alpha1.ConditionFailoverReady)
+			Expect(fr).NotTo(BeNil())
+			Expect(fr.Status).To(Equal(metav1.ConditionUnknown),
+				"metrics unavailable must surface FailoverReady=Unknown")
+		})
+	})
+
+	Context("FailoverPolicy trigger syntax is validated at admission (CEL, B-2/I-11)", func() {
+		It("rejects a malformed trigger operator", func() {
+			spec := baseSpec()
+			spec.FailoverPolicy.Triggers = []string{"rsrp <> 5"}
+			ns := &ntnv1alpha1.NTNSlice{ObjectMeta: metav1.ObjectMeta{Name: "bad-op", Namespace: namespace}, Spec: spec}
+			Expect(k8sClient.Create(context.Background(), ns)).NotTo(Succeed(),
+				"a malformed trigger must be rejected at admission, not silently skipped at runtime")
+		})
+		It("rejects an unknown metric name", func() {
+			spec := baseSpec()
+			spec.FailoverPolicy.Triggers = []string{"bandwidth > 100"}
+			ns := &ntnv1alpha1.NTNSlice{ObjectMeta: metav1.ObjectMeta{Name: "bad-metric", Namespace: namespace}, Spec: spec}
+			Expect(k8sClient.Create(context.Background(), ns)).NotTo(Succeed())
+		})
+		It("rejects a non-numeric threshold", func() {
+			spec := baseSpec()
+			spec.FailoverPolicy.Triggers = []string{"rsrp < abc"}
+			ns := &ntnv1alpha1.NTNSlice{ObjectMeta: metav1.ObjectMeta{Name: "bad-value", Namespace: namespace}, Spec: spec}
+			Expect(k8sClient.Create(context.Background(), ns)).NotTo(Succeed())
+		})
+		It("accepts valid triggers across all metric names and operators", func() {
+			spec := baseSpec()
+			spec.FailoverPolicy.Triggers = []string{
+				"terrestrialRSRP <= -100", "packetLoss > 0.5", "latency >= 200", "rsrp < -120",
+			}
+			ns := &ntnv1alpha1.NTNSlice{ObjectMeta: metav1.ObjectMeta{Name: "good-trigger", Namespace: namespace}, Spec: spec}
+			Expect(k8sClient.Create(context.Background(), ns)).To(Succeed())
+			DeferCleanup(func() { _ = k8sClient.Delete(context.Background(), ns) })
 		})
 	})
 

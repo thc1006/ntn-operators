@@ -29,6 +29,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	ctrlrt "sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
@@ -140,6 +141,7 @@ func ephemerisPushShouldRequeue(reason string) bool {
 // +kubebuilder:rbac:groups=ntn.operators.dev,resources=satelliteephemeris,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
+// +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
 
 // Reconcile applies NTN cell configuration to the specified provider backend.
 func (r *NTNCellConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -291,8 +293,16 @@ func (r *NTNCellConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			if err := r.Status().Update(ctx, cc); err != nil {
 				return ctrl.Result{}, err
 			}
-			if conditionChanged && r.Recorder != nil {
-				r.Recorder.Eventf(cc, nil, "Warning", "EphemerisPushFailed", "EphemerisPushFailed", "%s", message)
+			if conditionChanged {
+				// Count distinct push-failure episodes by reason (I-19). Gated on
+				// conditionChanged like the event, so a steady non-ready state
+				// (e.g. PayloadMissing) is counted once per entry, not per reconcile.
+				ntnmetrics.EphemerisPushErrorsTotal.With(prometheus.Labels{
+					"namespace": cc.Namespace, "config": cc.Name, "reason": reason,
+				}).Inc()
+				if r.Recorder != nil {
+					r.Recorder.Eventf(cc, nil, "Warning", "EphemerisPushFailed", "EphemerisPushFailed", "%s", message)
+				}
 			}
 			if !ephemerisPushShouldRequeue(reason) {
 				return ctrl.Result{}, nil
@@ -335,6 +345,7 @@ func (r *NTNCellConfigReconciler) handleFinalizer(
 		// Release the CR's per-CR metric series on deletion so /metrics does not
 		// accumulate dead series across create/delete churn (idempotent).
 		ntnmetrics.ConfigApplyErrorsTotal.DeletePartialMatch(prometheus.Labels{"namespace": cc.Namespace, "config": cc.Name})
+		ntnmetrics.EphemerisPushErrorsTotal.DeletePartialMatch(prometheus.Labels{"namespace": cc.Namespace, "config": cc.Name})
 		if controllerutil.ContainsFinalizer(cc, finalizerName) {
 			if prov == nil {
 				// Best-effort cleanup using Status.ConfigMapRef when provider is missing.
@@ -475,10 +486,18 @@ func (r *NTNCellConfigReconciler) pushRuntimeEphemeris(
 ) (bool, string, error) {
 	state := selectPropagatedState(eph.Status.PropagatedStates, spec.EphemerisNoradID)
 	if state == nil {
+		// A referenced satellite that the SatelliteEphemeris rejected as deep-space
+		// (near-earth SGP4 can't propagate it) has no propagated state — surface that
+		// cross-CR cause so the operator isn't left correlating a bare "payload
+		// missing" against the other object's condition (deep-review A-NIT-1).
+		hint := ""
+		if meta.IsStatusConditionTrue(eph.Status.Conditions, ntnv1alpha1.ConditionUnsupportedOrbitRegime) {
+			hint = " (the referenced SatelliteEphemeris reports UnsupportedOrbitRegime: deep-space element sets are rejected because the near-earth SGP4 propagator cannot handle them)"
+		}
 		return false, marker, newEphemerisPushError(
 			ephemerisReasonPayloadMissing,
-			fmt.Errorf("no propagated state in SatelliteEphemeris %q for noradID selector %v",
-				eph.Name, spec.EphemerisNoradID),
+			fmt.Errorf("no propagated state in SatelliteEphemeris %q for noradID selector %v%s",
+				eph.Name, spec.EphemerisNoradID, hint),
 		)
 	}
 	// Skip a stale (past / about-to-expire) epoch rather than push a value OCUDU
@@ -564,7 +583,13 @@ func ephemerisPushMarker(eph *ntnv1alpha1.SatelliteEphemeris) string {
 // when a referenced ephemeris is updated.
 func (r *NTNCellConfigReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&ntnv1alpha1.NTNCellConfig{}).
+		// reconcileTriggerPredicate (predicates.go) filters status-only self-writes
+		// but passes spec changes AND deletionTimestamp transitions — the latter is
+		// load-bearing here: the configmap-cleanup finalizer must run on delete even
+		// for a cell sitting on a no-requeue terminal path (e.g. a dangling
+		// ephemerisRef → EphemerisRefNotFound). The SatelliteEphemeris Watches below
+		// keep no predicate.
+		For(&ntnv1alpha1.NTNCellConfig{}, builder.WithPredicates(reconcileTriggerPredicate())).
 		Watches(&ntnv1alpha1.SatelliteEphemeris{},
 			handler.EnqueueRequestsFromMapFunc(r.ephemerisToNTNCellConfig),
 		).

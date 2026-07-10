@@ -109,9 +109,11 @@ spec:
                     description: |-
                       triggers defines conditions that initiate failover (OR logic).
                       Format: "metric operator value" (e.g., "rsrp < -120").
-                      Validated at runtime by the failover engine (pkg/slice.ParseTrigger).
+                      Validated at admission by the XValidation rule on this type and at runtime by
+                      the failover engine (pkg/slice.ParseTrigger).
                       Order is intentionally not significant; set merge semantics are desired.
                     items:
+                      maxLength: 64
                       type: string
                     maxItems: 10
                     minItems: 1
@@ -120,6 +122,14 @@ spec:
                 required:
                 - triggers
                 type: object
+                x-kubernetes-validations:
+                - message: each failoverPolicy.trigger must be 'metric op value' where
+                    metric is one of rsrp/latency/packetLoss/terrestrialRSRP/terrestrialLatency/terrestrialPacketLoss,
+                    op is one of < <= > >=, and value is a finite number (e.g. 'rsrp
+                    < -120')
+                  rule: self.triggers.all(t, t.matches('^ *(rsrp|latency|packetLoss|terrestrialRSRP|terrestrialLatency|terrestrialPacketLoss)
+                    *(<=|>=|<|>) *[-+]?([0-9]+([.][0-9]+)?|[.][0-9]+)([eE][-+]?[0-9]+)?
+                    *$'))
               metricsSource:
                 description: |-
                   metricsSource selects where the failover engine reads path quality

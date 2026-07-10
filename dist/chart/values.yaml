@@ -103,7 +103,7 @@ metrics:
   port: 8443
 
 ## Cert-manager integration for TLS certificates.
-## Required for webhook certificates and metrics endpoint certificates.
+## Required for the metrics endpoint certificates.
 ##
 certManager:
   enable: false
@@ -127,12 +127,5 @@ podDisruptionBudget:
 ## Requires a CNI plugin that implements NetworkPolicy (e.g., Calico, Cilium).
 ##
 networkPolicy:
-  enable: false
-
-## Validating admission webhooks.
-## Validates NTNSlice trigger syntax at admission time.
-## Requires cert-manager or manual TLS certificate provisioning.
-##
-webhooks:
   enable: false
 

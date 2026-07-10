@@ -14,12 +14,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"sync"
 	"time"
 
 	promapi "github.com/prometheus/client_golang/api"
 	promv1 "github.com/prometheus/client_golang/api/prometheus/v1"
 	"github.com/prometheus/common/model"
+
+	"github.com/thc1006/ntn-operators/pkg/netutil"
 )
 
 // ClientPool deduplicates prometheus/client_golang clients by endpoint URL.
@@ -34,11 +37,45 @@ import (
 type ClientPool struct {
 	mu      sync.RWMutex
 	clients map[string]QueryClient
+
+	// httpClient, when non-nil, is the SSRF-safe HTTP client every pooled
+	// Prometheus client dials through: it blocks connections to private/
+	// reserved IPs (e.g. the 169.254.169.254 cloud-metadata service, internal
+	// ClusterIP services) unless the target host is in the endpoint allowlist.
+	// nil = the library default transport (no dial-level SSRF guard) — used
+	// only by the test/lazy default; production wires WithSafeClient (I-24).
+	httpClient *http.Client
 }
 
-// NewClientPool returns an empty pool.
-func NewClientPool() *ClientPool {
-	return &ClientPool{clients: map[string]QueryClient{}}
+// PoolOption configures a ClientPool.
+type PoolOption func(*ClientPool)
+
+// WithSafeClient makes every pooled Prometheus client dial through an
+// SSRF-safe transport (netutil.NewSafeHTTPClient) that blocks dials to
+// private/reserved IPs unless the target host is in allow. This closes the
+// blind-SSRF surface where a namespaced NTNSlice.spec.metricsSource.endpoint
+// could aim the operator's egress at cloud metadata or internal services
+// (findings.md I-24). Public Prometheus endpoints keep working; an in-cluster
+// Prometheus at a private ClusterIP must have its host listed in
+// --prometheus-allowed-endpoint-hosts (which also gates the hostname), exactly
+// as SatelliteEphemeris internal mirrors use --ephemeris-allowed-private-hosts.
+// Timeout is 0: per-query deadlines are governed by the reader's
+// context.WithTimeout; the dialer keeps its own fixed connect timeout.
+func WithSafeClient(allow netutil.EndpointAllowlist) PoolOption {
+	return func(p *ClientPool) {
+		p.httpClient = netutil.NewSafeHTTPClient(0, netutil.WithPrivateHostAllowlist(allow))
+	}
+}
+
+// NewClientPool returns an empty pool. Without WithSafeClient the pooled
+// clients use the library default transport and have NO dial-level SSRF guard,
+// so production callers (cmd/main.go) MUST pass WithSafeClient.
+func NewClientPool(opts ...PoolOption) *ClientPool {
+	p := &ClientPool{clients: map[string]QueryClient{}}
+	for _, opt := range opts {
+		opt(p)
+	}
+	return p
 }
 
 // Get returns a QueryClient for endpoint, creating one on first use.
@@ -56,7 +93,7 @@ func (p *ClientPool) Get(endpoint string) (QueryClient, error) {
 	// Cache miss: build outside the lock so concurrent Get calls for other
 	// endpoints do not block. The second check under the write lock absorbs
 	// the race where two callers miss simultaneously.
-	built, err := buildPromClient(endpoint)
+	built, err := buildPromClient(endpoint, p.httpClient)
 	if err != nil {
 		return nil, fmt.Errorf("clientpool: build client for %q: %w", endpoint, err)
 	}
@@ -70,9 +107,15 @@ func (p *ClientPool) Get(endpoint string) (QueryClient, error) {
 }
 
 // buildPromClient constructs a QueryClient wrapping the upstream
-// prometheus/client_golang v1 API.
-func buildPromClient(endpoint string) (QueryClient, error) {
-	api, err := promapi.NewClient(promapi.Config{Address: endpoint})
+// prometheus/client_golang v1 API. When httpClient is non-nil it is used as the
+// transport, so the SSRF-safe client from WithSafeClient governs every dial;
+// nil falls back to the library default transport.
+func buildPromClient(endpoint string, httpClient *http.Client) (QueryClient, error) {
+	cfg := promapi.Config{Address: endpoint}
+	if httpClient != nil {
+		cfg.Client = httpClient
+	}
+	api, err := promapi.NewClient(cfg)
 	if err != nil {
 		return nil, err
 	}

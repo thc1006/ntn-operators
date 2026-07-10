@@ -55,6 +55,27 @@ func TestIsPrivateIP(t *testing.T) {
 		{"fe80::1", true},               // link-local
 		{"fc00::1", true},               // unique local
 		{"2001:4860:4860::8888", false}, // Google DNS
+
+		// I-25 additions — previously bypassed the guard (all demonstrated in
+		// the audit as blocked=false).
+		{"::", true},                     // IPv6 unspecified
+		{"224.0.0.1", true},              // IPv4 multicast (all-hosts)
+		{"239.255.255.255", true},        // IPv4 multicast (upper)
+		{"240.0.0.1", true},              // IPv4 reserved / class-E
+		{"255.255.255.255", true},        // IPv4 limited broadcast
+		{"ff02::1", true},                // IPv6 multicast (all-nodes)
+		{"64:ff9b::a00:1", true},         // NAT64 well-known embedding 10.0.0.1
+		{"2002:a00:1::1", true},          // 6to4 embedding 10.0.0.1
+		{"64:ff9b:1::1", true},           // NAT64 local-use (RFC 8215)
+		{"::ffff:10.0.0.1", true},        // IPv4-mapped private
+		{"::ffff:169.254.169.254", true}, // IPv4-mapped cloud metadata
+
+		// Non-breaking: NAT64/6to4 transition of a PUBLIC IPv4 must stay allowed
+		// (extract-and-check, not a blanket prefix block), so IPv6-only clusters
+		// reaching public CelesTrak/Prometheus keep working.
+		{"64:ff9b::808:808", false}, // NAT64 embedding 8.8.8.8 (public)
+		{"2002:808:808::1", false},  // 6to4 embedding 8.8.8.8 (public)
+		{"::ffff:8.8.8.8", false},   // IPv4-mapped public
 	}
 
 	for _, tc := range tests {

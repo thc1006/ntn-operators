@@ -34,7 +34,13 @@ func TestAnnotationReader_NoAnnotations_ReturnsDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	want := slice.Metrics{RSRP: -80, LatencyMs: 20, PacketLossPercent: 0.1}
+	// I-10: with no annotations, every field keeps the healthy placeholder value
+	// but is flagged Missing, so a trigger over it is surfaced as inert rather
+	// than silently evaluated against the default.
+	want := slice.Metrics{
+		RSRP: -80, LatencyMs: 20, PacketLossPercent: 0.1,
+		RSRPMissing: true, LatencyMissing: true, PacketLossMissing: true,
+	}
 	if got.Metrics != want {
 		t.Errorf("defaults mismatch: got %+v want %+v", got.Metrics, want)
 	}
