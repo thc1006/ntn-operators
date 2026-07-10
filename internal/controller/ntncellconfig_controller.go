@@ -422,16 +422,25 @@ func (r *NTNCellConfigReconciler) pushEphemerisUpdateIfNeeded(
 			fmt.Errorf("getting referenced SatelliteEphemeris %q: %w", spec.EphemerisRef, err),
 		)
 	}
+	// Runtime push path: when a remote-control endpoint + cellID are configured,
+	// push the SGP4-propagated ephemeris live via ntn_config_update (#176) instead
+	// of rewriting the bootstrap ConfigMap with the CR's static ephemeris. Its
+	// freshness key is the propagated EPOCH, not the 2h-stable GP fetch time: the
+	// SatelliteEphemeris re-propagates a fresh epoch every few minutes and fans out
+	// to this reconcile, so keying the dedup marker on the epoch is what re-pushes
+	// the live state between fetches and after a gNB restart (I-12). Refreshing
+	// epoch/ephemeris/TA is SI-change-free per TS 38.331, so the periodic re-push is
+	// a level re-assert that does not disturb UEs. pushRuntimeEphemeris computes its
+	// own epoch-aware marker and does its own up-to-date check.
+	if spec.Provider.RemoteControl != nil && spec.CellID != nil {
+		return r.pushRuntimeEphemeris(ctx, cc, spec, eph, prov)
+	}
+
+	// ConfigMap bootstrap path: the CR's static spec.ntn ephemeris; the last GP
+	// fetch time (LastUpdated) is the correct freshness key here.
 	marker := ephemerisPushMarker(eph)
 	if isEphemerisPushUpToDate(cc, marker) {
 		return false, marker, nil
-	}
-
-	// Runtime push path: when a remote-control endpoint + cellID are configured,
-	// push the SGP4-propagated ephemeris live via ntn_config_update (#176) instead
-	// of rewriting the bootstrap ConfigMap with the CR's static ephemeris.
-	if spec.Provider.RemoteControl != nil && spec.CellID != nil {
-		return r.pushRuntimeEphemeris(ctx, spec, eph, prov, marker)
 	}
 
 	// A satSwitchWithResync is runtime-only (its k_mac has no bootstrap-YAML
@@ -479,10 +488,10 @@ func (r *NTNCellConfigReconciler) pushEphemerisUpdateIfNeeded(
 // discarding it and re-emitting the CR's static ephemeris.
 func (r *NTNCellConfigReconciler) pushRuntimeEphemeris(
 	ctx context.Context,
+	cc *ntnv1alpha1.NTNCellConfig,
 	spec *ntnv1alpha1.NTNCellConfigSpec,
 	eph *ntnv1alpha1.SatelliteEphemeris,
 	prov provider.NTNProvider,
-	marker string,
 ) (bool, string, error) {
 	state := selectPropagatedState(eph.Status.PropagatedStates, spec.EphemerisNoradID)
 	if state == nil {
@@ -494,12 +503,24 @@ func (r *NTNCellConfigReconciler) pushRuntimeEphemeris(
 		if meta.IsStatusConditionTrue(eph.Status.Conditions, ntnv1alpha1.ConditionUnsupportedOrbitRegime) {
 			hint = " (the referenced SatelliteEphemeris reports UnsupportedOrbitRegime: deep-space element sets are rejected because the near-earth SGP4 propagator cannot handle them)"
 		}
-		return false, marker, newEphemerisPushError(
+		return false, ephemerisPushMarker(eph), newEphemerisPushError(
 			ephemerisReasonPayloadMissing,
 			fmt.Errorf("no propagated state in SatelliteEphemeris %q for noradID selector %v%s",
 				eph.Name, spec.EphemerisNoradID, hint),
 		)
 	}
+
+	// Dedup on the propagated epoch (I-12): re-push whenever the SatelliteEphemeris
+	// re-propagated to a fresh epoch — the watch fans that out to this reconcile, so
+	// keying on the epoch (not the 2h-stable LastUpdated) keeps the gNB fresh between
+	// GP fetches and recovers it after a gNB restart. Same epoch ⇒ same marker ⇒ no
+	// redundant push; spec changes (koffset/TA/satSwitch) still re-push via the
+	// ObservedGeneration check in isEphemerisPushUpToDate.
+	marker := runtimeEphemerisPushMarker(eph, state)
+	if isEphemerisPushUpToDate(cc, marker) {
+		return false, marker, nil
+	}
+
 	// Skip a stale (past / about-to-expire) epoch rather than push a value OCUDU
 	// will reject. The state is only valid for its own epoch, so re-labeling it
 	// would corrupt the position; instead wait for the SatelliteEphemeris producer
@@ -576,6 +597,22 @@ func ephemerisPushMarker(eph *ntnv1alpha1.SatelliteEphemeris) string {
 		lastUpdated = eph.Status.LastUpdated.UTC().Format(time.RFC3339Nano)
 	}
 	return fmt.Sprintf("ephemerisRef=%s generation=%d lastUpdated=%s", eph.Name, eph.Generation, lastUpdated)
+}
+
+// runtimeEphemerisPushMarker is the dedup key for the runtime (ntn_config_update)
+// push path. The ConfigMap path keys on the GP fetch time (ephemerisPushMarker),
+// but the runtime push delivers the SGP4-propagated state, which the
+// SatelliteEphemeris re-propagates to a fresh EPOCH every few minutes; keying on
+// that epoch (not the 2h-stable LastUpdated) is what makes the watch fan-out
+// re-push the live state between GP fetches and after a gNB restart (I-12). The
+// epoch is a monotonic 1:1 proxy for the propagated ECEF — each re-propagation
+// yields a new epoch and a new state — so a same-epoch reconcile dedups without
+// hashing the payload. Refreshing epoch/ephemeris/TA is SI-change-free per TS
+// 38.331, and the re-push cadence is bounded by the SatelliteEphemeris
+// re-propagation interval, well under ntn-UlSyncValidityDuration (NR max 240 s).
+func runtimeEphemerisPushMarker(eph *ntnv1alpha1.SatelliteEphemeris, state *ntnv1alpha1.PropagatedState) string {
+	return fmt.Sprintf("ephemerisRef=%s ephGeneration=%d norad=%d epoch=%d",
+		eph.Name, eph.Generation, state.NoradID, state.EpochUnixMs)
 }
 
 // SetupWithManager sets up the controller with the Manager.
