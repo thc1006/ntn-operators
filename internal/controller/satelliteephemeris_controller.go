@@ -62,6 +62,11 @@ const maxRefreshInterval = 24 * time.Hour
 // SatelliteEphemerisReconciler reconciles a SatelliteEphemeris object
 type SatelliteEphemerisReconciler struct {
 	client.Client
+	// APIReader is an UNCACHED reader (mgr.GetAPIReader) used only to read the
+	// SpaceTrack credentials Secret. The cached client would need secrets list;watch
+	// to start an informer (and would then cache every Secret in the cluster); an
+	// uncached Get needs only secrets get. Falls back to the cached client if unset.
+	APIReader               client.Reader
 	Scheme                  *runtime.Scheme
 	Recorder                events.EventRecorder
 	MaxConcurrentReconciles int
@@ -863,7 +868,14 @@ func (r *SatelliteEphemerisReconciler) fetcherForSource(
 		}
 		secret := &corev1.Secret{}
 		secretKey := types.NamespacedName{Namespace: eph.Namespace, Name: creds.Name}
-		if err := r.Get(ctx, secretKey, secret); err != nil {
+		// Read the Secret UNCACHED (APIReader) so a secrets-get RBAC suffices and the
+		// operator does not cache every Secret in the cluster. Fall back to the cached
+		// client only if no APIReader was wired (e.g. some tests).
+		reader := r.APIReader
+		if reader == nil {
+			reader = r.Client
+		}
+		if err := reader.Get(ctx, secretKey, secret); err != nil {
 			return nil, fmt.Errorf("reading credentials Secret %q: %w", creds.Name, err)
 		}
 		key := creds.Key

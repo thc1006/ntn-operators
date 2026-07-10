@@ -234,10 +234,12 @@ var _ = Describe("SatelliteEphemeris Controller", func() {
 
 	newReconciler := func(fetcher ephemeris.GPFetcher) *SatelliteEphemerisReconciler {
 		return &SatelliteEphemerisReconciler{
-			Client:   k8sClient,
-			Scheme:   k8sClient.Scheme(),
-			Recorder: events.NewFakeRecorder(10),
-			Fetcher:  fetcher,
+			Client: k8sClient,
+			// Exercise the uncached-read path for the SpaceTrack credentials Secret.
+			APIReader: k8sClient,
+			Scheme:    k8sClient.Scheme(),
+			Recorder:  events.NewFakeRecorder(10),
+			Fetcher:   fetcher,
 		}
 	}
 

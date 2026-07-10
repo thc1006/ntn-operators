@@ -196,6 +196,7 @@ func main() {
 	)
 	if err := (&controller.SatelliteEphemerisReconciler{
 		Client:                  mgr.GetClient(),
+		APIReader:               mgr.GetAPIReader(),
 		Scheme:                  mgr.GetScheme(),
 		Recorder:                mgr.GetEventRecorder("satelliteephemeris-controller"),
 		Fetcher:                 ephemeris.NewCelesTrakFetcher(gpHTTPClient),
