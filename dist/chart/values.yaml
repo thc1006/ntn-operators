@@ -122,10 +122,39 @@ podDisruptionBudget:
   minAvailable: 1
 
 ## NetworkPolicy for zero-trust pod networking.
-## Restricts ingress to metrics (8443) and health probes (8081),
-## egress to HTTPS (443) and DNS (53).
+## Ingress: metrics (8443) and health probes (8081).
+## Egress: HTTPS 443 (Kubernetes API server, CelesTrak, Space-Track) and DNS 53.
+## The operator ALSO reaches two data-path targets whose addresses are set
+## per-CR, so they cannot be hardcoded here — leave them out and enabling this
+## policy silently blackholes them:
+##   - the in-cluster Prometheus that NTNSlice.spec.metricsSource.prometheus.endpoint
+##     queries (default port 9090), and
+##   - the gNB remote_control WebSocket that
+##     NTNCellConfig.spec.provider.remoteControl.endpoint targets (host:port).
+## List the ports you actually use below; use extraEgress to scope by
+## namespace/CIDR if the port-only default is too broad for your policy.
 ## Requires a CNI plugin that implements NetworkPolicy (e.g., Calico, Cilium).
 ##
 networkPolicy:
   enable: false
+  ## Egress ports for the in-cluster Prometheus queried by NTNSlice metricsSource.
+  ## Set to [] if no NTNSlice uses a prometheus metricsSource.
+  prometheusPorts:
+    - 9090
+  ## Egress ports for the gNB remote_control WebSocket targeted by the runtime
+  ## NTN push (NTNCellConfig.spec.provider.remoteControl.endpoint). Add every
+  ## distinct gNB port in use; set to [] if no NTNCellConfig configures a runtime push.
+  gnbPorts:
+    - 8001
+  ## Advanced: extra egress rules appended verbatim to spec.egress. Use to
+  ## restrict the Prometheus/gNB reachability to specific namespaces or CIDRs,
+  ## e.g. scope the gNB port to an external RAN subnet:
+  ##   extraEgress:
+  ##     - to:
+  ##         - ipBlock:
+  ##             cidr: 10.20.0.0/16
+  ##       ports:
+  ##         - port: 8001
+  ##           protocol: TCP
+  extraEgress: []
 

@@ -90,6 +90,36 @@ does:
   migration pod) — conversion webhooks are deferred until 1.0.
 - Announce the break in the GitHub Release body prominently.
 
+## Rollback
+
+Rolling the operator back is safe; rolling the **CRD schema** back is the
+hazard. The chart renders CRDs as ordinary templates gated by `crd.enable`
+(there is no install-only `crds/` directory), so a `helm rollback` with
+`crd.enable=true` re-applies the *previous* release's CRD schema. If the
+release you are leaving added or tightened a field (e.g. raised a `Minimum`,
+narrowed an `Enum`), CRs already persisted under the newer schema can be
+rejected on their next write, and fields the old schema doesn't know are
+dropped — a silent data loss.
+
+Prefer an **operator-only rollback** that leaves the CRDs forward:
+
+```bash
+# CRDs stay at the newer (forward-compatible) schema; only the workload reverts.
+helm rollback ntn-operators <PREVIOUS_REVISION> \
+  --namespace ntn-operators-system --set crd.enable=false
+# (Option A / make-install users manage CRDs out-of-band, so their rollback
+#  never touches CRDs either — just roll the operator image.)
+```
+
+`crd.keep=true` (the chart default) means an uninstall never deletes CRDs or
+CRs, so your data survives an uninstall/reinstall — but it does **not** protect
+you from an incompatible schema being re-applied by a full `helm rollback`.
+
+If you genuinely must revert the CRD schema, migrate stored objects **first**:
+patch every CR back to values the old schema accepts, then apply the old CRDs.
+Verify after any rollback that the operator is `Available` and the CRs still
+report `Ready`/their expected conditions.
+
 ## Artifacts a release produces
 
 - Git tag, annotated
