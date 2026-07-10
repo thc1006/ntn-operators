@@ -165,6 +165,65 @@ func TestFetch_HTTP403_RateLimited(t *testing.T) {
 	}
 }
 
+// TestFetch_HTTP429_RateLimited pins I-19b: a 429 (defensive; e.g. a fronting CDN)
+// is rate-limited and its Retry-After is parsed into the typed error.
+func TestFetch_HTTP429_RateLimited(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", "120")
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	t.Cleanup(server.Close)
+
+	_, err := NewCelesTrakFetcher(server.Client()).Fetch(context.Background(), server.URL)
+	if !errors.Is(err, ErrRateLimited) {
+		t.Fatalf("429 must be rate-limited, got %v", err)
+	}
+	var rle *RateLimitError
+	if !errors.As(err, &rle) {
+		t.Fatalf("expected a *RateLimitError, got %v", err)
+	}
+	if rle.RetryAfter != 120*time.Second {
+		t.Errorf("Retry-After: 120 must parse to 120s, got %v", rle.RetryAfter)
+	}
+	if rle.StatusCode != http.StatusTooManyRequests {
+		t.Errorf("StatusCode = %d, want 429", rle.StatusCode)
+	}
+}
+
+func TestParseRetryAfter(t *testing.T) {
+	now := time.Now().UTC()
+	cases := []struct {
+		name, val string
+		want      time.Duration
+		approx    bool
+	}{
+		{"absent", "", 0, false},
+		{"delay-seconds", "120", 120 * time.Second, false},
+		{"zero", "0", 0, false},
+		{"garbage", "soon", 0, false},
+		{"negative clamped to 0", "-5", 0, false},
+		{"huge clamped to max", "999999999", maxRetryAfter, false},
+		{"http-date future", now.Add(90 * time.Second).Format(http.TimeFormat), 90 * time.Second, true},
+		{"http-date past", now.Add(-1 * time.Hour).Format(http.TimeFormat), 0, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := http.Header{}
+			if tc.val != "" {
+				h.Set("Retry-After", tc.val)
+			}
+			got := parseRetryAfter(h)
+			if tc.approx {
+				if got < tc.want-5*time.Second || got > tc.want+2*time.Second {
+					t.Errorf("parseRetryAfter(%q) = %v, want ~%v", tc.val, got, tc.want)
+				}
+			} else if got != tc.want {
+				t.Errorf("parseRetryAfter(%q) = %v, want %v", tc.val, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestFetch_HTTP500_Error(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)

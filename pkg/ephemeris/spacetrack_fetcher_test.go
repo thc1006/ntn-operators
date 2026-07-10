@@ -18,6 +18,7 @@ package ephemeris
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -151,6 +152,61 @@ func TestSpaceTrackFetcher_LoginFailure(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for failed login")
 	}
+	if !errors.Is(err, ErrAuthFailed) {
+		t.Errorf("a 401 login must be an ErrAuthFailed, got %v", err)
+	}
+}
+
+// TestSpaceTrackFetcher_LoginFailure_200Body pins I-20: Space-Track returns HTTP
+// 200 with a {"Login":"Failed"} body on bad credentials. Before the fix, the 200
+// status alone read as success and the failure surfaced only later, cryptically.
+func TestSpaceTrackFetcher_LoginFailure_200Body(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == loginPath {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = fmt.Fprint(w, `{"Login":"Failed"}`) // Space-Track's bad-cred body
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	fetcher := NewSpaceTrackFetcher(server.Client(), server.URL)
+	fetcher.SetCredentials("bad", "creds")
+
+	_, err := fetcher.Fetch(context.Background(), server.URL+"/gp")
+	if err == nil {
+		t.Fatal("expected an auth error for a 200 + {\"Login\":\"Failed\"} body")
+	}
+	if !errors.Is(err, ErrAuthFailed) {
+		t.Errorf("a 200 + Login=Failed body must be an ErrAuthFailed, got %v", err)
+	}
+}
+
+func TestLoginBodyIndicatesFailure(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want bool
+	}{
+		{"documented failure", `{"Login":"Failed"}`, true},
+		{"failure with whitespace", "  {\n \"Login\" : \"Failed\" \n} ", true},
+		{"value case-insensitive", `{"Login":"failed"}`, true},
+		{"key case-insensitive", `{"login":"Failed"}`, true},
+		{"success empty string", `""`, false},
+		{"success empty object", `{}`, false},
+		{"login success value", `{"Login":"Success"}`, false},
+		{"unrelated json", `{"request_id":42}`, false},
+		{"non-json but not a failure marker", `Welcome`, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := loginBodyIndicatesFailure([]byte(tc.body)); got != tc.want {
+				t.Errorf("loginBodyIndicatesFailure(%q) = %v, want %v", tc.body, got, tc.want)
+			}
+		})
+	}
 }
 
 func TestSpaceTrackFetcher_NoCredentials(t *testing.T) {
@@ -183,8 +239,48 @@ func TestSpaceTrackFetcher_RateLimited(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected rate limit error")
 	}
-	if err != ErrRateLimited {
-		t.Errorf("expected ErrRateLimited, got %v", err)
+	if !errors.Is(err, ErrRateLimited) {
+		t.Errorf("expected a rate-limit error, got %v", err)
+	}
+}
+
+// TestSpaceTrackFetcher_RateLimited500Body pins I-19b: Space-Track signals a query
+// rate-limit with HTTP 500 + a "violated your query rate limit" body (NOT 429), and
+// that specific 500 must classify as rate-limited (a different 500 stays a bad response).
+func TestSpaceTrackFetcher_RateLimited500Body(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == loginPath {
+			http.SetCookie(w, &http.Cookie{Name: "chocolatechip", Value: "s", Path: "/"})
+			_, _ = fmt.Fprint(w, `""`)
+			return
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = fmt.Fprint(w, "Error: You have violated your query rate limit.")
+	}))
+	defer server.Close()
+
+	fetcher := NewSpaceTrackFetcher(server.Client(), server.URL)
+	fetcher.SetCredentials("u", "p")
+
+	_, err := fetcher.Fetch(context.Background(), server.URL+"/gp")
+	if !errors.Is(err, ErrRateLimited) {
+		t.Errorf("a 500 + 'violated your query rate limit' body must be rate-limited, got %v", err)
+	}
+
+	// A different 500 must NOT be a rate limit.
+	server2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == loginPath {
+			http.SetCookie(w, &http.Cookie{Name: "chocolatechip", Value: "s", Path: "/"})
+			_, _ = fmt.Fprint(w, `""`)
+			return
+		}
+		http.Error(w, "internal error", http.StatusInternalServerError)
+	}))
+	defer server2.Close()
+	f2 := NewSpaceTrackFetcher(server2.Client(), server2.URL)
+	f2.SetCredentials("u", "p")
+	if _, err := f2.Fetch(context.Background(), server2.URL+"/gp"); errors.Is(err, ErrRateLimited) {
+		t.Errorf("a generic 500 must NOT be classified rate-limited, got %v", err)
 	}
 }
 

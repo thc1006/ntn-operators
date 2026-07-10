@@ -234,10 +234,12 @@ var _ = Describe("SatelliteEphemeris Controller", func() {
 
 	newReconciler := func(fetcher ephemeris.GPFetcher) *SatelliteEphemerisReconciler {
 		return &SatelliteEphemerisReconciler{
-			Client:   k8sClient,
-			Scheme:   k8sClient.Scheme(),
-			Recorder: events.NewFakeRecorder(10),
-			Fetcher:  fetcher,
+			Client: k8sClient,
+			// Exercise the uncached-read path for the SpaceTrack credentials Secret.
+			APIReader: k8sClient,
+			Scheme:    k8sClient.Scheme(),
+			Recorder:  events.NewFakeRecorder(10),
+			Fetcher:   fetcher,
 		}
 	}
 
@@ -529,15 +531,16 @@ var _ = Describe("SatelliteEphemeris Controller", func() {
 		BeforeEach(func() { createResource() })
 		AfterEach(func() { deleteResource() })
 
-		It("should set FetchFailed condition and requeue after 1 minute", func() {
+		It("should set FetchFailed and return the error so the workqueue backs off (I-19b)", func() {
 			mock := &mockGPFetcher{err: errors.New("connection refused")}
 			reconciler := newReconciler(mock)
 
-			result, err := reconciler.Reconcile(context.Background(), reconcile.Request{
+			_, err := reconciler.Reconcile(context.Background(), reconcile.Request{
 				NamespacedName: typeNamespacedName,
 			})
-			Expect(err).NotTo(HaveOccurred())
-			Expect(result.RequeueAfter).To(Equal(time.Minute))
+			// I-19b: a generic transient fetch error is RETURNED so controller-runtime's
+			// workqueue applies exponential backoff, instead of a flat requeue.
+			Expect(err).To(HaveOccurred())
 
 			updated := &ntnv1alpha1.SatelliteEphemeris{}
 			Expect(k8sClient.Get(context.Background(), typeNamespacedName, updated)).To(Succeed())
@@ -546,6 +549,30 @@ var _ = Describe("SatelliteEphemeris Controller", func() {
 			Expect(cond).NotTo(BeNil())
 			Expect(cond.Status).To(Equal(metav1.ConditionFalse))
 			Expect(cond.Reason).To(Equal("FetchFailed"))
+		})
+	})
+
+	Context("When fetch is rate-limited (I-19b)", func() {
+		BeforeEach(func() { createResource() })
+		AfterEach(func() { deleteResource() })
+
+		It("requeues at the slow cadence with NO error (not a controller error), honoring Retry-After", func() {
+			// A rate-limit is an expected polite-backoff state, not a controller error:
+			// Reconcile must return nil + a RequeueAfter (>= a minute), never the error
+			// (which would trigger the workqueue's fast exponential retry → firewall risk).
+			mock := &mockGPFetcher{err: &ephemeris.RateLimitError{StatusCode: 403, RetryAfter: 90 * time.Minute}}
+			result, err := newReconciler(mock).Reconcile(context.Background(), reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			})
+			Expect(err).NotTo(HaveOccurred())
+			// Retry-After (90m) exceeds the 2h floor? No — max(effectiveInterval, 90m).
+			Expect(result.RequeueAfter).To(BeNumerically(">=", time.Minute))
+
+			updated := &ntnv1alpha1.SatelliteEphemeris{}
+			Expect(k8sClient.Get(context.Background(), typeNamespacedName, updated)).To(Succeed())
+			cond := meta.FindStatusCondition(updated.Status.Conditions, ntnv1alpha1.ConditionGPDataFetched)
+			Expect(cond).NotTo(BeNil())
+			Expect(cond.Reason).To(Equal("RateLimited"))
 		})
 	})
 
@@ -580,7 +607,9 @@ var _ = Describe("SatelliteEphemeris Controller", func() {
 			_, err := reconciler.Reconcile(context.Background(), reconcile.Request{
 				NamespacedName: typeNamespacedName,
 			})
-			Expect(err).NotTo(HaveOccurred())
+			// I-19b: generic error is returned (workqueue backoff). With a COLD cache
+			// (no prior successful fetch) the pass windows are still cleared.
+			Expect(err).To(HaveOccurred())
 
 			// Verify stale data is cleared.
 			updated := &ntnv1alpha1.SatelliteEphemeris{}

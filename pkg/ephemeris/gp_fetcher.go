@@ -22,6 +22,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -33,7 +35,69 @@ import (
 var (
 	ErrRateLimited = errors.New("rate limited by upstream (HTTP 403)")
 	ErrBadResponse = errors.New("unexpected HTTP response")
+	// ErrAuthFailed marks a credential/authentication failure (e.g. Space-Track
+	// returns HTTP 200 with a {"Login":"Failed"} body on bad credentials). It is a
+	// persistent error — retrying with the same credentials cannot succeed — so the
+	// caller requeues slowly rather than hammering the login endpoint (which risks
+	// account suspension). findings.md I-20.
+	ErrAuthFailed = errors.New("authentication failed")
 )
+
+// userAgent is a descriptive User-Agent as required by CelesTrak's usage policy
+// (machine-to-machine clients must identify themselves). findings.md I-19b/N-7.
+const userAgent = "ntn-operators/0.6 (+https://github.com/thc1006/ntn-operators)"
+
+// maxRetryAfter caps a server-supplied Retry-After so a malicious or garbled value
+// cannot park the reconcile arbitrarily far in the future.
+const maxRetryAfter = 24 * time.Hour
+
+// RateLimitError is returned when the GP source signals rate limiting. It carries
+// the parsed Retry-After delay (0 if none) and the observed status code. Different
+// sources signal differently (CelesTrak: HTTP 403; Space-Track: HTTP 500 with a
+// "violated your query rate limit" body; a fronting proxy may use 429), so the
+// caller keys off this type, not a raw status. It satisfies errors.Is(err,
+// ErrRateLimited) for backward compatibility. findings.md I-19b.
+type RateLimitError struct {
+	RetryAfter time.Duration
+	StatusCode int
+}
+
+func (e *RateLimitError) Error() string {
+	return fmt.Sprintf("rate limited by upstream (HTTP %d)", e.StatusCode)
+}
+
+// Is lets errors.Is(err, ErrRateLimited) match a *RateLimitError.
+func (e *RateLimitError) Is(target error) bool { return target == ErrRateLimited }
+
+// parseRetryAfter parses a Retry-After header per RFC 9110 §10.2.3, which allows
+// BOTH forms: delay-seconds (a non-negative integer, e.g. "120") OR an HTTP-date.
+// Returns 0 when absent/unparseable, clamped to [0, maxRetryAfter]. CelesTrak and
+// Space-Track do not currently send Retry-After; this is defensive (a CDN/proxy in
+// front might). findings.md I-19b.
+func parseRetryAfter(h http.Header) time.Duration {
+	v := strings.TrimSpace(h.Get("Retry-After"))
+	if v == "" {
+		return 0
+	}
+	if secs, err := strconv.Atoi(v); err == nil { // delay-seconds
+		return clampRetryAfter(time.Duration(secs) * time.Second)
+	}
+	if t, err := http.ParseTime(v); err == nil { // HTTP-date
+		return clampRetryAfter(time.Until(t))
+	}
+	return 0
+}
+
+func clampRetryAfter(d time.Duration) time.Duration {
+	switch {
+	case d < 0:
+		return 0
+	case d > maxRetryAfter:
+		return maxRetryAfter
+	default:
+		return d
+	}
+}
 
 // maxResponseBody is the maximum size of a CelesTrak response we'll read (50 MB).
 const maxResponseBody = 50 * 1024 * 1024
@@ -86,7 +150,7 @@ func (f *CelesTrakFetcher) Fetch(ctx context.Context, url string) (GPFetchResult
 	if err != nil {
 		return GPFetchResult{}, fmt.Errorf("creating request: %w", err)
 	}
-	req.Header.Set("User-Agent", "ntn-operators/0.1")
+	req.Header.Set("User-Agent", userAgent)
 
 	// Set conditional GET header if we have a cached ETag.
 	if etag, ok := f.etagCache.Load(url); ok {
@@ -143,8 +207,12 @@ func (f *CelesTrakFetcher) Fetch(ctx context.Context, url string) (GPFetchResult
 			FetchedAt:      now,
 		}, nil
 
-	case http.StatusForbidden:
-		return GPFetchResult{}, ErrRateLimited
+	case http.StatusForbidden, http.StatusTooManyRequests:
+		// CelesTrak signals over-frequency / bandwidth abuse with a custom HTTP 403
+		// (429 handled defensively for a fronting proxy). Retrying does not change
+		// the response and risks a firewall block, so this is a rate-limit signal,
+		// not a transient error — the caller requeues at the slow refresh cadence.
+		return GPFetchResult{}, &RateLimitError{RetryAfter: parseRetryAfter(resp.Header), StatusCode: resp.StatusCode}
 
 	default:
 		return GPFetchResult{}, fmt.Errorf("%w: HTTP %d from %s", ErrBadResponse, resp.StatusCode, url)

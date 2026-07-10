@@ -17,7 +17,9 @@ limitations under the License.
 package ephemeris
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -160,20 +162,54 @@ func (f *SpaceTrackFetcher) doLogin(ctx context.Context, username, password stri
 		return fmt.Errorf("creating login request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("User-Agent", userAgent)
 
 	resp, err := f.httpClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("login request failed: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-	// Drain body to reuse connection.
-	_, _ = io.Copy(io.Discard, resp.Body)
+	// Read the login body (small; also drains it for connection reuse). Space-Track
+	// signals bad credentials with HTTP 200 + a {"Login":"Failed"} body, so a 200
+	// alone does NOT mean authenticated — the body must be inspected (I-20).
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
 
+	// A 401/403 (e.g. no session cookie issued) is an auth failure too.
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		return fmt.Errorf("%w: SpaceTrack login rejected (HTTP %d)", ErrAuthFailed, resp.StatusCode)
+	}
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("login returned HTTP %d", resp.StatusCode)
 	}
-
+	if loginBodyIndicatesFailure(body) {
+		return fmt.Errorf("%w: SpaceTrack rejected the credentials (Login=Failed)", ErrAuthFailed)
+	}
 	return nil
+}
+
+// loginBodyIndicatesFailure reports whether a HTTP-200 Space-Track login response
+// body indicates rejected credentials. Space-Track returns {"Login":"Failed"} on a
+// bad login (a successful login body is empty / cookie-only, so it never carries a
+// Login=Failed marker). Parses the documented JSON shape first (whitespace/case-
+// tolerant); if the body is not JSON, falls back to requiring BOTH the "login" and
+// "failed" tokens (never a bare "failed", to avoid false positives). findings.md I-20.
+func loginBodyIndicatesFailure(body []byte) bool {
+	trimmed := bytes.TrimSpace(body)
+	var m map[string]json.RawMessage
+	if json.Unmarshal(trimmed, &m) == nil {
+		for k, raw := range m {
+			if !strings.EqualFold(k, "Login") {
+				continue
+			}
+			var s string
+			if json.Unmarshal(raw, &s) == nil && strings.EqualFold(s, "Failed") {
+				return true
+			}
+		}
+		return false // valid JSON, no Login=Failed → treat as an authenticated response
+	}
+	low := bytes.ToLower(trimmed)
+	return bytes.Contains(low, []byte(`"login"`)) && bytes.Contains(low, []byte(`"failed"`))
 }
 
 // errSessionExpired is a sentinel for 401 detection in retry logic.
@@ -192,7 +228,7 @@ func (f *SpaceTrackFetcher) doFetchGPRaw(ctx context.Context, gpURL string) ([]b
 	if err != nil {
 		return nil, fmt.Errorf("creating GP request: %w", err)
 	}
-	req.Header.Set("User-Agent", "ntn-operators/0.1")
+	req.Header.Set("User-Agent", userAgent)
 
 	resp, err := f.httpClient.Do(req)
 	if err != nil {
@@ -215,7 +251,17 @@ func (f *SpaceTrackFetcher) doFetchGPRaw(ctx context.Context, gpURL string) ([]b
 
 	case http.StatusForbidden, http.StatusTooManyRequests:
 		_, _ = io.Copy(io.Discard, resp.Body)
-		return nil, ErrRateLimited
+		return nil, &RateLimitError{RetryAfter: parseRetryAfter(resp.Header), StatusCode: resp.StatusCode}
+
+	case http.StatusInternalServerError:
+		// Space-Track signals a query-rate-limit violation with HTTP 500 and a body
+		// containing "violated your query rate limit" — NOT 429. Only that specific
+		// 500 is a rate limit; any other 500 is a genuine server error. I-19b.
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+		if bytes.Contains(bytes.ToLower(body), []byte("violated your query rate limit")) {
+			return nil, &RateLimitError{RetryAfter: parseRetryAfter(resp.Header), StatusCode: resp.StatusCode}
+		}
+		return nil, fmt.Errorf("%w: HTTP 500 from %s", ErrBadResponse, gpURL)
 
 	case http.StatusUnauthorized:
 		_, _ = io.Copy(io.Discard, resp.Body)
