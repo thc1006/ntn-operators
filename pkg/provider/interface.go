@@ -18,6 +18,7 @@ package provider
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -45,11 +46,21 @@ type CellIdentity struct {
 
 // ResolvedRemoteControl is a gNB's resolved remote-control WebSocket endpoint,
 // derived from NTNCellConfig.spec.provider.remoteControl. OCUDU's remote_control
-// server is plaintext and unauthenticated (localhost by default), so the safe
-// deployment is a sidecar next to the gNB pod; cross-pod requires a NetworkPolicy.
+// server is plaintext and unauthenticated by default (localhost sidecar), so
+// without TLSConfig the safe deployment is a sidecar next to the gNB pod and
+// cross-pod requires a NetworkPolicy. Set TLSConfig (+ optionally AuthToken) to
+// reach a wss://-fronted / authenticated endpoint (N-12).
 type ResolvedRemoteControl struct {
 	// Endpoint is host:port of the gNB remote_control server (e.g. 127.0.0.1:8001).
 	Endpoint string
+	// TLSConfig, when non-nil, makes the provider dial wss:// with this config
+	// (server-certificate verification via RootCAs; optional client certificate for
+	// mTLS). Nil keeps the plaintext ws:// dial, preserving existing behavior.
+	TLSConfig *tls.Config
+	// AuthToken, when non-empty, is sent as an "Authorization: Bearer <token>"
+	// header on the WebSocket handshake. It is a replayable shared secret, so it is
+	// only ever attached when TLSConfig is set (i.e. over wss://).
+	AuthToken string
 }
 
 // RuntimeUpdate is a runtime NTN configuration update for a single cell, pushed

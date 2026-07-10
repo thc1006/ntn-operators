@@ -223,6 +223,7 @@ func main() {
 	}
 	if err := (&controller.NTNCellConfigReconciler{
 		Client:                  mgr.GetClient(),
+		APIReader:               mgr.GetAPIReader(),
 		Scheme:                  mgr.GetScheme(),
 		Recorder:                mgr.GetEventRecorder("ntncellconfig-controller"),
 		Providers:               providers,

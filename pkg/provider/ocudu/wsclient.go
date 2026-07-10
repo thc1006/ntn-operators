@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"time"
 
 	"github.com/coder/websocket"
@@ -273,10 +274,15 @@ func (e *wsError) Error() string { return e.msg }
 // permanent config/protocol error the operator should not hammer.
 func (e *wsError) retryable() bool { return e.kind == wsUnreachable }
 
-// pushNTNConfigUpdate dials the gNB remote_control WebSocket at endpoint, sends a
-// single ntn_config_update text frame, reads the one-line reply, and returns nil
-// on success or a *wsError. endpoint is host:port (scheme ws:// is added here).
-func pushNTNConfigUpdate(ctx context.Context, endpoint string, env ntnConfigUpdateEnvelope) error {
+// pushNTNConfigUpdate dials the gNB remote_control WebSocket, sends a single
+// ntn_config_update text frame, reads the one-line reply, and returns nil on
+// success or a *wsError. It dials ws://host:port by default; when the target
+// carries a TLSConfig it dials wss:// and, if an AuthToken is set, adds an
+// Authorization: Bearer header — the shared secret is only ever sent over TLS (N-12).
+func pushNTNConfigUpdate(
+	ctx context.Context, target provider.ResolvedRemoteControl, env ntnConfigUpdateEnvelope,
+) error {
+	endpoint := target.Endpoint
 	payload, err := json.Marshal(env)
 	if err != nil {
 		return &wsError{wsMarshal, fmt.Sprintf("marshal ntn_config_update: %v", err)}
@@ -291,7 +297,22 @@ func pushNTNConfigUpdate(ctx context.Context, endpoint string, env ntnConfigUpda
 	dialCtx, cancel := context.WithTimeout(ctx, wsDialTimeout)
 	defer cancel()
 
-	conn, _, err := websocket.Dial(dialCtx, "ws://"+endpoint, nil)
+	// Default plaintext ws://; upgrade to wss:// + auth when the target carries a
+	// TLS config. coder/websocket rewrites wss→https and runs the whole handshake
+	// (incl. TLS) through the supplied http.Client, so Transport.TLSClientConfig is
+	// the TLS lever; the bearer header rides only over that TLS connection.
+	scheme := "ws://"
+	var dialOpts *websocket.DialOptions
+	if target.TLSConfig != nil {
+		scheme = "wss://"
+		dialOpts = &websocket.DialOptions{
+			HTTPClient: &http.Client{Transport: &http.Transport{TLSClientConfig: target.TLSConfig}},
+		}
+		if target.AuthToken != "" {
+			dialOpts.HTTPHeader = http.Header{"Authorization": {"Bearer " + target.AuthToken}}
+		}
+	}
+	conn, _, err := websocket.Dial(dialCtx, scheme+endpoint, dialOpts)
 	if err != nil {
 		return &wsError{wsUnreachable, fmt.Sprintf("dial %s: %v", endpoint, err)}
 	}

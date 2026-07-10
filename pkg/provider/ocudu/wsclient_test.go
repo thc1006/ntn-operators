@@ -18,6 +18,8 @@ package ocudu
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"math"
@@ -266,7 +268,8 @@ func mustBuild(t *testing.T, u provider.RuntimeUpdate) ntnConfigUpdateEnvelope {
 func TestPushNTNConfigUpdate_Success(t *testing.T) {
 	endpoint, captured := wsTestServer(t, `{"cmd":"ntn_config_update","timestamp":"2030-01-01T00:00:00"}`)
 	env, _ := buildNTNConfigUpdate(ecefRuntimeUpdate())
-	if err := pushNTNConfigUpdate(context.Background(), endpoint, env); err != nil {
+	target := provider.ResolvedRemoteControl{Endpoint: endpoint}
+	if err := pushNTNConfigUpdate(context.Background(), target, env); err != nil {
 		t.Fatalf("expected success, got %v", err)
 	}
 	if !strings.Contains(string(captured()), `"cmd":"ntn_config_update"`) {
@@ -274,10 +277,74 @@ func TestPushNTNConfigUpdate_Success(t *testing.T) {
 	}
 }
 
+// TestPushNTNConfigUpdate_WSS_BearerAuth pins N-12: with a TLSConfig set, the push
+// dials wss:// (verifying the server cert against RootCAs) and carries the shared
+// secret as an Authorization: Bearer header — which the plaintext ws:// path never
+// sends. A TLS test server captures the handshake header.
+func TestPushNTNConfigUpdate_WSS_BearerAuth(t *testing.T) {
+	var mu sync.Mutex
+	var gotAuth string
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		gotAuth = r.Header.Get("Authorization")
+		mu.Unlock()
+		c, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer c.CloseNow() //nolint:errcheck
+		_, _, _ = c.Read(r.Context())
+		_ = c.Write(r.Context(), websocket.MessageText, []byte(`{"cmd":"ntn_config_update","timestamp":1}`))
+		_ = c.Close(websocket.StatusNormalClosure, "")
+	}))
+	t.Cleanup(srv.Close)
+	endpoint := strings.TrimPrefix(srv.URL, "https://")
+
+	pool := x509.NewCertPool()
+	pool.AddCert(srv.Certificate())
+	target := provider.ResolvedRemoteControl{
+		Endpoint:  endpoint,
+		TLSConfig: &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12},
+		AuthToken: "s3cr3t-token",
+	}
+	env, _ := buildNTNConfigUpdate(ecefRuntimeUpdate())
+	if err := pushNTNConfigUpdate(context.Background(), target, env); err != nil {
+		t.Fatalf("wss push failed (TLS/auth wiring): %v", err)
+	}
+	mu.Lock()
+	auth := gotAuth
+	mu.Unlock()
+	if auth != "Bearer s3cr3t-token" {
+		t.Fatalf("server saw Authorization=%q, want %q", auth, "Bearer s3cr3t-token")
+	}
+}
+
+// TestPushNTNConfigUpdate_WSS_UntrustedCertFails pins the TLS hardening: a wss://
+// server whose certificate is NOT in RootCAs must fail the handshake — proving the
+// client verifies the server cert (no InsecureSkipVerify).
+func TestPushNTNConfigUpdate_WSS_UntrustedCertFails(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if c, err := websocket.Accept(w, r, nil); err == nil {
+			_ = c.Close(websocket.StatusNormalClosure, "")
+		}
+	}))
+	t.Cleanup(srv.Close)
+	endpoint := strings.TrimPrefix(srv.URL, "https://")
+	// Empty RootCAs (nothing signs the test cert) → verification must fail.
+	target := provider.ResolvedRemoteControl{
+		Endpoint:  endpoint,
+		TLSConfig: &tls.Config{RootCAs: x509.NewCertPool(), MinVersion: tls.VersionTLS12},
+	}
+	env, _ := buildNTNConfigUpdate(ecefRuntimeUpdate())
+	if err := pushNTNConfigUpdate(context.Background(), target, env); err == nil {
+		t.Fatal("expected the wss handshake to fail against an untrusted server certificate")
+	}
+}
+
 func TestPushNTNConfigUpdate_Rejected(t *testing.T) {
 	endpoint, _ := wsTestServer(t, `{"error":"epoch_timestamp value is in past","cmd":"ntn_config_update"}`)
 	env, _ := buildNTNConfigUpdate(ecefRuntimeUpdate())
-	err := pushNTNConfigUpdate(context.Background(), endpoint, env)
+	err := pushNTNConfigUpdate(context.Background(), provider.ResolvedRemoteControl{Endpoint: endpoint}, env)
 	var we *wsError
 	if !errors.As(err, &we) || we.kind != wsRejected {
 		t.Fatalf("expected wsRejected, got %v", err)
@@ -292,7 +359,7 @@ func TestPushNTNConfigUpdate_Rejected(t *testing.T) {
 func TestPushNTNConfigUpdate_UnparseableReply(t *testing.T) {
 	endpoint, _ := wsTestServer(t, `not json at all`)
 	env, _ := buildNTNConfigUpdate(ecefRuntimeUpdate())
-	err := pushNTNConfigUpdate(context.Background(), endpoint, env)
+	err := pushNTNConfigUpdate(context.Background(), provider.ResolvedRemoteControl{Endpoint: endpoint}, env)
 	var we *wsError
 	if !errors.As(err, &we) {
 		t.Fatalf("expected a *wsError for an unparseable reply, got %v", err)
@@ -305,7 +372,7 @@ func TestPushNTNConfigUpdate_UnparseableReply(t *testing.T) {
 func TestPushNTNConfigUpdate_Unreachable(t *testing.T) {
 	env, _ := buildNTNConfigUpdate(ecefRuntimeUpdate())
 	// 127.0.0.1:1 is reserved/closed — dial fails.
-	err := pushNTNConfigUpdate(context.Background(), "127.0.0.1:1", env)
+	err := pushNTNConfigUpdate(context.Background(), provider.ResolvedRemoteControl{Endpoint: "127.0.0.1:1"}, env)
 	var we *wsError
 	if !errors.As(err, &we) || we.kind != wsUnreachable {
 		t.Fatalf("expected wsUnreachable, got %v", err)
@@ -323,7 +390,7 @@ func TestPushNTNConfigUpdate_PayloadTooLarge(t *testing.T) {
 		Cells: []ntnConfigCellJSON{{PLMN: strings.Repeat("x", wsMaxPayload+1), NCI: 1}},
 	}
 	// Endpoint is never dialed — the cap is checked before the dial.
-	err := pushNTNConfigUpdate(context.Background(), "127.0.0.1:1", env)
+	err := pushNTNConfigUpdate(context.Background(), provider.ResolvedRemoteControl{Endpoint: "127.0.0.1:1"}, env)
 	var we *wsError
 	if !errors.As(err, &we) || we.kind != wsPayloadTooLarge {
 		t.Fatalf("expected wsPayloadTooLarge, got %v", err)
@@ -337,7 +404,7 @@ func TestPushNTNConfigUpdate_PayloadTooLarge(t *testing.T) {
 func TestPushNTNConfigUpdate_OversizedReply(t *testing.T) {
 	endpoint, _ := wsTestServer(t, strings.Repeat("A", wsMaxPayload+1))
 	env, _ := buildNTNConfigUpdate(ecefRuntimeUpdate())
-	err := pushNTNConfigUpdate(context.Background(), endpoint, env)
+	err := pushNTNConfigUpdate(context.Background(), provider.ResolvedRemoteControl{Endpoint: endpoint}, env)
 	var we *wsError
 	if !errors.As(err, &we) || we.kind != wsUnreachable {
 		t.Fatalf("expected wsUnreachable on an oversized reply, got %v", err)
