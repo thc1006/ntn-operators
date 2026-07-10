@@ -155,39 +155,14 @@ func (r *SatelliteEphemerisReconciler) Reconcile(ctx context.Context, req ctrl.R
 	// to effectiveInterval). Only fetch when the window has elapsed or the cache is
 	// cold (e.g. the first reconcile after a restart). (#179)
 	now := time.Now()
-	var result ephemeris.GPFetchResult
-	reusedCache := false
-	if c, ok := r.cachedOMMResult(req.NamespacedName); ok &&
-		c.generation == eph.Generation && c.uid == eph.UID &&
-		now.Sub(c.result.FetchedAt) < effectiveInterval {
-		result = c.result
-		reusedCache = true
-		log.V(1).Info("re-propagating from cached OMMs; GP source not contacted",
-			"cacheAge", now.Sub(c.result.FetchedAt).String(), "refreshInterval", effectiveInterval.String())
-	} else {
-		// Refuse a cleartext http:// source that resolves to a PUBLIC IP: an
-		// on-path attacker could inject forged OMM JSON that is propagated into
-		// SIB19 (findings.md I-21). In-cluster http mirrors and E2E mocks (which
-		// resolve to private IPs, behind NetworkPolicy) stay allowed, and https
-		// is always fine.
-		if ip, insecure := r.publicHTTPSource(ctx, eph.Spec.Source.URL); insecure {
-			return r.handleInsecureURL(ctx, eph, ip)
-		}
-		fetchStart := time.Now()
-		var fetchErr error
-		result, fetchErr = fetcher.Fetch(ctx, eph.Spec.Source.URL)
-		fetchStatus := "success"
-		if fetchErr != nil {
-			fetchStatus = "error"
-		}
-		ntnmetrics.GPFetchDuration.With(prometheus.Labels{"source_type": eph.Spec.Source.Type, "status": fetchStatus}).Observe(time.Since(fetchStart).Seconds())
-
-		// Step 5: Handle fetch errors.
-		if fetchErr != nil {
-			return r.handleFetchError(ctx, eph, fetchErr, effectiveInterval)
-		}
-		r.ommCache.Store(req.NamespacedName, cachedFetch{result: result, generation: eph.Generation, uid: eph.UID})
+	outcome, earlyResult, earlyErr := r.obtainOMMs(ctx, req, eph, fetcher, effectiveInterval, now)
+	if earlyResult != nil {
+		return *earlyResult, earlyErr
 	}
+	result := outcome.result
+	reusedCache := outcome.reusedCache
+	servedCacheOnError := outcome.servedCacheOnError
+	cacheServeErr := outcome.cacheServeErr
 
 	// Step 6: Update status with new data.
 	//
@@ -206,6 +181,23 @@ func (r *SatelliteEphemerisReconciler) Reconcile(ctx context.Context, req ctrl.R
 	ntnmetrics.GPSatelliteCount.With(prometheus.Labels{"namespace": eph.Namespace, "ephemeris": eph.Name}).Set(float64(result.SatelliteCount))
 
 	switch {
+	case servedCacheOnError:
+		log.Info("serving cached OMMs after fetch failure", "satelliteCount", result.SatelliteCount)
+		meta.SetStatusCondition(&eph.Status.Conditions, metav1.Condition{
+			Type:   ntnv1alpha1.ConditionGPDataFetched,
+			Status: metav1.ConditionFalse,
+			Reason: "FetchFailedServingCache",
+			Message: fmt.Sprintf("GP fetch failed (%s); serving %d satellites from cached OMMs — pass windows and runtime push preserved",
+				cacheServeErr.Error(), result.SatelliteCount),
+			ObservedGeneration: eph.Generation,
+		})
+		meta.SetStatusCondition(&eph.Status.Conditions, metav1.Condition{
+			Type:               ntnv1alpha1.ConditionGPDataParsed,
+			Status:             metav1.ConditionTrue,
+			Reason:             reasonCachedOMMs,
+			Message:            "Using cached OMM data from a previous fetch",
+			ObservedGeneration: eph.Generation,
+		})
 	case reusedCache:
 		log.V(1).Info("GP data re-propagated from cache (no fetch)", "satelliteCount", result.SatelliteCount)
 		meta.SetStatusCondition(&eph.Status.Conditions, metav1.Condition{
@@ -218,7 +210,7 @@ func (r *SatelliteEphemerisReconciler) Reconcile(ctx context.Context, req ctrl.R
 		meta.SetStatusCondition(&eph.Status.Conditions, metav1.Condition{
 			Type:               ntnv1alpha1.ConditionGPDataParsed,
 			Status:             metav1.ConditionTrue,
-			Reason:             "CachedOMMs",
+			Reason:             reasonCachedOMMs,
 			Message:            "Using cached OMM data from previous fetch",
 			ObservedGeneration: eph.Generation,
 		})
@@ -234,7 +226,7 @@ func (r *SatelliteEphemerisReconciler) Reconcile(ctx context.Context, req ctrl.R
 		meta.SetStatusCondition(&eph.Status.Conditions, metav1.Condition{
 			Type:               ntnv1alpha1.ConditionGPDataParsed,
 			Status:             metav1.ConditionTrue,
-			Reason:             "CachedOMMs",
+			Reason:             reasonCachedOMMs,
 			Message:            "Using cached OMM data from previous fetch",
 			ObservedGeneration: eph.Generation,
 		})
@@ -329,10 +321,32 @@ func (r *SatelliteEphemerisReconciler) Reconcile(ctx context.Context, req ctrl.R
 		r.Recorder.Eventf(eph, nil, "Warning", "UnsupportedOrbitRegime", "OrbitRegimeGuard", "%s", orbitRegimeEvent)
 	}
 
-	// Only emit the "fetched" event on a real fetch, not on the short-cadence
-	// cache re-propagations — otherwise they would flood the event stream (#179).
-	if r.Recorder != nil && !reusedCache {
-		r.Recorder.Eventf(eph, nil, "Normal", "GPDataFetched", "GPDataFetched", "Fetched %d satellites", result.SatelliteCount)
+	// Emit the "fetched" event only on a real successful fetch — not on the
+	// short-cadence cache re-propagations (would flood the stream, #179) and not on
+	// a serve-cache-on-error cycle (the fetch failed). The latter emits its own
+	// Warning so an operator sees SIB19 is running on stale cache (I-18).
+	switch {
+	case servedCacheOnError:
+		if r.Recorder != nil {
+			r.Recorder.Eventf(eph, nil, "Warning", "FetchFailedServingCache", "FetchFailedServingCache",
+				"GP fetch failed (%s); serving %d satellites from cached OMMs", cacheServeErr.Error(), result.SatelliteCount)
+		}
+	case !reusedCache:
+		if r.Recorder != nil {
+			r.Recorder.Eventf(eph, nil, "Normal", "GPDataFetched", "GPDataFetched", "Fetched %d satellites", result.SatelliteCount)
+		}
+	}
+
+	// I-18: on a serve-cache-on-error cycle, back off the FETCH retry exactly as the
+	// wipe path would (rate-limited → slow requeue; generic transient → return the
+	// error for workqueue exponential backoff) — while the status just persisted
+	// keeps SIB19 served from cache.
+	if servedCacheOnError {
+		_, requeueAfter, returnAsError := classifyFetchError(cacheServeErr, effectiveInterval)
+		if returnAsError {
+			return ctrl.Result{}, cacheServeErr
+		}
+		return ctrl.Result{RequeueAfter: requeueAfter}, nil
 	}
 
 	// Requeue on the short propagation cadence (not the GP-refresh interval) so the
@@ -691,13 +705,7 @@ func (r *SatelliteEphemerisReconciler) handleFetchError(
 	fetchErr error,
 	effectiveInterval time.Duration,
 ) (ctrl.Result, error) {
-	reason := "FetchFailed"
-	requeueAfter := time.Minute
-
-	if errors.Is(fetchErr, ephemeris.ErrRateLimited) {
-		reason = "RateLimited"
-		requeueAfter = effectiveInterval
-	}
+	reason, requeueAfter, returnAsError := classifyFetchError(fetchErr, effectiveInterval)
 
 	meta.SetStatusCondition(&eph.Status.Conditions, metav1.Condition{
 		Type:               ntnv1alpha1.ConditionGPDataFetched,
@@ -727,7 +735,107 @@ func (r *SatelliteEphemerisReconciler) handleFetchError(
 		r.Recorder.Eventf(eph, nil, "Warning", reason, reason, "%s", fetchErr.Error())
 	}
 
+	if returnAsError {
+		return ctrl.Result{}, fetchErr
+	}
 	return ctrl.Result{RequeueAfter: requeueAfter}, nil
+}
+
+// retryAfterFrom extracts a server-supplied Retry-After delay from a rate-limit
+// error, or 0 if none. Lets a fronting proxy's Retry-After override the default
+// refresh-cadence requeue.
+func retryAfterFrom(err error) time.Duration {
+	var rle *ephemeris.RateLimitError
+	if errors.As(err, &rle) {
+		return rle.RetryAfter
+	}
+	return 0
+}
+
+// reasonCachedOMMs is the GPDataParsed condition reason when serving OMMs from the
+// in-memory cache rather than a fresh parse.
+const reasonCachedOMMs = "CachedOMMs"
+
+// ommFetchOutcome is how a reconcile obtained its OMM data: a cache re-propagation
+// within the refresh window (reusedCache), a fresh fetch, or — on fetch failure with
+// a still-valid cache — a degraded serve-from-cache (servedCacheOnError). See obtainOMMs.
+type ommFetchOutcome struct {
+	result             ephemeris.GPFetchResult
+	reusedCache        bool
+	servedCacheOnError bool
+	cacheServeErr      error
+}
+
+// obtainOMMs resolves the OMM data for this reconcile (Step 4b/5). It returns the
+// outcome plus an optional early Reconcile result: non-nil when the caller must
+// return immediately — an insecure-URL rejection (I-21) or a cold-cache fetch
+// failure (the wipe path). Within the refresh window it re-propagates from cache
+// without contacting the source (#179); otherwise it fetches, falling back to a
+// still-valid cache on error rather than blackholing SIB19 (I-18). The refresh-
+// window age check is intentionally NOT applied to the error fallback — we fetched
+// because the window elapsed, and the served cache's staleness is surfaced by the
+// I-17 EphemerisEpochStale condition.
+func (r *SatelliteEphemerisReconciler) obtainOMMs(
+	ctx context.Context, req ctrl.Request, eph *ntnv1alpha1.SatelliteEphemeris,
+	fetcher ephemeris.GPFetcher, effectiveInterval time.Duration, now time.Time,
+) (ommFetchOutcome, *ctrl.Result, error) {
+	log := logf.FromContext(ctx)
+	if c, ok := r.cachedOMMResult(req.NamespacedName); ok &&
+		c.generation == eph.Generation && c.uid == eph.UID &&
+		now.Sub(c.result.FetchedAt) < effectiveInterval {
+		log.V(1).Info("re-propagating from cached OMMs; GP source not contacted",
+			"cacheAge", now.Sub(c.result.FetchedAt).String(), "refreshInterval", effectiveInterval.String())
+		return ommFetchOutcome{result: c.result, reusedCache: true}, nil, nil
+	}
+
+	// Refuse a cleartext http:// source that resolves to a PUBLIC IP (I-21).
+	if ip, insecure := r.publicHTTPSource(ctx, eph.Spec.Source.URL); insecure {
+		res, err := r.handleInsecureURL(ctx, eph, ip)
+		return ommFetchOutcome{}, &res, err
+	}
+
+	fetchStart := time.Now()
+	result, fetchErr := fetcher.Fetch(ctx, eph.Spec.Source.URL)
+	fetchStatus := "success"
+	if fetchErr != nil {
+		fetchStatus = "error"
+	}
+	ntnmetrics.GPFetchDuration.With(prometheus.Labels{"source_type": eph.Spec.Source.Type, "status": fetchStatus}).Observe(time.Since(fetchStart).Seconds())
+
+	if fetchErr != nil {
+		if c, ok := r.cachedOMMResult(req.NamespacedName); ok &&
+			c.generation == eph.Generation && c.uid == eph.UID {
+			log.Info("GP fetch failed; serving last cached OMMs for SIB19 continuity",
+				"err", fetchErr.Error(), "cacheAge", now.Sub(c.result.FetchedAt).String())
+			return ommFetchOutcome{result: c.result, servedCacheOnError: true, cacheServeErr: fetchErr}, nil, nil
+		}
+		res, err := r.handleFetchError(ctx, eph, fetchErr, effectiveInterval)
+		return ommFetchOutcome{}, &res, err
+	}
+
+	r.ommCache.Store(req.NamespacedName, cachedFetch{result: result, generation: eph.Generation, uid: eph.UID})
+	return ommFetchOutcome{result: result}, nil, nil
+}
+
+// classifyFetchError chooses the retry strategy for a failed GP fetch (findings.md
+// I-19b), shared by the cache-wipe and the serve-cache (I-18) paths so both back off
+// identically:
+//   - rate-limited: an EXPECTED polite-backoff state (not a controller error).
+//     Requeue at the slow refresh cadence (honoring any Retry-After) — never hammer
+//     the source into a firewall block / account suspension.
+//   - auth failure: a persistent config error; slow requeue, surfaced by condition.
+//   - anything else (timeout, DNS, 5xx, parse): a genuine transient error — return it
+//     (returnAsError) so the controller-runtime workqueue applies exponential backoff
+//     (5ms→1000s) and a persistent failure surfaces on the reconcile-error alert.
+func classifyFetchError(fetchErr error, effectiveInterval time.Duration) (reason string, requeueAfter time.Duration, returnAsError bool) {
+	switch {
+	case errors.Is(fetchErr, ephemeris.ErrRateLimited):
+		return "RateLimited", max(effectiveInterval, retryAfterFrom(fetchErr)), false
+	case errors.Is(fetchErr, ephemeris.ErrAuthFailed):
+		return "AuthFailed", effectiveInterval, false
+	default:
+		return "FetchFailed", 0, true
+	}
 }
 
 // fetcherForSource returns the appropriate GPFetcher for the source type.
