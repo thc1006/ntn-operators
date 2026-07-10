@@ -218,20 +218,135 @@ func predictSingle(
 		return nil, nil
 	}
 
+	observer := &sgp4.Location{Latitude: gs.Latitude, Longitude: gs.Longitude, Altitude: gs.Altitude}
+	elevFn := func(t time.Time) (float64, error) { return elevationAt(tle, observer, t) }
+
 	var results []PassResult
 	for _, p := range passes {
 		if p.MaxElevation < minElevation {
 			continue
 		}
+		// The library defines AOS/LOS at the 0° geometric horizon, but a link is
+		// only usable at/above minElevation. Trim each window to the interval where
+		// elevation >= minElevation (I-22) so availability consumers (e.g. NTNSlice
+		// failover) never treat a below-mask, unusable link as available.
+		aos, los := trimPassToMask(elevFn, p, minElevation)
+		if !los.After(aos) {
+			// Grazing pass whose usable window collapsed to (near) zero once the
+			// mask is applied — the satellite only brushes the mask, so drop it.
+			continue
+		}
 		results = append(results, PassResult{
 			Satellite:     omm.ObjectName,
 			GroundStation: gs.Name,
-			AOS:           p.AOS,
-			LOS:           p.LOS,
+			AOS:           aos,
+			LOS:           los,
 			MaxElevation:  p.MaxElevation,
 		})
 	}
 	return results, nil
+}
+
+const (
+	// maskCrossingIterations bounds the mask-crossing bisection. A LEO half-pass
+	// arc is at most a few hundred seconds, so this many halvings resolve the
+	// crossing far below one second; the loop also stops early once the bracket
+	// is under maskCrossingTol.
+	maskCrossingIterations = 40
+	// maskCrossingTol is the bracket width at which the bisection is considered
+	// converged (sub-second, as libpredict-style AOS/LOS refinement targets).
+	maskCrossingTol = 200 * time.Millisecond
+)
+
+// elevationAt returns the topocentric elevation (degrees) of the satellite as
+// seen from observer at time t. It mirrors the private elevation helper inside
+// akhenakh/sgp4's GeneratePasses, which is what lets us re-derive the
+// minElevation crossings the library itself only computes at the 0° horizon.
+func elevationAt(tle *sgp4.TLE, observer *sgp4.Location, t time.Time) (float64, error) {
+	eci, err := tle.FindPositionAtTime(t)
+	if err != nil {
+		return 0, err
+	}
+	sv := &sgp4.StateVector{
+		X: eci.Position.X, Y: eci.Position.Y, Z: eci.Position.Z,
+		VX: eci.Velocity.X, VY: eci.Velocity.Y, VZ: eci.Velocity.Z,
+	}
+	obs, err := sv.GetLookAngle(observer, t)
+	if err != nil {
+		return 0, err
+	}
+	return obs.LookAngles.Elevation, nil
+}
+
+// trimPassToMask narrows a 0°-horizon pass to the sub-interval where elevation
+// is at or above mask. Elevation over a single pass is unimodal (it rises to one
+// peak at p.MaxElevationTime, then falls), so the mask is crossed at most once on
+// each side of the peak. Each crossing is refined by bisection. Endpoints are
+// only trimmed when the satellite actually starts/ends below the mask, so a pass
+// clipped by the prediction window boundary (already above the mask at start or
+// stop) is left untouched on that side. mask <= 0 is a no-op (the 0° horizon
+// already satisfies it).
+func trimPassToMask(elevFn func(time.Time) (float64, error), p sgp4.PassDetails, mask float64) (aos, los time.Time) {
+	aos, los = p.AOS, p.LOS
+	if mask <= 0 {
+		return aos, los
+	}
+	peak := p.MaxElevationTime
+
+	// AOS side: [aos, peak] straddles the rising crossing when the satellite
+	// starts below the mask. (peak must be strictly after aos to be a valid
+	// bracket; peak's elevation is >= mask because the pass survived the
+	// MaxElevation filter.)
+	if peak.After(aos) {
+		if elAOS, err := elevFn(aos); err == nil && elAOS < mask {
+			if t, err := refineMaskCrossing(elevFn, aos, peak, mask, true); err == nil {
+				aos = t
+			}
+		}
+	}
+	// LOS side: [peak, los] straddles the falling crossing when the satellite
+	// ends below the mask.
+	if los.After(peak) {
+		if elLOS, err := elevFn(los); err == nil && elLOS < mask {
+			if t, err := refineMaskCrossing(elevFn, peak, los, mask, false); err == nil {
+				los = t
+			}
+		}
+	}
+	return aos, los
+}
+
+// refineMaskCrossing bisects [lo, hi] for the instant elevation crosses mask,
+// given the endpoints straddle it: for a rising crossing elevation(lo) < mask <=
+// elevation(hi); for a falling crossing elevation(lo) >= mask > elevation(hi).
+// It returns the boundary on the USABLE side (elevation >= mask) — hi for a
+// rising crossing (AOS), lo for a falling one (LOS) — so the trimmed window is a
+// subset of {t : elevation(t) >= mask} and never over-claims below-mask time.
+func refineMaskCrossing(
+	elevFn func(time.Time) (float64, error),
+	lo, hi time.Time,
+	mask float64,
+	rising bool,
+) (time.Time, error) {
+	for i := 0; i < maskCrossingIterations && hi.Sub(lo) > maskCrossingTol; i++ {
+		mid := lo.Add(hi.Sub(lo) / 2)
+		el, err := elevFn(mid)
+		if err != nil {
+			return time.Time{}, err
+		}
+		above := el >= mask
+		// Keep the bracket invariant (lo below/hi above for rising; lo above/hi
+		// below for falling) so the returned usable-side boundary stays valid.
+		if above == rising {
+			hi = mid
+		} else {
+			lo = mid
+		}
+	}
+	if rising {
+		return hi, nil
+	}
+	return lo, nil
 }
 
 // FilterOMMs returns OMMs matching the NORAD ID filter. If filter is empty, returns all.
