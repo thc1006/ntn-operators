@@ -101,8 +101,13 @@ func main() {
 			"Set this only to enable internal CelesTrak mirrors (e.g. air-gapped "+
 			"deployments) or E2E test mock servers. Production clusters with public "+
 			"CelesTrak access should leave this empty.")
+	// Default to the Zap PRODUCTION config (JSON encoder, info level, sampling,
+	// error-level stacktraces) rather than the kubebuilder scaffold's Development
+	// default (console, warning stacktraces, no sampling), so a deployed operator
+	// emits structured logs. Still flag-overridable: `--zap-devel` restores the
+	// development config for local `make run`.
 	opts := zap.Options{
-		Development: true,
+		Development: false,
 	}
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
@@ -169,17 +174,14 @@ func main() {
 		HealthProbeBindAddress: probeAddr,
 		LeaderElection:         enableLeaderElection,
 		LeaderElectionID:       "b1076767.operators.dev",
-		// LeaderElectionReleaseOnCancel defines if the leader should step down voluntarily
-		// when the Manager ends. This requires the binary to immediately end when the
-		// Manager is stopped, otherwise, this setting is unsafe. Setting this significantly
-		// speeds up voluntary leader transitions as the new leader don't have to wait
-		// LeaseDuration time first.
-		//
-		// In the default scaffold provided, the program ends immediately after
-		// the manager stops, so would be fine to enable this option. However,
-		// if you are doing or is intended to do any operation such as perform cleanups
-		// after the manager stops then its usage might be unsafe.
-		// LeaderElectionReleaseOnCancel: true,
+		// Release the lease on graceful shutdown so a standby replica takes over
+		// immediately instead of waiting out LeaseDuration (~15s) — the active-passive
+		// HA win, and it collapses the rollout dead window. This is SAFE here because
+		// main() exits as soon as mgr.Start returns (below) with NO post-Start work:
+		// controller-runtime warns (issue #1132) this is only unsafe when the binary
+		// keeps running — and performing lease-guarded work — after the Manager stops.
+		// Lease timing keeps the controller-runtime/client-go defaults (15s/10s/2s).
+		LeaderElectionReleaseOnCancel: true,
 	})
 	if err != nil {
 		setupLog.Error(err, "Failed to start manager")
@@ -262,6 +264,12 @@ func main() {
 		setupLog.Error(err, "Failed to set up health check")
 		os.Exit(1)
 	}
+	// readyz is intentionally leadership-agnostic (healthz.Ping): under active-passive
+	// HA a NON-leader standby must still report Ready, or the Deployment never counts
+	// it Available and a rolling update deadlocks (the new pod can only become leader
+	// after the old releases the lease, but the old is not torn down until the new is
+	// Ready). A cache-sync- or leadership-gated readyz would break HA the same way,
+	// because a non-leader's cache/controllers do not start until it acquires the lease.
 	if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
 		setupLog.Error(err, "Failed to set up ready check")
 		os.Exit(1)
