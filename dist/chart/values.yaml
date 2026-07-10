@@ -9,7 +9,11 @@
 ## Configure the controller manager deployment
 ##
 manager:
-  replicas: 1
+  ## Active-passive HA: 2 replicas + leader election run one active reconciler and
+  ## one warm standby that takes over on failure or rollout (fast, because the
+  ## operator sets LeaderElectionReleaseOnCancel). Set to 1 for single-node / dev
+  ## clusters where a standby cannot be scheduled.
+  replicas: 2
 
   image:
     repository: ghcr.io/thc1006/ntn-operators
@@ -68,9 +72,19 @@ manager:
       cpu: 10m
       memory: 64Mi
 
-  ## Manager pod's affinity
-  ##
-  affinity: {}
+  ## Manager pod's affinity. Defaults to a SOFT pod anti-affinity that spreads the
+  ## HA replicas onto different nodes when possible — "preferred", so the standby
+  ## still schedules on a single-node cluster instead of hanging Pending. Override
+  ## with your own affinity, or set to {} to disable spreading.
+  affinity:
+    podAntiAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          podAffinityTerm:
+            topologyKey: kubernetes.io/hostname
+            labelSelector:
+              matchLabels:
+                control-plane: controller-manager
 
   ## Manager pod's node selector
   ##
@@ -115,10 +129,11 @@ prometheus:
   enable: false
 
 ## PodDisruptionBudget for high availability.
-## Requires replicas > 1 to be effective.
+## Keeps a manager pod up across voluntary disruptions (node drain, rollout).
+## Effective with replicas > 1 (the active-passive default).
 ##
 podDisruptionBudget:
-  enable: false
+  enable: true
   minAvailable: 1
 
 ## NetworkPolicy for zero-trust pod networking.
