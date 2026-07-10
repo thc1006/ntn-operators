@@ -86,6 +86,23 @@ helm install ntn-operators dist/chart \
   --set crd.enable=false
 ```
 
+> **Upgrading (CRD skew).** With `--set crd.enable=false` the CRDs are managed
+> out-of-band by `make install`, so `helm upgrade` bumps the operator Deployment
+> but **not** the CRDs. Re-run `make install` at the new tag *before* the
+> `helm upgrade`:
+>
+> ```bash
+> git checkout vX.Y.Z && make install   # CRDs first, at the new tag
+> helm upgrade ntn-operators dist/chart --namespace ntn-operators-system --set crd.enable=false
+> ```
+>
+> Skipping this leaves a new operator running against last release's CRDs; the
+> apiserver silently drops fields the old schema doesn't know, so v0.6+ features
+> that depend on new spec fields (e.g. the runtime NTN push) go quietly inert.
+> To let Helm own the CRD lifecycle instead, install with `--set crd.enable=true`
+> (the default) and omit `make install` — then `helm upgrade` updates both
+> together.
+
 ### Option B: One-command Kind Demo
 
 ```bash

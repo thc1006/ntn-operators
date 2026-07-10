@@ -13,6 +13,29 @@ clean). No CRD, controller, or config changes since the rc; same tree,
 re-tagged as the stable release. The full v0.5.0 → 0.6.0 delta is in the
 `[0.6.0-rc.1]` section below.
 
+### Upgrade notes
+
+- **CRDs upgrade separately on Option A (`--set crd.enable=false`).** `make
+  install` at the new tag **before** `helm upgrade`, or the new operator runs
+  against v0.5.0 CRDs and the runtime NTN push silently no-ops (the apiserver
+  drops the fields the old schema lacks). See the README "Upgrading (CRD skew)"
+  note. Rollback guidance: [RELEASING.md](RELEASING.md) § Rollback.
+- **Breaking: `siWindowPosition` minimum raised 0 → 2.** SIB19 must be scheduled
+  after the SIB2 the emitter always adds, so `spec.cellOverrides.sibSchedule.siWindowPosition`
+  now validates as `>= 2` (default 2). NTNCellConfigs authored under ≤ v0.5.0
+  with an **explicit** `siWindowPosition` of `0` or `1` are rejected by the
+  v0.6.0 CRD on their next apply/edit (objects left unset are unaffected — they
+  pick up the new default of 2). Migrate before upgrading the CRD:
+
+  ```bash
+  # List NTNCellConfigs pinned below the new minimum.
+  kubectl get ntncellconfig -A -o json \
+    | jq -r '.items[] | select(.spec.cellOverrides.sibSchedule.siWindowPosition != null and .spec.cellOverrides.sibSchedule.siWindowPosition < 2) | "\(.metadata.namespace)/\(.metadata.name)"'
+  # Patch each to a valid value (2 = the new default/minimum).
+  kubectl patch ntncellconfig <name> -n <ns> --type=merge \
+    -p '{"spec":{"cellOverrides":{"sibSchedule":{"siWindowPosition":2}}}}'
+  ```
+
 ## [0.6.0-rc.1] - 2026-07-09
 
 Config-emitter correctness and runtime NTN push, verified end-to-end against a

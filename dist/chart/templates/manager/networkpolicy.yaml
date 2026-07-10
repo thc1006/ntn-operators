@@ -36,4 +36,24 @@ spec:
           protocol: TCP
         - port: 53
           protocol: UDP
+    {{- with .Values.networkPolicy.prometheusPorts }}
+    # Allow querying the in-cluster Prometheus (NTNSlice metricsSource reader)
+    - ports:
+        {{- range . }}
+        - port: {{ . }}
+          protocol: TCP
+        {{- end }}
+    {{- end }}
+    {{- with .Values.networkPolicy.gnbPorts }}
+    # Allow the runtime NTN push to the gNB remote_control WebSocket
+    - ports:
+        {{- range . }}
+        - port: {{ . }}
+          protocol: TCP
+        {{- end }}
+    {{- end }}
+    {{- with .Values.networkPolicy.extraEgress }}
+    # Operator-supplied egress rules (e.g. namespace/CIDR-scoped Prometheus/gNB)
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
 {{- end }}
