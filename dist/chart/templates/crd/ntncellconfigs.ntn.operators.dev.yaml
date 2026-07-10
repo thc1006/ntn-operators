@@ -833,6 +833,45 @@ spec:
                         minLength: 1
                         pattern: ^[a-zA-Z0-9._-]+:[0-9]{1,5}$
                         type: string
+                      tls:
+                        description: |-
+                          tls, when set, secures the runtime push: the provider dials wss:// (TLS)
+                          instead of plaintext ws:// and authenticates with the material in the
+                          referenced Secret. Omit it to keep the plaintext ws:// behavior (N-12).
+                        properties:
+                          mode:
+                            description: |-
+                              mode selects the transport-security posture:
+                                "tls"  — dial wss://, verify the server certificate, and (if the Secret
+                                         carries a token) send it as an Authorization: Bearer header.
+                                "mtls" — additionally present a client certificate (mutual TLS); the
+                                         Secret MUST then carry tls.crt + tls.key.
+                            enum:
+                            - tls
+                            - mtls
+                            type: string
+                          secretName:
+                            description: |-
+                              secretName is the Secret (in this NTNCellConfig's namespace) holding the TLS
+                              trust and auth material. Recognized keys: "ca.crt" (PEM CA to verify the
+                              gNB/proxy server certificate — omit to use the system roots), "token" (the
+                              shared secret sent as Authorization: Bearer — optional), and, for mode=mtls,
+                              "tls.crt" + "tls.key" (the client certificate/key). A bare shared secret is
+                              replayable, so it is only ever sent over the wss:// (TLS) connection.
+                            minLength: 1
+                            type: string
+                          serverName:
+                            description: |-
+                              serverName overrides the TLS ServerName (SNI) verified against the server
+                              certificate's SubjectAltNames. Defaults to the endpoint host. Set it when the
+                              gNB/proxy certificate's SAN does not match the dialed host (e.g. an IP
+                              endpoint fronted by a DNS-named certificate).
+                            maxLength: 253
+                            type: string
+                        required:
+                        - mode
+                        - secretName
+                        type: object
                     required:
                     - endpoint
                     type: object

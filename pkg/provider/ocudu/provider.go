@@ -257,7 +257,7 @@ func (p *Provider) PushRuntimeUpdate(
 		// A malformed update can't succeed on retry — surface it as permanent.
 		return fmt.Errorf("%w: %v", provider.ErrRuntimePushRejected, err)
 	}
-	err = pushNTNConfigUpdate(ctx, target.Endpoint, env)
+	err = pushNTNConfigUpdate(ctx, target, env)
 	// Classify: gNB rejection / oversized / marshal are permanent (no tight
 	// requeue); an unreachable endpoint is transient and returned as-is.
 	var we *wsError

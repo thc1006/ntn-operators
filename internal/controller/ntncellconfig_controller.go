@@ -18,8 +18,11 @@ package controller
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
+	"net"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -48,6 +51,11 @@ import (
 // NTNCellConfigReconciler reconciles a NTNCellConfig object
 type NTNCellConfigReconciler struct {
 	client.Client
+	// APIReader is an UNCACHED reader (mgr.GetAPIReader) used only to read the
+	// remoteControl.tls Secret. The cached client would need secrets list;watch to
+	// start an informer (and would then cache every Secret in the cluster); an
+	// uncached Get needs only secrets get. Falls back to the cached client if unset.
+	APIReader               client.Reader
 	Scheme                  *runtime.Scheme
 	Recorder                events.EventRecorder
 	Providers               map[string]provider.NTNProvider
@@ -140,6 +148,7 @@ func ephemerisPushShouldRequeue(reason string) bool {
 // +kubebuilder:rbac:groups=ntn.operators.dev,resources=ntncellconfigs/finalizers,verbs=update
 // +kubebuilder:rbac:groups=ntn.operators.dev,resources=satelliteephemeris,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=secrets,verbs=get
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
 
@@ -551,7 +560,17 @@ func (r *NTNCellConfigReconciler) pushRuntimeEphemeris(
 	if spec.NTN.SatSwitchWithResync != nil {
 		update.SatSwitch = spec.NTN.SatSwitchWithResync
 	}
-	target := provider.ResolvedRemoteControl{Endpoint: spec.Provider.RemoteControl.Endpoint}
+	// Resolve opt-in transport security (wss:// + shared secret / mTLS) from the
+	// referenced Secret; nil TLSConfig keeps the plaintext ws:// behavior (N-12).
+	tlsConfig, authToken, tlsErr := r.resolveRemoteControlTLS(ctx, eph.Namespace, spec.Provider.RemoteControl)
+	if tlsErr != nil {
+		return false, marker, newEphemerisPushError(ephemerisReasonProviderPushFailed, tlsErr)
+	}
+	target := provider.ResolvedRemoteControl{
+		Endpoint:  spec.Provider.RemoteControl.Endpoint,
+		TLSConfig: tlsConfig,
+		AuthToken: authToken,
+	}
 	if err := prov.PushRuntimeUpdate(ctx, target, update); err != nil {
 		// A permanent rejection (bad config / malformed frame) must not tight-loop;
 		// only a transient failure (gNB unreachable) is worth retrying.
@@ -562,6 +581,64 @@ func (r *NTNCellConfigReconciler) pushRuntimeEphemeris(
 		return false, marker, newEphemerisPushError(reason, fmt.Errorf("provider PushRuntimeUpdate: %w", err))
 	}
 	return true, marker, nil
+}
+
+// resolveRemoteControlTLS builds the TLS config and bearer token for the runtime
+// push from the Secret referenced by remoteControl.tls. It reads the Secret from
+// the NTNCellConfig's OWN namespace (never cross-namespace) and never logs its
+// contents. Returns (nil, "", nil) when TLS is not configured — the caller then
+// dials plaintext ws:// (N-12). Recognized Secret keys: ca.crt (PEM CA to verify
+// the server; omit ⇒ system roots), token (Bearer shared secret; optional), and
+// for mode=mtls tls.crt + tls.key (client certificate).
+func (r *NTNCellConfigReconciler) resolveRemoteControlTLS(
+	ctx context.Context, namespace string, rc *ntnv1alpha1.RemoteControlRef,
+) (*tls.Config, string, error) {
+	if rc == nil || rc.TLS == nil {
+		return nil, "", nil
+	}
+	t := rc.TLS
+	// Read the Secret UNCACHED (APIReader) so a secrets-get RBAC suffices and the
+	// operator does not cache every Secret in the cluster. Fall back to the cached
+	// client only if no APIReader was wired (e.g. some tests).
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
+	}
+	secret := &corev1.Secret{}
+	if err := reader.Get(ctx, client.ObjectKey{Namespace: namespace, Name: t.SecretName}, secret); err != nil {
+		return nil, "", fmt.Errorf("reading remoteControl.tls secret %q: %w", t.SecretName, err)
+	}
+
+	cfg := &tls.Config{MinVersion: tls.VersionTLS12}
+	// ServerName verified against the certificate SANs: explicit override, else the
+	// endpoint host (Go validates SANs only, so an IP/host mismatch would fail).
+	if t.ServerName != "" {
+		cfg.ServerName = t.ServerName
+	} else if host, _, err := net.SplitHostPort(rc.Endpoint); err == nil {
+		cfg.ServerName = host
+	}
+	// Trust a private CA when provided; otherwise fall back to the system roots.
+	if ca := secret.Data["ca.crt"]; len(ca) > 0 {
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(ca) {
+			return nil, "", fmt.Errorf("remoteControl.tls secret %q: ca.crt is not valid PEM", t.SecretName)
+		}
+		cfg.RootCAs = pool
+	}
+	// mTLS: present a client certificate.
+	if t.Mode == "mtls" {
+		crt, key := secret.Data["tls.crt"], secret.Data["tls.key"]
+		if len(crt) == 0 || len(key) == 0 {
+			return nil, "", fmt.Errorf("remoteControl.tls mode=mtls requires tls.crt and tls.key in secret %q", t.SecretName)
+		}
+		pair, err := tls.X509KeyPair(crt, key)
+		if err != nil {
+			return nil, "", fmt.Errorf("remoteControl.tls secret %q: invalid client certificate/key: %w", t.SecretName, err)
+		}
+		cfg.Certificates = []tls.Certificate{pair}
+	}
+	// Optional shared secret, sent as Authorization: Bearer (only over the TLS conn).
+	return cfg, string(secret.Data["token"]), nil
 }
 
 // selectPropagatedState picks the propagated state matching noradID, or the first

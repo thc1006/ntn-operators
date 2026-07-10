@@ -85,6 +85,43 @@ type RemoteControlRef struct {
 	// +kubebuilder:validation:MaxLength=261
 	// +kubebuilder:validation:Pattern=`^[a-zA-Z0-9._-]+:[0-9]{1,5}$`
 	Endpoint string `json:"endpoint"`
+
+	// tls, when set, secures the runtime push: the provider dials wss:// (TLS)
+	// instead of plaintext ws:// and authenticates with the material in the
+	// referenced Secret. Omit it to keep the plaintext ws:// behavior (N-12).
+	// +optional
+	TLS *RemoteControlTLS `json:"tls,omitempty"`
+}
+
+// RemoteControlTLS configures TLS (wss://) and shared-secret / mTLS authentication
+// for the runtime gNB config-update push (N-12). The trust and credential material
+// lives in a Kubernetes Secret in the NTNCellConfig's OWN namespace — never inline
+// in the CR — referenced by name.
+type RemoteControlTLS struct {
+	// mode selects the transport-security posture:
+	//   "tls"  — dial wss://, verify the server certificate, and (if the Secret
+	//            carries a token) send it as an Authorization: Bearer header.
+	//   "mtls" — additionally present a client certificate (mutual TLS); the
+	//            Secret MUST then carry tls.crt + tls.key.
+	// +kubebuilder:validation:Enum=tls;mtls
+	Mode string `json:"mode"`
+
+	// secretName is the Secret (in this NTNCellConfig's namespace) holding the TLS
+	// trust and auth material. Recognized keys: "ca.crt" (PEM CA to verify the
+	// gNB/proxy server certificate — omit to use the system roots), "token" (the
+	// shared secret sent as Authorization: Bearer — optional), and, for mode=mtls,
+	// "tls.crt" + "tls.key" (the client certificate/key). A bare shared secret is
+	// replayable, so it is only ever sent over the wss:// (TLS) connection.
+	// +kubebuilder:validation:MinLength=1
+	SecretName string `json:"secretName"`
+
+	// serverName overrides the TLS ServerName (SNI) verified against the server
+	// certificate's SubjectAltNames. Defaults to the endpoint host. Set it when the
+	// gNB/proxy certificate's SAN does not match the dialed host (e.g. an IP
+	// endpoint fronted by a DNS-named certificate).
+	// +optional
+	// +kubebuilder:validation:MaxLength=253
+	ServerName string `json:"serverName,omitempty"`
 }
 
 // ProviderRef identifies the NTN backend provider.
