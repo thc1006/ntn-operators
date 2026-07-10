@@ -200,6 +200,31 @@ type FailoverPolicy struct {
 	// +kubebuilder:validation:Pattern=`^[0-9]+\.?[0-9]*$`
 	// +optional
 	HysteresisMargin string `json:"hysteresisMargin,omitempty"`
+
+	// confirmationSamples is the number of CONSECUTIVE reconcile samples on which
+	// the terrestrial triggers must fire before a failover to satellite is taken
+	// (production load balancers such as AWS ALB / GCP count consecutive, not
+	// windowed, probe results). It absorbs a single-sample blip so one noisy
+	// reading does not trip a switch. 1 (the default when unset) preserves the
+	// prior immediate-failover behavior; a value of N delays failover by up to
+	// (N-1) reconcile intervals. The confirmation counter is kept in memory and
+	// resets on any healthy reliable sample; losing it on a controller restart or
+	// leader-election handoff only re-requires confirmation (a DELAY), never causes
+	// a spurious switch.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=10
+	// +optional
+	ConfirmationSamples *int `json:"confirmationSamples,omitempty"`
+
+	// minTerrestrialDwell is the minimum time the terrestrial path must be held
+	// after a switchback before another failover to satellite may be taken. It
+	// bounds sub-minute ping-pong after a hand-back. It is a soft, bounded delay
+	// — a genuinely failing terrestrial still fails over once the dwell elapses,
+	// so it never indefinitely blocks a real failover. 0 (the default) disables
+	// it; 30s–120s is a sane range relative to a LEO pass.
+	// +kubebuilder:validation:Format=duration
+	// +optional
+	MinTerrestrialDwell metav1.Duration `json:"minTerrestrialDwell,omitempty"`
 }
 
 // QoSMapping defines QoS parameter mapping between terrestrial and satellite paths.

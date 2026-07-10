@@ -94,6 +94,40 @@ type NTNSliceReconciler struct {
 
 	defaultProviderOnce sync.Once
 	defaultProvider     metricsReaderProvider
+
+	// flapState holds per-slice in-memory anti-flap state (the consecutive-degraded
+	// counter and the recovery/switchback clocks). It is intentionally NOT persisted
+	// to .status: per the Kubernetes API convention such transient history is
+	// best-effort, and losing it on a restart or leader-election handoff only
+	// re-requires confirmation before the next switch — a DELAY (safe), never a
+	// spurious switch. Guarded by flapMu; entries are released in
+	// handleSliceFinalizer on CR deletion so the map cannot leak.
+	flapMu    sync.Mutex
+	flapState map[types.NamespacedName]slice.AntiFlapState
+}
+
+// loadFlapState returns the anti-flap state for a slice (zero value if absent).
+func (r *NTNSliceReconciler) loadFlapState(key types.NamespacedName) slice.AntiFlapState {
+	r.flapMu.Lock()
+	defer r.flapMu.Unlock()
+	return r.flapState[key]
+}
+
+// storeFlapState persists the updated anti-flap state for a slice.
+func (r *NTNSliceReconciler) storeFlapState(key types.NamespacedName, st slice.AntiFlapState) {
+	r.flapMu.Lock()
+	defer r.flapMu.Unlock()
+	if r.flapState == nil {
+		r.flapState = make(map[types.NamespacedName]slice.AntiFlapState)
+	}
+	r.flapState[key] = st
+}
+
+// dropFlapState releases a slice's anti-flap state (on deletion).
+func (r *NTNSliceReconciler) dropFlapState(key types.NamespacedName) {
+	r.flapMu.Lock()
+	defer r.flapMu.Unlock()
+	delete(r.flapState, key)
 }
 
 // readerProvider returns the configured Provider, or a lazily-initialised
@@ -220,11 +254,6 @@ func (r *NTNSliceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		log.Info("satellite availability unknown; holding current path",
 			"path", currentPath, "reason", result.Reason)
 	case qualityReliable:
-		var lastFailover time.Time
-		if ns.Status.LastFailover != nil {
-			lastFailover = ns.Status.LastFailover.Time
-		}
-
 		// Parse hysteresis margin from spec (string → float64, default 0).
 		var hysteresisMargin float64
 		if ns.Spec.FailoverPolicy.HysteresisMargin != "" {
@@ -239,17 +268,32 @@ func (r *NTNSliceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 			}
 		}
 
-		result = slice.EvaluateFailoverWithHysteresis(
+		// Anti-flap config from spec (opt-in; the zero value reproduces the prior
+		// immediate-failover behavior). The switchback delay is measured from the
+		// in-memory recovery clock rather than status.lastFailover, so it resets on
+		// re-degradation (I-9 timer-reset).
+		afCfg := slice.AntiFlapConfig{
+			MinTerrestrialDwell: ns.Spec.FailoverPolicy.MinTerrestrialDwell.Duration,
+		}
+		if ns.Spec.FailoverPolicy.ConfirmationSamples != nil {
+			afCfg.ConfirmationSamples = *ns.Spec.FailoverPolicy.ConfirmationSamples
+		}
+
+		flapKey := client.ObjectKeyFromObject(ns)
+		var newFlap slice.AntiFlapState
+		result, newFlap = slice.EvaluateFailoverWithAntiFlap(
 			ctx,
 			currentPath,
 			ns.Spec.FailoverPolicy.Triggers,
 			metrics,
 			satelliteAvailable,
 			ns.Spec.FailoverPolicy.SwitchbackDelay.Duration,
-			lastFailover,
 			now,
 			hysteresisMargin,
+			afCfg,
+			r.loadFlapState(flapKey),
 		)
+		r.storeFlapState(flapKey, newFlap)
 	default:
 		// Metrics unreliable but satellite availability known: fail static —
 		// EvaluateSafeHold holds the current path yet still honors the orbital
@@ -636,6 +680,9 @@ func (r *NTNSliceReconciler) handleSliceFinalizer(
 	log := logf.FromContext(ctx)
 
 	if ns.DeletionTimestamp != nil {
+		// Release the in-memory anti-flap state so the map does not leak entries for
+		// deleted slices (idempotent; a no-op if none was ever recorded).
+		r.dropFlapState(client.ObjectKeyFromObject(ns))
 		if controllerutil.ContainsFinalizer(ns, sliceMetricsFinalizer) {
 			// FailoverTotal is per-CR (keyed by namespace+slice); release it directly.
 			ntnmetrics.FailoverTotal.DeletePartialMatch(prometheus.Labels{

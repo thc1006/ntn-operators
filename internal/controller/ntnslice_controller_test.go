@@ -39,6 +39,7 @@ import (
 	ntnv1alpha1 "github.com/thc1006/ntn-operators/api/v1alpha1"
 	ntnmetrics "github.com/thc1006/ntn-operators/pkg/metrics"
 	"github.com/thc1006/ntn-operators/pkg/netutil"
+	"github.com/thc1006/ntn-operators/pkg/slice"
 	slicemetrics "github.com/thc1006/ntn-operators/pkg/slice/metrics"
 )
 
@@ -406,6 +407,51 @@ var _ = Describe("NTNSlice Controller", func() {
 		})
 	})
 
+	Context("When confirmationSamples gates failover (I-9 N-consecutive)", func() {
+		AfterEach(func() { deleteSlice() })
+
+		It("holds terrestrial until N consecutive degraded samples confirm", func() {
+			confirmN := 2
+			spec := baseSpec()
+			spec.FailoverPolicy.ConfirmationSamples = &confirmN
+			ntnSlice := &ntnv1alpha1.NTNSlice{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      sliceName,
+					Namespace: namespace,
+					Annotations: map[string]string{
+						"ntn.operators.dev/simulated-rsrp":        "-130", // rsrp < -120 → degraded
+						"ntn.operators.dev/simulated-latency":     "20",
+						"ntn.operators.dev/simulated-packet-loss": "0.1",
+					},
+				},
+				Spec: spec,
+			}
+			Expect(k8sClient.Create(context.Background(), ntnSlice)).To(Succeed())
+
+			eph := createEphemerisWithPass(true) // satellite available
+			DeferCleanup(func() { _ = k8sClient.Delete(context.Background(), eph) })
+
+			// One reconciler instance carries the in-memory confirmation counter
+			// across reconciles; Now is fixed, so N-consecutive counts reconciles.
+			reconciler := newReconciler()
+
+			// Reconcile #1: degraded 1/2 → unconfirmed → hold terrestrial.
+			_, err := reconciler.Reconcile(context.Background(), reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+			updated := &ntnv1alpha1.NTNSlice{}
+			Expect(k8sClient.Get(context.Background(), typeNamespacedName, updated)).To(Succeed())
+			Expect(updated.Status.ActivePathType).To(Equal("terrestrial"))
+			Expect(updated.Status.FailoverCount).To(Equal(0))
+
+			// Reconcile #2: degraded 2/2 → confirmed → fail over to satellite.
+			_, err = reconciler.Reconcile(context.Background(), reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(k8sClient.Get(context.Background(), typeNamespacedName, updated)).To(Succeed())
+			Expect(updated.Status.ActivePathType).To(Equal(pathSatellite))
+			Expect(updated.Status.FailoverCount).To(Equal(1))
+		})
+	})
+
 	Context("Switchback delay elapsed", func() {
 		BeforeEach(func() { createSlice() })
 		AfterEach(func() { deleteSlice() })
@@ -415,14 +461,21 @@ var _ = Describe("NTNSlice Controller", func() {
 			DeferCleanup(func() { _ = k8sClient.Delete(context.Background(), eph) })
 
 			// Put slice on satellite with old failover (5 min ago, delay is 60s).
-			slice := &ntnv1alpha1.NTNSlice{}
-			Expect(k8sClient.Get(context.Background(), typeNamespacedName, slice)).To(Succeed())
-			slice.Status.ActivePathType = pathSatellite
-			slice.Status.FailoverCount = 1
-			slice.Status.LastFailover = &metav1.Time{Time: time.Date(2026, 4, 17, 11, 55, 0, 0, time.UTC)} // 5min ago
-			Expect(k8sClient.Status().Update(context.Background(), slice)).To(Succeed())
+			ntnSlice := &ntnv1alpha1.NTNSlice{}
+			Expect(k8sClient.Get(context.Background(), typeNamespacedName, ntnSlice)).To(Succeed())
+			ntnSlice.Status.ActivePathType = pathSatellite
+			ntnSlice.Status.FailoverCount = 1
+			ntnSlice.Status.LastFailover = &metav1.Time{Time: time.Date(2026, 4, 17, 11, 55, 0, 0, time.UTC)} // 5min ago
+			Expect(k8sClient.Status().Update(context.Background(), ntnSlice)).To(Succeed())
 
 			reconciler := newReconciler()
+			// I-9: the switchback delay now measures CONTINUOUS terrestrial recovery
+			// (reset on re-degradation), not absolute time since failover. Seed the
+			// in-memory recovery clock so terrestrial has been recovered longer than
+			// the 60s delay — the precondition this test asserts.
+			reconciler.storeFlapState(typeNamespacedName, slice.AntiFlapState{
+				RecoveryObservedAt: time.Date(2026, 4, 17, 11, 55, 0, 0, time.UTC),
+			})
 			_, err := reconciler.Reconcile(context.Background(), reconcile.Request{
 				NamespacedName: typeNamespacedName,
 			})
