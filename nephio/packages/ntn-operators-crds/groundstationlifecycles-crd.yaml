@@ -66,6 +66,7 @@ spec:
                   gitopsRepo:
                     description: gitopsRepo is the Git repository URL for GitOps-managed
                       configuration.
+                    maxLength: 2048
                     type: string
                   k8sDistro:
                     default: k3s
@@ -83,15 +84,18 @@ spec:
                       alt:
                         description: alt is the altitude in meters above sea level
                           (string, e.g., "15").
+                        maxLength: 32
                         type: string
                       lat:
                         description: lat is the latitude in decimal degrees (string,
                           e.g., "25.0330").
+                        maxLength: 32
                         pattern: ^-?[0-9]+\.?[0-9]*$
                         type: string
                       lon:
                         description: lon is the longitude in decimal degrees (string,
                           e.g., "121.5654").
+                        maxLength: 32
                         pattern: ^-?[0-9]+\.?[0-9]*$
                         type: string
                     required:
@@ -117,6 +121,7 @@ spec:
                     default: stable
                     description: channel is the firmware update channel (e.g., "stable",
                       "beta").
+                    maxLength: 64
                     type: string
                   maintenanceWindow:
                     description: |-
@@ -131,6 +136,7 @@ spec:
                   antennaType:
                     description: antennaType is the antenna type (e.g., "flat-panel",
                       "parabolic").
+                    maxLength: 64
                     type: string
                   bands:
                     description: bands lists the supported frequency bands (e.g.,
@@ -140,10 +146,12 @@ spec:
                     type: array
                   model:
                     description: model is the hardware model identifier.
+                    maxLength: 253
                     minLength: 1
                     type: string
                   vendor:
                     description: vendor is the hardware manufacturer (e.g., "ennoconn").
+                    maxLength: 253
                     minLength: 1
                     type: string
                 required:
@@ -156,6 +164,7 @@ spec:
                   endpoint:
                     description: endpoint is the monitoring endpoint of the ground
                       station agent.
+                    maxLength: 261
                     type: string
                   healthCheckInterval:
                     default: 30s

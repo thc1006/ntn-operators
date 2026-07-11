@@ -28,6 +28,7 @@ import (
 type NTNSliceSpec struct {
 	// tenant is the organization or entity that owns this slice.
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
 	Tenant string `json:"tenant"`
 
 	// terrestrialPath defines the primary terrestrial connectivity.
@@ -101,6 +102,7 @@ type PrometheusMetricsSource struct {
 	// endpoint is the base URL of the Prometheus HTTP API.
 	// +kubebuilder:validation:Pattern=`^https?://`
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=2048
 	Endpoint string `json:"endpoint"`
 
 	// queryTimeout limits the wall-clock time spent on each individual
@@ -123,15 +125,18 @@ type PrometheusMetricsSource struct {
 type PrometheusQueries struct {
 	// rsrpDbm is a PromQL expression returning a scalar in dBm.
 	// +optional
+	// +kubebuilder:validation:MaxLength=1024
 	RsrpDbm string `json:"rsrpDbm,omitempty"`
 
 	// latencyMs is a PromQL expression returning a scalar in milliseconds.
 	// +optional
+	// +kubebuilder:validation:MaxLength=1024
 	LatencyMs string `json:"latencyMs,omitempty"`
 
 	// packetLossPercent is a PromQL expression returning a scalar in
 	// percent (0-100).
 	// +optional
+	// +kubebuilder:validation:MaxLength=1024
 	PacketLossPercent string `json:"packetLossPercent,omitempty"`
 }
 
@@ -139,10 +144,12 @@ type PrometheusQueries struct {
 type PathSpec struct {
 	// provider is the network operator name (e.g., "chunghwa-telecom").
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
 	Provider string `json:"provider"`
 
 	// apn is the Access Point Name.
 	// +optional
+	// +kubebuilder:validation:MaxLength=253
 	APN string `json:"apn,omitempty"`
 
 	// priority is the path priority.
@@ -157,6 +164,7 @@ type SatellitePathSpec struct {
 	// ephemerisRef is the name of the SatelliteEphemeris resource
 	// used to determine satellite pass availability.
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
 	EphemerisRef string `json:"ephemerisRef"`
 }
 
@@ -199,6 +207,7 @@ type FailoverPolicy struct {
 	// failover fires at RSRP < -120, but switchback requires RSRP >= -110.
 	// +kubebuilder:validation:Pattern=`^[0-9]+\.?[0-9]*$`
 	// +optional
+	// +kubebuilder:validation:MaxLength=32
 	HysteresisMargin string `json:"hysteresisMargin,omitempty"`
 
 	// confirmationSamples is the number of CONSECUTIVE reconcile samples on which
@@ -339,6 +348,7 @@ const (
 // +kubebuilder:printcolumn:name="Tenant",type=string,JSONPath=`.spec.tenant`
 // +kubebuilder:printcolumn:name="Active Path",type=string,JSONPath=`.status.activePathType`
 // +kubebuilder:printcolumn:name="Failovers",type=integer,JSONPath=`.status.failoverCount`
+// +kubebuilder:printcolumn:name="Ready",type=string,JSONPath=`.status.conditions[?(@.type=="FailoverReady")].status`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
 // NTNSlice manages terrestrial-satellite network slice failover,

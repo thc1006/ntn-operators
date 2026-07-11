@@ -68,7 +68,7 @@ graph TB
 ### Prerequisites
 
 - Go 1.26+
-- Kubernetes 1.29+ (for CEL validation)
+- Kubernetes 1.31+ (CEL validation, incl. the IP-address library used to validate the gNB remote-control endpoint)
 - kubectl
 - Helm v3.16+ (optional, for Helm-based install)
 - kpt v1.0.0-beta.55+ (optional, for Nephio kpt package install)

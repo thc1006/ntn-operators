@@ -42,6 +42,7 @@ type NTNCellConfigSpec struct {
 	// on the provider reconcile path. The static ephemeris in spec.ntn
 	// (ephemerisECEF or ephemerisOrbital) remains required as the source payload.
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
 	// +optional
 	EphemerisRef string `json:"ephemerisRef,omitempty"`
 
@@ -70,20 +71,23 @@ type CellID struct {
 	NCI int64 `json:"nci"`
 }
 
-// +kubebuilder:validation:XValidation:rule="int(self.endpoint.split(':')[1]) >= 1 && int(self.endpoint.split(':')[1]) <= 65535",message="endpoint port must be in 1-65535"
 // RemoteControlRef configures the gNB remote_control WebSocket for live NTN
 // config push (OCUDU ntn_config_update). OCUDU's remote_control server is
 // plaintext/unauthenticated (localhost by default), so the safe deployment is a
 // sidecar next to the gNB pod; cross-pod requires a NetworkPolicy.
 type RemoteControlRef struct {
-	// endpoint is host:port of the gNB remote_control server (e.g. "127.0.0.1:8001").
-	// The provider prepends ws://, so include NEITHER a scheme nor a path — a value
-	// like "ws://host:8001" would dial "ws://ws://host:8001" and fail. The pattern
-	// enforces bare host:port (a permanent admission error beats a silent
-	// tight-requeue on a mistyped endpoint).
+	// endpoint is host:port of the gNB remote_control server — a hostname/IPv4
+	// ("127.0.0.1:8001") or a bracketed IPv6 literal ("[::1]:8001") for dual-stack
+	// clusters. The provider prepends ws://, so include NEITHER a scheme nor a path
+	// — a value like "ws://host:8001" would dial "ws://ws://host:8001" and fail.
+	// Validation is layered: the pattern enforces the bare host:port shape, and CEL
+	// rules enforce the port range (1-65535) and that a bracketed host is a real IP
+	// (a permanent admission error beats a silent tight-requeue on a mistyped value).
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=261
-	// +kubebuilder:validation:Pattern=`^[a-zA-Z0-9._-]+:[0-9]{1,5}$`
+	// +kubebuilder:validation:Pattern=`^(\[[0-9a-fA-F:]+\]|[a-zA-Z0-9._-]+):[0-9]{1,5}$`
+	// +kubebuilder:validation:XValidation:rule="int(self.substring(self.lastIndexOf(':') + 1)) >= 1 && int(self.substring(self.lastIndexOf(':') + 1)) <= 65535",message="endpoint port must be between 1 and 65535"
+	// +kubebuilder:validation:XValidation:rule="!self.startsWith('[') || isIP(self.substring(1, self.lastIndexOf(']')))",message="a bracketed endpoint host must be a valid IP address"
 	Endpoint string `json:"endpoint"`
 
 	// tls, when set, secures the runtime push: the provider dials wss:// (TLS)
@@ -113,6 +117,7 @@ type RemoteControlTLS struct {
 	// "tls.crt" + "tls.key" (the client certificate/key). A bare shared secret is
 	// replayable, so it is only ever sent over the wss:// (TLS) connection.
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
 	SecretName string `json:"secretName"`
 
 	// serverName overrides the TLS ServerName (SNI) verified against the server
@@ -132,6 +137,7 @@ type ProviderRef struct {
 
 	// namespace where the provider resources (e.g., OCUDU gNB) are deployed.
 	// +optional
+	// +kubebuilder:validation:MaxLength=63
 	Namespace string `json:"namespace,omitempty"`
 
 	// remoteControl configures the gNB remote_control WebSocket for live NTN
@@ -142,6 +148,7 @@ type ProviderRef struct {
 
 	// endpoint is the provider-specific endpoint (e.g., O1 NETCONF address).
 	// +optional
+	// +kubebuilder:validation:MaxLength=261
 	Endpoint string `json:"endpoint,omitempty"`
 }
 
@@ -666,6 +673,7 @@ const (
 // +kubebuilder:printcolumn:name="Provider",type=string,JSONPath=`.spec.provider.type`
 // +kubebuilder:printcolumn:name="Koffset",type=integer,JSONPath=`.spec.ntn.cellSpecificKoffset`
 // +kubebuilder:printcolumn:name="Payload",type=string,JSONPath=`.spec.ntn.payloadType`
+// +kubebuilder:printcolumn:name="Applied",type=string,JSONPath=`.status.conditions[?(@.type=="ConfigApplied")].status`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
 // NTNCellConfig manages NTN-specific radio parameters for a gNB cell,
