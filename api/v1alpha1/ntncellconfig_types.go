@@ -82,15 +82,19 @@ type RemoteControlRef struct {
 	// — a value like "ws://host:8001" would dial "ws://ws://host:8001" and fail.
 	// Validation is layered: the pattern enforces the bare host:port shape with a
 	// DNS-1123 hostname or bracketed IPv6, and CEL rules enforce the port range
-	// (1-65535), that a bracketed host is a valid IP, and that an all-numeric host is
-	// a valid IPv4 (so "999.999.999.999:1" is rejected, not treated as a hostname) —
-	// a permanent admission error beats a silent tight-requeue on a mistyped value.
+	// (1-65535), that a bracketed host is a valid IP, that an all-numeric host is a
+	// valid IPv4 (so "999.999.999.999:1" is rejected, not treated as a hostname), and
+	// that a DNS host obeys the RFC 1035 length limits (whole name <= 253, each label
+	// 1-63) — a permanent admission error beats a silent tight-requeue on a mistyped
+	// value. The pattern alone cannot bound the label/host length (a regex quantifier
+	// would, but the DNS-1123 label form makes that unreadable), so CEL carries it.
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=261
 	// +kubebuilder:validation:Pattern=`^(\[[0-9a-fA-F:]+\]|[a-zA-Z0-9]([-a-zA-Z0-9]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([-a-zA-Z0-9]*[a-zA-Z0-9])?)*):[0-9]{1,5}$`
 	// +kubebuilder:validation:XValidation:rule="int(self.substring(self.lastIndexOf(':') + 1)) >= 1 && int(self.substring(self.lastIndexOf(':') + 1)) <= 65535",message="endpoint port must be between 1 and 65535"
 	// +kubebuilder:validation:XValidation:rule="!self.startsWith('[') || isIP(self.substring(1, self.lastIndexOf(']')))",message="a bracketed endpoint host must be a valid IP address"
 	// +kubebuilder:validation:XValidation:rule="!self.substring(0, self.lastIndexOf(':')).matches('^[0-9.]+$') || isIP(self.substring(0, self.lastIndexOf(':')))",message="an all-numeric endpoint host must be a valid IPv4 address"
+	// +kubebuilder:validation:XValidation:rule="self.startsWith('[') || (self.substring(0, self.lastIndexOf(':')).size() <= 253 && self.substring(0, self.lastIndexOf(':')).split('.').all(l, l.size() >= 1 && l.size() <= 63))",message="endpoint host must be a DNS name of at most 253 characters with each dot-separated label 1-63 characters"
 	Endpoint string `json:"endpoint"`
 
 	// tls, when set, secures the runtime push: the provider dials wss:// (TLS)

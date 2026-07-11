@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **Validation tightening (may reject previously-accepted values).** Every
+  free-form spec string now carries a `maxLength` and every unbounded list a
+  `maxItems`, so an over-long or unbounded value is refused at admission instead
+  of bloating etcd or a downstream ConfigMap. Caps follow the field's real
+  domain: Kubernetes names/namespaces 253/63, URLs 2048, free text 1024,
+  numeric-string fields 32, `satellites.noradIDs` 512 items, `bands`/`groundStations`
+  lists bounded with per-item length. Objects authored under ≤ 0.6.0 that exceed
+  a new bound are rejected on their next apply/edit (unset fields are unaffected).
+- **`provider.remoteControl.endpoint` validation hardened.** Beyond the existing
+  `host:port` shape check, CEL now enforces the port range (1–65535), that a
+  bracketed host is a valid IP (`[::1]:8001`), that an all-numeric host is a real
+  IPv4 (so `999.999.999.999:1` is refused rather than treated as a hostname), and
+  the RFC 1035 DNS length limits (whole host ≤ 253, each label 1–63). A mistyped
+  endpoint is now a permanent admission error instead of a silent tight-requeue.
+- **Minimum Kubernetes version raised to 1.31.** The endpoint host CEL rules use
+  the `isIP()` / IP-address CEL library, which is available only from Kubernetes
+  1.31. `Chart.yaml` `kubeVersion`, the OLM CSV `minKubeVersion`, and the Nephio
+  package/compat docs are updated in lockstep.
+- Added condition/status print columns to the CRDs for quicker `kubectl get`
+  triage.
+
 ## [0.6.0] - 2026-07-09
 
 Promotion of `0.6.0-rc.1` after a short soak (the rc's release pipeline —

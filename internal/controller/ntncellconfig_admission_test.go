@@ -77,10 +77,45 @@ var _ = Describe("NTNCellConfig remoteControl.endpoint admission (CEL)", func() 
 		Entry("dashes-only host", "---:8001", false),
 		Entry("underscore host (not DNS-1123)", "_host:8001", false),
 	)
+
+	// RFC 1035 DNS length limits: the whole host <= 253 and each dot-separated
+	// label 1-63. The shape Pattern cannot bound these lengths, so a dedicated CEL
+	// rule carries them. Each boundary below sits within MaxLength=261 and passes
+	// the Pattern, so ONLY the length rule can reject the over-limit case — which is
+	// what isolates the rule. (A valid host:port therefore tops out at 259 chars:
+	// 253 host + ':' + 5-digit port; MaxLength=261 is a loose outer backstop that
+	// this tighter DNS-host bound sits under, so a 261/262 MaxLength pair is not
+	// separately testable with a well-formed endpoint.)
+	mkHost := func(labels ...int) string {
+		parts := make([]string, len(labels))
+		for i, n := range labels {
+			parts[i] = strings.Repeat("a", n)
+		}
+		return strings.Join(parts, ".")
+	}
+	DescribeTable("remoteControl.endpoint DNS host length (label<=63, host<=253)",
+		func(host string, accepted bool) {
+			cc := mkCC(host + ":8001")
+			err := k8sClient.Create(ctx, cc)
+			if accepted {
+				Expect(err).NotTo(HaveOccurred(), "host len %d should be admitted", len(host))
+				DeferCleanup(func() { _ = k8sClient.Delete(ctx, cc) })
+			} else {
+				Expect(err).To(HaveOccurred(), "host len %d should be rejected", len(host))
+			}
+		},
+		Entry("single label at 63", mkHost(63), true),
+		Entry("single label over at 64", mkHost(64), false),
+		Entry("multi-label host at 253", mkHost(63, 63, 63, 61), true),
+		Entry("multi-label host over at 254", mkHost(63, 63, 63, 62), false),
+	)
 })
 
-// Real admission-time boundary checks for the MaxLength ratchets — one accept-at-limit
-// / reject-over-limit pair per limit category, against the envtest API server.
+// Real admission-time boundary checks for the MaxLength ratchets. These are a
+// representative sample — one accept-at-limit / reject-over-limit pair for each
+// distinct limit VALUE in play (63, 2048, 253, 32), against the envtest API server —
+// not exhaustive coverage of every MaxLength-annotated field; fields sharing a limit
+// are validated by the same generated schema bound, so one probe per value suffices.
 var _ = Describe("CRD string-length admission (MaxLength boundaries)", func() {
 	rep := func(c string, n int) string { return strings.Repeat(c, n) }
 	seq := 0
