@@ -124,6 +124,25 @@ func (r *NTNSliceReconciler) storeFlapState(key types.NamespacedName, st slice.A
 	r.flapState[key] = st
 }
 
+// resetRecoveryStreak clears the confirmation and recovery clocks for a slice while
+// KEEPING the min-dwell clock. Called when metrics are unreliable or satellite
+// availability is unknown: a telemetry gap breaks the "continuous" recovery/degraded
+// streaks (absence of evidence is not evidence of recovery — otherwise a single
+// healthy sample after a long gap, plus a stale recovery timestamp, would satisfy the
+// switchback delay and switch back immediately). The dwell since the last hand-back
+// keeps elapsing on wall-clock time, so LastSwitchback is preserved.
+func (r *NTNSliceReconciler) resetRecoveryStreak(key types.NamespacedName) {
+	r.flapMu.Lock()
+	defer r.flapMu.Unlock()
+	st, ok := r.flapState[key]
+	if !ok || (st.RecoveryObservedAt.IsZero() && st.ConsecutiveDegraded == 0) {
+		return // nothing tracked, or already clear — do not create a spurious entry
+	}
+	st.RecoveryObservedAt = time.Time{}
+	st.ConsecutiveDegraded = 0
+	r.flapState[key] = st
+}
+
 // dropFlapState releases a slice's anti-flap state (on deletion).
 func (r *NTNSliceReconciler) dropFlapState(key types.NamespacedName) {
 	r.flapMu.Lock()
@@ -232,6 +251,18 @@ func (r *NTNSliceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		// armed-but-dead (never fires against the healthy placeholder). Only
 		// meaningful once metrics were actually read (qualityReliable).
 		r.reportInertTriggers(ns, slice.InertTriggers(ns.Spec.FailoverPolicy.Triggers, metrics), &pending)
+	} else {
+		// Metrics are unreliable, so whether a trigger is inert or sourced cannot be
+		// evaluated. Report TriggersReady=Unknown for THIS generation rather than leave
+		// a stale True/False from the last reliable reconcile (a condition must not lie
+		// about the current state; absent evidence is Unknown, not the old answer).
+		meta.SetStatusCondition(&ns.Status.Conditions, metav1.Condition{
+			Type:               ntnv1alpha1.ConditionTriggersReady,
+			Status:             metav1.ConditionUnknown,
+			Reason:             "MetricsUnavailable",
+			Message:            "Trigger sourcing cannot be evaluated while path-quality metrics are unreliable",
+			ObservedGeneration: ns.Generation,
+		})
 	}
 
 	// Step 4: Evaluate the failover decision. With reliable metrics the full
@@ -258,6 +289,9 @@ func (r *NTNSliceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		}
 		log.Info("satellite availability unknown; holding current path",
 			"path", currentPath, "reason", result.Reason)
+		// H2: a gap in the ability to evaluate transitions breaks the continuous
+		// recovery/degraded streaks; do not let a stale recovery clock survive it.
+		r.resetRecoveryStreak(client.ObjectKeyFromObject(ns))
 	case qualityReliable:
 		// Parse hysteresis margin from spec (string → float64, default 0).
 		var hysteresisMargin float64
@@ -306,6 +340,10 @@ func (r *NTNSliceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		result = slice.EvaluateSafeHold(currentPath, satelliteAvailable)
 		log.Info("metrics unreliable; failing static",
 			"decision", result.Decision, "targetPath", result.TargetPath, "reason", result.Reason)
+		// H2: unreliable metrics break the continuous recovery/degraded streaks — a
+		// single healthy sample after the gap must not satisfy the switchback delay via
+		// a stale recovery timestamp. Keep the min-dwell clock (wall-clock based).
+		r.resetRecoveryStreak(client.ObjectKeyFromObject(ns))
 	}
 
 	// Step 5: Apply decision.
