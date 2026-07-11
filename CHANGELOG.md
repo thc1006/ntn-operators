@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-07-12
+
+The audit season: runtime-resilience, validation, event/GitOps, and observability
+hardening across all four controllers (folds the #198–#215 remediation work).
+Backward-incompatible in two ways — read the Upgrade notes before upgrading.
+
+### Upgrade notes
+
+- **Breaking: minimum Kubernetes version is now 1.31.** The
+  `provider.remoteControl.endpoint` CEL validation uses the `isIP()` library, which
+  is available only from Kubernetes 1.31; `Chart.yaml` `kubeVersion` is `>=1.31.0-0`
+  and installing on an older cluster is unsupported.
+- **Breaking: tighter spec validation may reject previously-accepted objects.** Every
+  free-form string now carries a `maxLength` and every unbounded list a `maxItems`, so
+  an object authored under ≤ 0.6.0 that exceeds a new bound is rejected on its next
+  apply/edit (unset fields are unaffected). Review long free-text and large-list fields
+  before upgrading.
+- **CRDs upgrade separately on Option A (`--set crd.enable=false`).** Run `make install`
+  at the new tag **before** `helm upgrade`, or the new operator runs against the old
+  CRD schema. See [RELEASING.md](RELEASING.md) § Rollback.
+
 ### Added
 
 - **`RefreshIntervalClamped` condition on `SatelliteEphemeris`.** Surfaces whether
