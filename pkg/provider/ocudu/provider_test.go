@@ -186,6 +186,27 @@ func TestApplyCellConfig_OwnershipCollision(t *testing.T) {
 			t.Error("operator-labeled leftover should be adopted (controller ref set)")
 		}
 	})
+
+	t.Run("labeled but no geo_ntn.yml -> refused (not adopted)", func(t *testing.T) {
+		// A labeled-but-empty impostor never held our config: adoption must require
+		// the geo_ntn.yml key, not the labels alone, so a squatter cannot get itself
+		// controller-owned (and GC-cascaded) by copying two well-known label values.
+		impostor := &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      cmName,
+				Namespace: "ntn-system",
+				Labels:    map[string]string{managedByLabel: managedByValue, componentLabel: componentValue},
+			},
+		}
+		p := newTestProviderWith(t, impostor)
+		err := p.ApplyCellConfig(ctx, ownerFor("cell-a"), geoSpec(), ownerScheme(t))
+		if !errors.Is(err, provider.ErrConfigMapNotOwned) {
+			t.Fatalf("want ErrConfigMapNotOwned, got %v", err)
+		}
+		if metav1.GetControllerOf(get(p)) != nil {
+			t.Error("labeled-but-empty impostor must not be adopted")
+		}
+	})
 }
 
 // TestCleanup_OwnershipUID: Cleanup deletes only a ConfigMap controlled by owner

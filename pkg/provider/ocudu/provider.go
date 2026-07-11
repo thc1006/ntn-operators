@@ -40,6 +40,10 @@ import (
 // ConfigMapPrefix is the prefix for ConfigMap names. Final name = prefix + CR name.
 const ConfigMapPrefix = "ocudu-ntn-"
 
+// configDataKey is the ConfigMap data key holding the OCUDU NTN config document.
+// Its presence also marks a ConfigMap as a genuine operator artifact for adoption.
+const configDataKey = "geo_ntn.yml"
+
 // maxK8sNameLen is the maximum length for a Kubernetes object name.
 const maxK8sNameLen = 253
 
@@ -62,6 +66,28 @@ func ConfigMapNameFor(crName string) string {
 // It is stateless — status is derived from the ConfigMap.
 type Provider struct {
 	client client.Client
+	// apiReader performs uncached reads straight from the API server. The controller
+	// wires it to mgr.GetAPIReader() so ownership checks and the status read-back see a
+	// just-created ConfigMap immediately, instead of racing the informer cache — which
+	// is eventually consistent and can lag a Create by a cache-sync interval, making a
+	// same-reconcile read-back return NotFound and persist an empty configMapRef. Nil
+	// in unit tests, where reader() falls back to the (already-consistent) fake client.
+	apiReader client.Reader
+}
+
+// reader returns the uncached API reader when wired, else the cached client.
+func (p *Provider) reader() client.Reader {
+	if p.apiReader != nil {
+		return p.apiReader
+	}
+	return p.client
+}
+
+// WithAPIReader wires an uncached reader (mgr.GetAPIReader()) for read-back
+// consistency and returns the receiver for chaining.
+func (p *Provider) WithAPIReader(r client.Reader) *Provider {
+	p.apiReader = r
+	return p
 }
 
 // Management labels stamped on every ConfigMap this provider creates. They let the
@@ -87,7 +113,7 @@ func isOperatorManaged(cm *corev1.ConfigMap) bool {
 func (p *Provider) Cleanup(ctx context.Context, owner *ntnv1alpha1.NTNCellConfig) error {
 	cm := &corev1.ConfigMap{}
 	key := types.NamespacedName{Name: ConfigMapNameFor(owner.GetName()), Namespace: owner.GetNamespace()}
-	if err := p.client.Get(ctx, key, cm); err != nil {
+	if err := p.reader().Get(ctx, key, cm); err != nil {
 		return client.IgnoreNotFound(err)
 	}
 	if !metav1.IsControlledBy(cm, owner) {
@@ -132,7 +158,7 @@ func (p *Provider) ApplyCellConfig(
 	namespace := spec.Provider.Namespace
 	cm := &corev1.ConfigMap{}
 	key := types.NamespacedName{Name: ConfigMapNameFor(crName), Namespace: namespace}
-	err = p.client.Get(ctx, key, cm)
+	err = p.reader().Get(ctx, key, cm)
 
 	if apierrors.IsNotFound(err) {
 		cm = &corev1.ConfigMap{
@@ -148,7 +174,7 @@ func (p *Provider) ApplyCellConfig(
 				},
 			},
 			Data: map[string]string{
-				"geo_ntn.yml": string(yamlData),
+				configDataKey: string(yamlData),
 			},
 		}
 		// Set the controller reference ATOMICALLY, before Create, so the ConfigMap
@@ -167,10 +193,12 @@ func (p *Provider) ApplyCellConfig(
 	}
 
 	// Existing ConfigMap: overwrite only if we own it, or adopt it if it is unowned
-	// but carries our management labels (a pre-atomic-ref leftover). A ConfigMap
-	// owned by a different controller, or an unlabeled foreign object, is refused.
+	// but is a genuine operator artifact — carrying our management labels AND the
+	// geo_ntn.yml config key (a pre-atomic-ref leftover). A ConfigMap owned by a
+	// different controller, an unlabeled foreign object, or a labeled-but-empty
+	// impostor that never held our config is refused.
 	if !metav1.IsControlledBy(cm, owner) {
-		if metav1.GetControllerOf(cm) != nil || !isOperatorManaged(cm) {
+		if metav1.GetControllerOf(cm) != nil || !isOperatorManaged(cm) || cm.Data[configDataKey] == "" {
 			return fmt.Errorf("%w: %s/%s", provider.ErrConfigMapNotOwned, namespace, ConfigMapNameFor(crName))
 		}
 		if err := controllerutil.SetControllerReference(owner, cm, scheme); err != nil {
@@ -180,7 +208,7 @@ func (p *Provider) ApplyCellConfig(
 	if cm.Data == nil {
 		cm.Data = make(map[string]string)
 	}
-	cm.Data["geo_ntn.yml"] = string(yamlData)
+	cm.Data[configDataKey] = string(yamlData)
 	if cm.Annotations == nil {
 		cm.Annotations = make(map[string]string)
 	}
@@ -203,7 +231,7 @@ func (p *Provider) GetCellStatus(
 
 	cm := &corev1.ConfigMap{}
 	key := types.NamespacedName{Name: ConfigMapNameFor(crName), Namespace: namespace}
-	if err := p.client.Get(ctx, key, cm); err != nil {
+	if err := p.reader().Get(ctx, key, cm); err != nil {
 		if apierrors.IsNotFound(err) {
 			return status, nil
 		}
@@ -218,8 +246,8 @@ func (p *Provider) GetCellStatus(
 		}
 	}
 
-	if _, ok := cm.Data["geo_ntn.yml"]; !ok {
-		return status, fmt.Errorf("ConfigMap %s/%s missing geo_ntn.yml key", namespace, ConfigMapNameFor(crName))
+	if _, ok := cm.Data[configDataKey]; !ok {
+		return status, fmt.Errorf("ConfigMap %s/%s missing %s key", namespace, ConfigMapNameFor(crName), configDataKey)
 	}
 
 	return status, nil
@@ -248,7 +276,7 @@ func (p *Provider) PushEphemerisUpdate(
 		Name:      ConfigMapNameFor(crName),
 		Namespace: namespace,
 	}
-	if err := p.client.Get(ctx, key, cm); err != nil {
+	if err := p.reader().Get(ctx, key, cm); err != nil {
 		return fmt.Errorf("reading ConfigMap %s/%s: %w",
 			namespace, ConfigMapNameFor(crName), err)
 	}
@@ -259,11 +287,11 @@ func (p *Provider) PushEphemerisUpdate(
 		return fmt.Errorf("%w: %s/%s", provider.ErrConfigMapNotOwned, namespace, ConfigMapNameFor(crName))
 	}
 
-	yamlContent, ok := cm.Data["geo_ntn.yml"]
+	yamlContent, ok := cm.Data[configDataKey]
 	if !ok {
 		return fmt.Errorf(
-			"ConfigMap %s/%s missing geo_ntn.yml",
-			namespace, ConfigMapNameFor(crName))
+			"ConfigMap %s/%s missing %s",
+			namespace, ConfigMapNameFor(crName), configDataKey)
 	}
 
 	// Replace the ephemeris section in the existing YAML.
@@ -273,7 +301,7 @@ func (p *Provider) PushEphemerisUpdate(
 			"ConfigMap %s/%s has no ephemeris block to replace",
 			namespace, ConfigMapNameFor(crName))
 	}
-	cm.Data["geo_ntn.yml"] = updated
+	cm.Data[configDataKey] = updated
 
 	if err := p.client.Update(ctx, cm); err != nil {
 		return fmt.Errorf("updating ConfigMap: %w", err)
