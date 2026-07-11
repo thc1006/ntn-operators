@@ -161,6 +161,16 @@ type SatelliteEphemerisStatus struct {
 	// +optional
 	SatelliteCount int `json:"satelliteCount,omitempty"`
 
+	// truncatedSatelliteCount is how many selected satellites were NOT propagated
+	// because the maxPropagatedStates cap (128) had already been reached — the count
+	// actually dropped by the cap, not merely (selected - 128), so satellites that
+	// fail SGP4 propagation do not inflate it. ABSENT or 0 means nothing was dropped
+	// (the field is omitempty). Narrow spec.satellites.noradIDs or the source URL's
+	// GROUP= to eliminate it. Mirrored by the StatesTruncated condition; a Warning
+	// StatesTruncated event fires once per transition into the truncated state.
+	// +optional
+	TruncatedSatelliteCount int `json:"truncatedSatelliteCount,omitempty"`
+
 	// nextPassWindows contains upcoming contact opportunities.
 	// +optional
 	NextPassWindows []PassWindow `json:"nextPassWindows,omitempty"`
@@ -185,6 +195,10 @@ const (
 	ConditionGPDataFetched   = "GPDataFetched"
 	ConditionGPDataParsed    = "GPDataParsed"
 	ConditionPassesPredicted = "PassesPredicted"
+	// ConditionStatesTruncated is True when the selected satellite set exceeded the
+	// maxPropagatedStates cap and some were omitted from the runtime-push status.
+	// False means every selected satellite fit within the cap.
+	ConditionStatesTruncated = "StatesTruncated"
 	// ConditionUnsupportedOrbitRegime is True when the source contained element
 	// sets whose orbital period is >= 225 min (deep space, roughly MEO and up).
 	// The v1.0 propagator is near-earth SGP4 only, so those sets are rejected

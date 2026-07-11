@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/akhenakh/sgp4"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -235,6 +236,117 @@ func issOMMForTest() sgp4.OMM {
 		ClassificationType: "U", NoradCatID: 25544, ElementSetNo: 999,
 		RevAtEpoch: 47189, BStar: 0.00025892, MeanMotionDot: 0.00019394,
 	}
+}
+
+// PR C: truncation is transition-gated — the Warning note is returned only on the
+// FIRST entry into the truncated state (so the ~3-min re-propagation cadence does
+// not re-fire it), while status.truncatedSatelliteCount + the StatesTruncated
+// condition always reflect the current state.
+func TestPropagateStates_TruncationTransitionGated(t *testing.T) {
+	r := &SatelliteEphemerisReconciler{}
+	const over = 5
+	big := make([]sgp4.OMM, 0, maxPropagatedStates+over)
+	for i := range maxPropagatedStates + over {
+		o := issOMMForTest()
+		o.NoradCatID = 25544 + i
+		big = append(big, o)
+	}
+	eph := &ntnv1alpha1.SatelliteEphemeris{}
+	epoch := time.Now().Add(2 * time.Hour)
+	isTruncated := func() bool {
+		return meta.IsStatusConditionTrue(eph.Status.Conditions, ntnv1alpha1.ConditionStatesTruncated)
+	}
+
+	// First reconcile over the cap: status + condition set, event note returned.
+	note1 := r.propagateStates(context.Background(), eph, ephemeris.GPFetchResult{OMMs: big}, epoch)
+	if eph.Status.TruncatedSatelliteCount != over {
+		t.Errorf("TruncatedSatelliteCount = %d, want %d", eph.Status.TruncatedSatelliteCount, over)
+	}
+	if !isTruncated() {
+		t.Error("StatesTruncated condition should be True after exceeding the cap")
+	}
+	if note1 == "" {
+		t.Error("first transition into truncated should return a non-empty event note")
+	}
+
+	// Second reconcile, still over the cap: NO new note (transition-gated → no spam).
+	if note2 := r.propagateStates(context.Background(), eph, ephemeris.GPFetchResult{OMMs: big}, epoch); note2 != "" {
+		t.Errorf("steady-state truncation must not re-emit an event, got %q", note2)
+	}
+
+	// Recover within the cap: count 0, condition False, no note.
+	note3 := r.propagateStates(context.Background(), eph, ephemeris.GPFetchResult{OMMs: []sgp4.OMM{issOMMForTest()}}, epoch)
+	if eph.Status.TruncatedSatelliteCount != 0 || isTruncated() {
+		t.Error("recovery should clear the truncation count and condition")
+	}
+	if note3 != "" {
+		t.Error("recovery should not emit a truncation Warning")
+	}
+}
+
+// badOMMForTest returns an OMM that PropagateToECEF rejects (eccentricity >= 1 is
+// invalid for SGP4), used to prove propagation failures do not inflate the count.
+func badOMMForTest() sgp4.OMM {
+	o := issOMMForTest()
+	o.Eccentricity = 1.5
+	return o
+}
+
+// PR C review follow-up: truncatedSatelliteCount must be the count actually dropped
+// by the cap, NOT (selected - cap). Satellites that fail SGP4 propagation reduce the
+// successful set and must never be reported as cap-truncated.
+func TestPropagateStates_TruncationCountsCapDropsNotPropagationFailures(t *testing.T) {
+	epoch := time.Now().Add(2 * time.Hour)
+	isTruncated := func(eph *ntnv1alpha1.SatelliteEphemeris) bool {
+		return meta.IsStatusConditionTrue(eph.Status.Conditions, ntnv1alpha1.ConditionStatesTruncated)
+	}
+	build := func(nBad, nGood int) []sgp4.OMM {
+		omms := make([]sgp4.OMM, 0, nBad+nGood)
+		for i := range nBad {
+			b := badOMMForTest()
+			b.NoradCatID = 40000 + i
+			omms = append(omms, b)
+		}
+		for i := range nGood {
+			g := issOMMForTest()
+			g.NoradCatID = 25544 + i
+			omms = append(omms, g)
+		}
+		return omms
+	}
+
+	// 133 selected, 10 fail → 123 succeed (< 128) → the cap dropped nothing.
+	t.Run("failures below the cap → 0 truncated", func(t *testing.T) {
+		r := &SatelliteEphemerisReconciler{}
+		eph := &ntnv1alpha1.SatelliteEphemeris{}
+		note := r.propagateStates(context.Background(), eph, ephemeris.GPFetchResult{OMMs: build(10, 123)}, epoch)
+		if len(eph.Status.PropagatedStates) != 123 {
+			t.Fatalf("expected 123 propagated states, got %d", len(eph.Status.PropagatedStates))
+		}
+		if eph.Status.TruncatedSatelliteCount != 0 {
+			t.Errorf("cap dropped nothing (123 < 128) but TruncatedSatelliteCount = %d", eph.Status.TruncatedSatelliteCount)
+		}
+		if isTruncated(eph) || note != "" {
+			t.Error("StatesTruncated must be False + no event when the cap dropped nothing")
+		}
+	})
+
+	// 140 selected, 2 fail before the cap → 128 successes reached after 130 OMMs →
+	// 10 remaining un-attempted → truncatedSatelliteCount = 10 (NOT 140-128=12).
+	t.Run("cap reached after some failures → counts only the un-attempted", func(t *testing.T) {
+		r := &SatelliteEphemerisReconciler{}
+		eph := &ntnv1alpha1.SatelliteEphemeris{}
+		r.propagateStates(context.Background(), eph, ephemeris.GPFetchResult{OMMs: build(2, 138)}, epoch)
+		if len(eph.Status.PropagatedStates) != maxPropagatedStates {
+			t.Fatalf("expected %d propagated states, got %d", maxPropagatedStates, len(eph.Status.PropagatedStates))
+		}
+		if eph.Status.TruncatedSatelliteCount != 10 {
+			t.Errorf("expected 10 un-attempted due to cap, got %d", eph.Status.TruncatedSatelliteCount)
+		}
+		if !isTruncated(eph) {
+			t.Error("StatesTruncated must be True when the cap was reached")
+		}
+	})
 }
 
 // #176 producer: propagateStates fills status.propagatedStates from the tracked

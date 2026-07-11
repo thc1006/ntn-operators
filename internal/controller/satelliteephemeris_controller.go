@@ -311,7 +311,7 @@ func (r *SatelliteEphemerisReconciler) Reconcile(ctx context.Context, req ctrl.R
 	// an earlier version did) made OCUDU back-propagate hours from a position that
 	// was itself SGP4-propagated hours forward, compounding LEO error; a near-now
 	// epoch keeps OCUDU's internal propagation short and forward.
-	r.propagateStates(ctx, eph, result, now.Add(propagationEpochLead))
+	truncEvent := r.propagateStates(ctx, eph, result, now.Add(propagationEpochLead))
 
 	if err := r.Status().Update(ctx, eph); err != nil {
 		return ctrl.Result{}, err
@@ -324,6 +324,13 @@ func (r *SatelliteEphemerisReconciler) Reconcile(ctx context.Context, req ctrl.R
 	// fails NotFound above. (findings.md B-5; deep-review C-#4)
 	if orbitRegimeEvent != "" && r.Recorder != nil {
 		r.Recorder.Eventf(eph, nil, "Warning", "UnsupportedOrbitRegime", "OrbitRegimeGuard", "%s", orbitRegimeEvent)
+	}
+
+	// Same post-persist, transition-gated discipline: emit the StatesTruncated
+	// Warning only when propagateStates reported a fresh entry into the truncated
+	// state, so the ~3-minute re-propagation cadence never re-fires it.
+	if truncEvent != "" && r.Recorder != nil {
+		r.Recorder.Eventf(eph, nil, "Warning", "StatesTruncated", "StatesTruncated", "%s", truncEvent)
 	}
 
 	// Emit the "fetched" event only on a real successful fetch — not on the
@@ -455,20 +462,12 @@ func (r *SatelliteEphemerisReconciler) propagateStates(
 	eph *ntnv1alpha1.SatelliteEphemeris,
 	result ephemeris.GPFetchResult,
 	epoch time.Time,
-) {
+) string {
 	var norad []int
 	if eph.Spec.Satellites != nil {
 		norad = eph.Spec.Satellites.NoradIDs
 	}
 	omms := ephemeris.FilterOMMs(result.OMMs, norad)
-	if len(omms) > maxPropagatedStates {
-		// No silent truncation: a satellite beyond the cap won't be pushable at
-		// runtime (its NoradID selector would miss). Tell the operator to narrow
-		// the set with spec.satellites.noradIDs.
-		logf.FromContext(ctx).Info("propagated-state list capped; some satellites omitted from runtime-push status",
-			"tracked", len(omms), "cap", maxPropagatedStates,
-			"hint", "set spec.satellites.noradIDs to the satellites pushed at runtime")
-	}
 	epochMs := epoch.UnixMilli()
 
 	// I-17: count tracked element sets whose OWN epoch is stale — a data property
@@ -481,9 +480,18 @@ func (r *SatelliteEphemerisReconciler) propagateStates(
 		}
 	}
 
-	states := make([]ntnv1alpha1.PropagatedState, 0, len(omms))
+	states := make([]ntnv1alpha1.PropagatedState, 0, min(len(omms), maxPropagatedStates))
+	skippedByCap := 0
 	for i := range omms {
 		if len(states) >= maxPropagatedStates {
+			// The cap is reached; the remaining OMMs are NOT attempted. This is the
+			// truthful count dropped by the cap — propagation failures above already
+			// reduced the successful set, so len(omms)-cap would over-report a
+			// truncation that never actually happened.
+			skippedByCap = len(omms) - i
+			logf.FromContext(ctx).Info("propagated-state list capped; some satellites omitted from runtime-push status",
+				"selected", len(omms), "cap", maxPropagatedStates, "omitted", skippedByCap,
+				"hint", "set spec.satellites.noradIDs to the satellites pushed at runtime")
 			break
 		}
 		ecef, err := ephemeris.PropagateToECEF(omms[i], epoch)
@@ -504,7 +512,47 @@ func (r *SatelliteEphemerisReconciler) propagateStates(
 		})
 	}
 	eph.Status.PropagatedStates = states
+	truncEvent := r.reportStatesTruncated(eph, len(omms), skippedByCap)
 	r.reportEphemerisEpochStale(eph, staleEpochs, len(omms))
+	return truncEvent
+}
+
+// reportStatesTruncated records status.truncatedSatelliteCount and the
+// StatesTruncated condition, and RETURNS the Warning-event note the caller must
+// emit only AFTER a successful Status().Update ("" = nothing). Like
+// reportOrbitRegime, the note is non-empty only on the FIRST transition into the
+// truncated state, so the short re-propagation cadence (#179) does not re-emit the
+// event on every reconcile; deferring it to post-persist keeps a rolled-back
+// update from firing (and re-firing) an event for a transition that never landed.
+func (r *SatelliteEphemerisReconciler) reportStatesTruncated(eph *ntnv1alpha1.SatelliteEphemeris, selected, truncated int) string {
+	eph.Status.TruncatedSatelliteCount = truncated
+	if truncated == 0 {
+		meta.SetStatusCondition(&eph.Status.Conditions, metav1.Condition{
+			Type:               ntnv1alpha1.ConditionStatesTruncated,
+			Status:             metav1.ConditionFalse,
+			Reason:             "WithinCap",
+			Message:            "All selected satellites fit within the propagated-state cap",
+			ObservedGeneration: eph.Generation,
+		})
+		return ""
+	}
+	// Read the persisted condition before mutating it, so the note is non-empty
+	// once per entry into the truncated state rather than every reconcile.
+	firstTransition := !meta.IsStatusConditionTrue(eph.Status.Conditions, ntnv1alpha1.ConditionStatesTruncated)
+	msg := fmt.Sprintf("selected %d satellites but the propagated-state cap is %d; %d omitted from "+
+		"runtime-push status — narrow spec.satellites.noradIDs or the source URL GROUP=",
+		selected, maxPropagatedStates, truncated)
+	meta.SetStatusCondition(&eph.Status.Conditions, metav1.Condition{
+		Type:               ntnv1alpha1.ConditionStatesTruncated,
+		Status:             metav1.ConditionTrue,
+		Reason:             "PropagatedStateCapExceeded",
+		Message:            msg,
+		ObservedGeneration: eph.Generation,
+	})
+	if firstTransition {
+		return msg
+	}
+	return ""
 }
 
 // reportOrbitRegime records the UnsupportedOrbitRegime condition and RETURNS the

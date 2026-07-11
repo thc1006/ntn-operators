@@ -363,6 +363,16 @@ spec:
                 description: satelliteCount is the number of satellites currently
                   tracked.
                 type: integer
+              truncatedSatelliteCount:
+                description: |-
+                  truncatedSatelliteCount is how many selected satellites were NOT propagated
+                  because the maxPropagatedStates cap (128) had already been reached — the count
+                  actually dropped by the cap, not merely (selected - 128), so satellites that
+                  fail SGP4 propagation do not inflate it. ABSENT or 0 means nothing was dropped
+                  (the field is omitempty). Narrow spec.satellites.noradIDs or the source URL's
+                  GROUP= to eliminate it. Mirrored by the StatesTruncated condition; a Warning
+                  StatesTruncated event fires once per transition into the truncated state.
+                type: integer
             type: object
         required:
         - spec
