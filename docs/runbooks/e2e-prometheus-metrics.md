@@ -11,7 +11,7 @@ SDR in the loop.
 
 - Kubernetes cluster where you can deploy to `ntn-e2e` namespace
 - `kubectl` and `docker` on the PATH
-- Go 1.25+ if you want to run the operator as a local process
+- Go 1.26+ if you want to run the operator as a local process
 - Open5GS running on the host (optional for §6)
 
 ## 1. Install CRDs
