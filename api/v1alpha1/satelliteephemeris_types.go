@@ -67,12 +67,11 @@ type SecretReference struct {
 	Key string `json:"key,omitempty"`
 }
 
-// SatelliteSelector defines which satellites to track.
+// SatelliteSelector defines which satellites to track. To fetch a single
+// constellation, select it SERVER-SIDE in the source URL — CelesTrak's GROUP=
+// query parameter (e.g. GROUP=oneweb) returns only that constellation's element
+// sets — and/or list explicit NORAD catalog IDs here.
 type SatelliteSelector struct {
-	// constellation filters by constellation name (e.g., "oneweb", "starlink").
-	// +optional
-	Constellation string `json:"constellation,omitempty"`
-
 	// noradIDs is an explicit list of NORAD catalog IDs to track.
 	// +optional
 	NoradIDs []int `json:"noradIDs,omitempty"`
@@ -157,6 +156,13 @@ type SatelliteEphemerisStatus struct {
 	// satelliteCount is the number of satellites currently tracked.
 	// +optional
 	SatelliteCount int `json:"satelliteCount,omitempty"`
+
+	// truncatedSatelliteCount is how many satellites were dropped because the
+	// selected set exceeded the maxPropagatedStates cap (128); 0 when nothing was
+	// dropped. Narrow spec.satellites.noradIDs or the source URL's GROUP= to
+	// eliminate it. A Warning "StatesTruncated" event is emitted alongside.
+	// +optional
+	TruncatedSatelliteCount int `json:"truncatedSatelliteCount,omitempty"`
 
 	// nextPassWindows contains upcoming contact opportunities.
 	// +optional

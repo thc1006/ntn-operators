@@ -19,12 +19,14 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/akhenakh/sgp4"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	ntnv1alpha1 "github.com/thc1006/ntn-operators/api/v1alpha1"
@@ -258,6 +260,57 @@ func TestPropagateStates_FillsStatus(t *testing.T) {
 	}
 	if s.ECEF.PosX == 0 && s.ECEF.PosY == 0 && s.ECEF.PosZ == 0 {
 		t.Fatalf("ECEF not populated by SGP4: %+v", s.ECEF)
+	}
+}
+
+// I-23: when the selected set exceeds the maxPropagatedStates cap, propagateStates
+// records the drop count in status AND emits a Warning StatesTruncated event —
+// instead of only logging (observability of dropped data).
+func TestPropagateStates_TruncationSurfacedInStatusAndEvent(t *testing.T) {
+	rec := events.NewFakeRecorder(10)
+	r := &SatelliteEphemerisReconciler{Recorder: rec}
+	const over = 5
+	omms := make([]sgp4.OMM, 0, maxPropagatedStates+over)
+	for i := range maxPropagatedStates + over {
+		o := issOMMForTest()
+		o.NoradCatID = 25544 + i // distinct satellites
+		omms = append(omms, o)
+	}
+	eph := &ntnv1alpha1.SatelliteEphemeris{}
+	epoch := time.Now().Add(2 * time.Hour)
+	r.propagateStates(context.Background(), eph, ephemeris.GPFetchResult{OMMs: omms}, epoch)
+
+	if eph.Status.TruncatedSatelliteCount != over {
+		t.Errorf("TruncatedSatelliteCount = %d, want %d", eph.Status.TruncatedSatelliteCount, over)
+	}
+	if len(eph.Status.PropagatedStates) != maxPropagatedStates {
+		t.Errorf("PropagatedStates = %d, want cap %d", len(eph.Status.PropagatedStates), maxPropagatedStates)
+	}
+	select {
+	case ev := <-rec.Events:
+		if !strings.Contains(ev, "Warning") || !strings.Contains(ev, "StatesTruncated") {
+			t.Errorf("want a Warning StatesTruncated event, got %q", ev)
+		}
+	default:
+		t.Error("expected a StatesTruncated event, got none")
+	}
+}
+
+// Below the cap: no truncation recorded, no event emitted.
+func TestPropagateStates_NoTruncation_NoEvent(t *testing.T) {
+	rec := events.NewFakeRecorder(10)
+	r := &SatelliteEphemerisReconciler{Recorder: rec}
+	eph := &ntnv1alpha1.SatelliteEphemeris{}
+	epoch := time.Now().Add(2 * time.Hour)
+	r.propagateStates(context.Background(), eph, ephemeris.GPFetchResult{OMMs: []sgp4.OMM{issOMMForTest()}}, epoch)
+
+	if eph.Status.TruncatedSatelliteCount != 0 {
+		t.Errorf("TruncatedSatelliteCount = %d, want 0", eph.Status.TruncatedSatelliteCount)
+	}
+	select {
+	case ev := <-rec.Events:
+		t.Errorf("expected no event below the cap, got %q", ev)
+	default:
 	}
 }
 

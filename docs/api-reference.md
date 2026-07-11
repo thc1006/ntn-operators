@@ -1877,6 +1877,72 @@ enforces bare host:port (a permanent admission error beats a silent
 tight-requeue on a mistyped endpoint).<br/>
         </td>
         <td>true</td>
+      </tr><tr>
+        <td><b><a href="#ntncellconfigspecproviderremotecontroltls">tls</a></b></td>
+        <td>object</td>
+        <td>
+          tls, when set, secures the runtime push: the provider dials wss:// (TLS)
+instead of plaintext ws:// and authenticates with the material in the
+referenced Secret. Omit it to keep the plaintext ws:// behavior (N-12).<br/>
+        </td>
+        <td>false</td>
+      </tr></tbody>
+</table>
+
+
+### NTNCellConfig.spec.provider.remoteControl.tls
+<sup><sup>[↩ Parent](#ntncellconfigspecproviderremotecontrol)</sup></sup>
+
+
+
+tls, when set, secures the runtime push: the provider dials wss:// (TLS)
+instead of plaintext ws:// and authenticates with the material in the
+referenced Secret. Omit it to keep the plaintext ws:// behavior (N-12).
+
+<table>
+    <thead>
+        <tr>
+            <th>Name</th>
+            <th>Type</th>
+            <th>Description</th>
+            <th>Required</th>
+        </tr>
+    </thead>
+    <tbody><tr>
+        <td><b>mode</b></td>
+        <td>enum</td>
+        <td>
+          mode selects the transport-security posture:
+  "tls"  — dial wss://, verify the server certificate, and (if the Secret
+           carries a token) send it as an Authorization: Bearer header.
+  "mtls" — additionally present a client certificate (mutual TLS); the
+           Secret MUST then carry tls.crt + tls.key.<br/>
+          <br/>
+            <i>Enum</i>: tls, mtls<br/>
+        </td>
+        <td>true</td>
+      </tr><tr>
+        <td><b>secretName</b></td>
+        <td>string</td>
+        <td>
+          secretName is the Secret (in this NTNCellConfig's namespace) holding the TLS
+trust and auth material. Recognized keys: "ca.crt" (PEM CA to verify the
+gNB/proxy server certificate — omit to use the system roots), "token" (the
+shared secret sent as Authorization: Bearer — optional), and, for mode=mtls,
+"tls.crt" + "tls.key" (the client certificate/key). A bare shared secret is
+replayable, so it is only ever sent over the wss:// (TLS) connection.<br/>
+        </td>
+        <td>true</td>
+      </tr><tr>
+        <td><b>serverName</b></td>
+        <td>string</td>
+        <td>
+          serverName overrides the TLS ServerName (SNI) verified against the server
+certificate's SubjectAltNames. Defaults to the endpoint host. Set it when the
+gNB/proxy certificate's SAN does not match the dialed host (e.g. an IP
+endpoint fronted by a DNS-named certificate).<br/>
+        </td>
+        <td>false</td>
       </tr></tbody>
 </table>
 
@@ -2232,6 +2298,8 @@ with terrestrial-satellite failover policy.
         <td>object</td>
         <td>
           failoverPolicy defines when and how to switch between paths.<br/>
+          <br/>
+            <i>Validations</i>:<li>self.triggers.all(t, t.matches('^ *(rsrp|latency|packetLoss|terrestrialRSRP|terrestrialLatency|terrestrialPacketLoss) *(<=|>=|<|>) *[-+]?([0-9]+([.][0-9]+)?|[.][0-9]+)([eE][-+]?[0-9]+)? *$')): each failoverPolicy.trigger must be 'metric op value' where metric is one of rsrp/latency/packetLoss/terrestrialRSRP/terrestrialLatency/terrestrialPacketLoss, op is one of < <= > >=, and value is a finite number (e.g. 'rsrp < -120')</li>
         </td>
         <td>true</td>
       </tr><tr>
@@ -2314,10 +2382,30 @@ failoverPolicy defines when and how to switch between paths.
         <td>
           triggers defines conditions that initiate failover (OR logic).
 Format: "metric operator value" (e.g., "rsrp < -120").
-Validated at runtime by the failover engine (pkg/slice.ParseTrigger).
+Validated at admission by the XValidation rule on this type and at runtime by
+the failover engine (pkg/slice.ParseTrigger).
 Order is intentionally not significant; set merge semantics are desired.<br/>
         </td>
         <td>true</td>
+      </tr><tr>
+        <td><b>confirmationSamples</b></td>
+        <td>integer</td>
+        <td>
+          confirmationSamples is the number of CONSECUTIVE reconcile samples on which
+the terrestrial triggers must fire before a failover to satellite is taken
+(production load balancers such as AWS ALB / GCP count consecutive, not
+windowed, probe results). It absorbs a single-sample blip so one noisy
+reading does not trip a switch. 1 (the default when unset) preserves the
+prior immediate-failover behavior; a value of N delays failover by up to
+(N-1) reconcile intervals. The confirmation counter is kept in memory and
+resets on any healthy reliable sample; losing it on a controller restart or
+leader-election handoff only re-requires confirmation (a DELAY), never causes
+a spurious switch.<br/>
+          <br/>
+            <i>Minimum</i>: 1<br/>
+            <i>Maximum</i>: 10<br/>
+        </td>
+        <td>false</td>
       </tr><tr>
         <td><b>hysteresisMargin</b></td>
         <td>string</td>
@@ -2328,6 +2416,20 @@ oscillate near the threshold. The value uses the same unit as
 the trigger (dB for RSRP, ms for latency, percent for packetLoss).
 Example: with trigger "rsrp < -120" and hysteresisMargin "10",
 failover fires at RSRP < -120, but switchback requires RSRP >= -110.<br/>
+        </td>
+        <td>false</td>
+      </tr><tr>
+        <td><b>minTerrestrialDwell</b></td>
+        <td>string</td>
+        <td>
+          minTerrestrialDwell is the minimum time the terrestrial path must be held
+after a switchback before another failover to satellite may be taken. It
+bounds sub-minute ping-pong after a hand-back. It is a soft, bounded delay
+— a genuinely failing terrestrial still fails over once the dwell elapses,
+so it never indefinitely blocks a real failover. 0 (the default) disables
+it; 30s–120s is a sane range relative to a LEO pass.<br/>
+          <br/>
+            <i>Format</i>: duration<br/>
         </td>
         <td>false</td>
       </tr><tr>
@@ -2877,6 +2979,12 @@ SatelliteEphemeris manages GP data fetching (OMM JSON from CelesTrak/SpaceTrack)
 orbital propagation (SGP4 via akhenakh/sgp4), and pass prediction for a set of
 satellites against ground stations.
 
+Orbit-regime support: v1.0 is LEO-only. The propagator is the near-earth SGP4
+model; element sets whose orbital period is >= 225 minutes (deep space —
+roughly MEO and above, e.g. O3b or GEO) are rejected rather than propagated
+into a wrong position, and surface as the UnsupportedOrbitRegime status
+condition. Multi-orbit (MEO/GEO) support is a v1.1 roadmap item.
+
 <table>
     <thead>
         <tr>
@@ -3004,7 +3112,11 @@ CelesTrak updates every 2 hours; setting this below 2h wastes bandwidth.<br/>
         <td><b>url</b></td>
         <td>string</td>
         <td>
-          url is the endpoint to fetch GP data from.
+          url is the endpoint to fetch GP data from. Use https for any public
+source: a cleartext http:// URL that resolves to a public IP is refused
+at runtime (InsecureURL condition) because an on-path attacker could
+inject forged OMM data that is propagated into SIB19. http:// is permitted
+only for a private/in-cluster mirror (NetworkPolicy-protected).
 For CelesTrak: https://celestrak.org/NORAD/elements/gp.php?GROUP=oneweb&FORMAT=JSON
 For SpaceTrack: https://www.space-track.org/basicspacedata/query/class/gp/...<br/>
         </td>
@@ -3121,13 +3233,6 @@ satellites filters which satellites to track from the source.
         </tr>
     </thead>
     <tbody><tr>
-        <td><b>constellation</b></td>
-        <td>string</td>
-        <td>
-          constellation filters by constellation name (e.g., "oneweb", "starlink").<br/>
-        </td>
-        <td>false</td>
-      </tr><tr>
         <td><b>noradIDs</b></td>
         <td>[]integer</td>
         <td>
@@ -3192,6 +3297,16 @@ under the etcd object-size limit.<br/>
         <td>integer</td>
         <td>
           satelliteCount is the number of satellites currently tracked.<br/>
+        </td>
+        <td>false</td>
+      </tr><tr>
+        <td><b>truncatedSatelliteCount</b></td>
+        <td>integer</td>
+        <td>
+          truncatedSatelliteCount is how many satellites were dropped because the
+selected set exceeded the maxPropagatedStates cap (128); 0 when nothing was
+dropped. Narrow spec.satellites.noradIDs or the source URL's GROUP= to
+eliminate it. A Warning "StatesTruncated" event is emitted alongside.<br/>
         </td>
         <td>false</td>
       </tr></tbody>

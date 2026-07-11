@@ -5,6 +5,40 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Removed
+
+- **Breaking (alpha): `spec.satellites.constellation` removed from SatelliteEphemeris.**
+  The field was never read — it performed no filtering. Select a constellation
+  server-side in the source URL instead (CelesTrak `GROUP=oneweb`), and/or list
+  explicit `spec.satellites.noradIDs`. Per the Kubernetes deprecation policy an
+  alpha (`v1alpha1`) field may be removed without a deprecation period; a stored
+  CR's `constellation` value is pruned on next write. Find any manifest that sets
+  it and drop the field (ensuring the source URL carries `GROUP=<constellation>`):
+
+  ```bash
+  kubectl get satelliteephemeris -A -o json \
+    | jq -r '.items[] | select(.spec.satellites.constellation != null) | "\(.metadata.namespace)/\(.metadata.name)"'
+  ```
+
+### Added
+
+- SatelliteEphemeris `status.truncatedSatelliteCount` plus a `Warning`
+  `StatesTruncated` event when the selected set exceeds the 128 propagated-state
+  cap (previously only logged).
+- A condition-status printer column for `kubectl get`: SatelliteEphemeris
+  (Fetched), NTNCellConfig (Applied), NTNSlice (Ready).
+
+### Changed
+
+- `RemoteControlRef.endpoint` now accepts bracketed IPv6 literals (`[::1]:8001`)
+  for dual-stack clusters.
+- `MaxLength` bounds added to previously-unbounded spec strings across all four
+  CRDs (defensive; generous limits).
+- The OCUDU provider `Cleanup` deletes the ConfigMap only when it is
+  controller-owned by the CR (was: delete by name).
+
 ## [0.6.0] - 2026-07-09
 
 Promotion of `0.6.0-rc.1` after a short soak (the rc's release pipeline —

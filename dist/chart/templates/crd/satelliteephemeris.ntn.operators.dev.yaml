@@ -95,10 +95,6 @@ spec:
                 description: satellites filters which satellites to track from the
                   source.
                 properties:
-                  constellation:
-                    description: constellation filters by constellation name (e.g.,
-                      "oneweb", "starlink").
-                    type: string
                   noradIDs:
                     description: noradIDs is an explicit list of NORAD catalog IDs
                       to track.
@@ -359,6 +355,13 @@ spec:
               satelliteCount:
                 description: satelliteCount is the number of satellites currently
                   tracked.
+                type: integer
+              truncatedSatelliteCount:
+                description: |-
+                  truncatedSatelliteCount is how many satellites were dropped because the
+                  selected set exceeded the maxPropagatedStates cap (128); 0 when nothing was
+                  dropped. Narrow spec.satellites.noradIDs or the source URL's GROUP= to
+                  eliminate it. A Warning "StatesTruncated" event is emitted alongside.
                 type: integer
             type: object
         required:

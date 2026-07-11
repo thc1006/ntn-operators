@@ -461,13 +461,21 @@ func (r *SatelliteEphemerisReconciler) propagateStates(
 		norad = eph.Spec.Satellites.NoradIDs
 	}
 	omms := ephemeris.FilterOMMs(result.OMMs, norad)
+	truncated := 0
 	if len(omms) > maxPropagatedStates {
-		// No silent truncation: a satellite beyond the cap won't be pushable at
-		// runtime (its NoradID selector would miss). Tell the operator to narrow
-		// the set with spec.satellites.noradIDs.
+		truncated = len(omms) - maxPropagatedStates
+		// Not silent: a satellite beyond the cap won't be pushable at runtime (its
+		// NoradID selector would miss). Surface it as a status field + a Warning
+		// event, and tell the operator to narrow the selected set.
 		logf.FromContext(ctx).Info("propagated-state list capped; some satellites omitted from runtime-push status",
 			"tracked", len(omms), "cap", maxPropagatedStates,
 			"hint", "set spec.satellites.noradIDs to the satellites pushed at runtime")
+		if r.Recorder != nil {
+			r.Recorder.Eventf(eph, nil, "Warning", "StatesTruncated", "StatesTruncated",
+				"selected %d satellites but the propagated-state cap is %d; %d omitted from "+
+					"runtime-push status — narrow spec.satellites.noradIDs or the source URL GROUP=",
+				len(omms), maxPropagatedStates, truncated)
+		}
 	}
 	epochMs := epoch.UnixMilli()
 
@@ -504,6 +512,7 @@ func (r *SatelliteEphemerisReconciler) propagateStates(
 		})
 	}
 	eph.Status.PropagatedStates = states
+	eph.Status.TruncatedSatelliteCount = truncated
 	r.reportEphemerisEpochStale(eph, staleEpochs, len(omms))
 }
 
