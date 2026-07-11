@@ -24,9 +24,11 @@ Metric → alert map:
 |---|---|---|
 | `NTNEphemerisEpochStale` | `ntn_operators_ephemeris_epoch_stale_count > 0` | 15m |
 | `NTNEphemerisPushFailing` | `increase(ntn_operators_ephemeris_push_errors_total[15m]) > 0` | 15m |
+| `NTNEphemerisPushNotReady` | `ntn_operators_ephemeris_push_ready == 0` | 15m |
 | `NTNSliceFailoverFlapping` | `increase(ntn_operators_failover_total[15m]) > 4` | 5m |
 | `NTNConfigApplyErrors` | `increase(ntn_operators_config_apply_errors_total[15m]) > 0` | 15m |
 | `NTNNoSatellitesTracked` | `ntn_operators_gp_satellite_count == 0` | 30m |
+| `NTNGPFetchNotReady` | `ntn_operators_gp_fetch_ready == 0` | 30m |
 | `NTNDeepSpaceElementsRejected` | `ntn_operators_gp_deep_space_rejected_count > 0` | 15m |
 | `NTNControllerReconcileErrors` | `sum by (controller) (rate(controller_runtime_reconcile_errors_total[5m])) > 0.1` | 15m |
 
@@ -125,6 +127,26 @@ owner (stale/missing state).
 
 ---
 
+## NTNEphemerisPushNotReady
+
+**Expr:** `ntn_operators_ephemeris_push_ready == 0` for 15m.
+
+The runtime NTN ephemeris push to the gNB has been failing continuously for 15m.
+This is the durable companion to **NTNEphemerisPushFailing**: that alert uses
+`increase(...errors_total[15m])`, which only sustains while a *transient* failure
+tight-requeues each minute. A **permanent** reason that does not requeue
+(`EphemerisRefNotFound`, `EphemerisPayloadMissing`, `EphemerisStale`,
+`ProviderPushRejected`) increments the counter once, so this gauge — held at 0 for
+the whole outage — is what fires for it.
+
+**Triage:** read the `EphemerisPushed=False` condition on the `NTNCellConfig` for
+the reason (`kubectl get ntncellconfig <config> -n "$NS" -o jsonpath='{.status.conditions}'`),
+then follow the same reason table as **NTNEphemerisPushFailing**. A gauge stuck at
+0 with no counter movement points at a permanent (config/state) cause, not a
+transient reachability blip.
+
+---
+
 ## NTNSliceFailoverFlapping
 
 **Fires when** more than 4 path switches occur in 15m. Labels: `namespace`,
@@ -197,6 +219,22 @@ its satellite path as unavailable. **Diagnose:** SatelliteEphemeris
 `GPDataFetched` / `GPDataParsed`, the source URL, and `spec.passPrediction`'s
 NORAD filter (a filter matching nothing yields zero). **Mitigate:** fix the
 source or widen the filter. **Escalate** to the ephemeris data owner.
+
+---
+
+## NTNGPFetchNotReady
+
+**Fires when** `ntn_operators_gp_fetch_ready == 0` for 30m — no usable element set
+(fresh fetch, 304, or served cache) has been obtained. **Why this and not
+NTNNoSatellitesTracked:** `gp_satellite_count == 0` cannot fire on a cold start
+that has *never* fetched successfully — the counter series is absent and PromQL
+`== 0` never matches an absent series. `gp_fetch_ready` is set to 0 on the first
+failed reconcile, so it catches a pipeline that never came up (bad credentials
+Secret, DNS/egress blocked, an insecure `http://` source refused, or the source
+persistently erroring with no cache). **Diagnose:** the SatelliteEphemeris
+`GPDataFetched` condition reason (`FetcherSetupFailed`, `InsecureURL`,
+`FetchFailed`, `AuthFailed`, `RateLimited`), then network egress / credentials /
+source URL. **Escalate** to the ephemeris data owner or the platform (egress).
 
 ---
 

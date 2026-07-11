@@ -171,6 +171,7 @@ func (r *SatelliteEphemerisReconciler) Reconcile(ctx context.Context, req ctrl.R
 			ntnmetrics.GPSatelliteCount.DeletePartialMatch(prometheus.Labels{"namespace": req.Namespace, "ephemeris": req.Name})
 			ntnmetrics.GPDeepSpaceRejectedCount.DeletePartialMatch(prometheus.Labels{"namespace": req.Namespace, "ephemeris": req.Name})
 			ntnmetrics.EphemerisEpochStaleCount.DeletePartialMatch(prometheus.Labels{"namespace": req.Namespace, "ephemeris": req.Name})
+			ntnmetrics.GPFetchReady.DeletePartialMatch(prometheus.Labels{"namespace": req.Namespace, "ephemeris": req.Name})
 			r.ommCache.Delete(req.NamespacedName)
 		}
 		return ctrl.Result{}, client.IgnoreNotFound(err)
@@ -194,6 +195,10 @@ func (r *SatelliteEphemerisReconciler) Reconcile(ctx context.Context, req ctrl.R
 			Message:            fetcherErr.Error(),
 			ObservedGeneration: eph.Generation,
 		})
+		// No usable GP data this cycle → readiness 0. Holds across a persistent
+		// setup failure so `gp_fetch_ready == 0` alerts even on a never-fetched cold
+		// start, where `gp_satellite_count == 0` cannot (absent series).
+		ntnmetrics.GPFetchReady.With(prometheus.Labels{"namespace": eph.Namespace, "ephemeris": eph.Name}).Set(0)
 		if err := r.Status().Update(ctx, eph); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -209,6 +214,10 @@ func (r *SatelliteEphemerisReconciler) Reconcile(ctx context.Context, req ctrl.R
 	now := time.Now()
 	outcome, earlyResult, earlyErr := r.obtainOMMs(ctx, req, eph, fetcher, effectiveInterval, now)
 	if earlyResult != nil {
+		// obtainOMMs only early-returns on no-usable-data outcomes: a refused insecure
+		// URL, or a fetch error with no cache to fall back on. Readiness 0 either way
+		// (served-cache and fresh/304 do NOT early-return — they reach the 1 below).
+		ntnmetrics.GPFetchReady.With(prometheus.Labels{"namespace": eph.Namespace, "ephemeris": eph.Name}).Set(0)
 		return *earlyResult, earlyErr
 	}
 	result := outcome.result
@@ -231,6 +240,9 @@ func (r *SatelliteEphemerisReconciler) Reconcile(ctx context.Context, req ctrl.R
 	eph.Status.SatelliteCount = result.SatelliteCount
 	eph.Status.LastUpdated = &metav1.Time{Time: result.FetchedAt}
 	ntnmetrics.GPSatelliteCount.With(prometheus.Labels{"namespace": eph.Namespace, "ephemeris": eph.Name}).Set(float64(result.SatelliteCount))
+	// Reaching here means usable GP data was obtained (fresh fetch, 304, or served
+	// cache) — readiness 1. This also clears a prior 0 once the pipeline recovers.
+	ntnmetrics.GPFetchReady.With(prometheus.Labels{"namespace": eph.Namespace, "ephemeris": eph.Name}).Set(1)
 
 	// Snapshot (before the switch mutates it) whether serve-from-cache is a NEW
 	// episode, so its Warning fires once per outage — not on every short-cadence

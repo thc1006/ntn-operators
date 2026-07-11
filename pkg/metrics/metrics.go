@@ -122,6 +122,23 @@ var (
 		[]string{"namespace", "ephemeris"},
 	)
 
+	// GPFetchReady is 1 when the latest reconcile obtained usable GP data (a fresh
+	// fetch, a 304 Not Modified, or a served cache) and 0 when it could not (fetcher
+	// setup failed, the fetch errored with no cache to fall back on, or an insecure
+	// URL was refused). It is the alertable companion to GPSatelliteCount:
+	// `gp_satellite_count == 0` cannot fire on a cold start that has NEVER fetched
+	// (the series is absent, and PromQL `== 0` never matches an absent series), but
+	// this gauge is set to 0 on that first failed reconcile, so `gp_fetch_ready == 0`
+	// for N minutes catches a GP pipeline that has never come up. Same
+	// namespace+ephemeris keying and delete-on-CR-removal as GPSatelliteCount.
+	GPFetchReady = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "ntn_operators_gp_fetch_ready",
+			Help: "1 if the latest GP reconcile obtained usable element-set data (fresh/304/cache), 0 if it failed.",
+		},
+		[]string{"namespace", "ephemeris"},
+	)
+
 	// EphemerisPushErrorsTotal counts runtime NTN-ephemeris push failures to the
 	// gNB, split by reason (findings.md I-19). ConfigApplyErrorsTotal covers only
 	// the static ConfigMap apply path, leaving the v0.6 runtime WebSocket push
@@ -132,6 +149,26 @@ var (
 			Help: "Total runtime NTN ephemeris push failures to the gNB, by reason.",
 		},
 		[]string{"namespace", "config", "reason"},
+	)
+
+	// EphemerisPushReady is 1 when the CR's runtime NTN ephemeris push to the gNB is
+	// currently healthy (pushed, already up to date, or no push failure this cycle)
+	// and 0 when the last push failed. EphemerisPushErrorsTotal is a per-failure
+	// COUNTER, so its rate alert (`increase(...[15m]) > 0`) only sustains while a
+	// TRANSIENT push keeps tight-requeuing every minute; a PERMANENT reason
+	// (EphemerisRefNotFound / EphemerisPayloadMissing / EphemerisStale /
+	// ProviderPushRejected) does not requeue and increments the counter only once, so
+	// the rate alert decays after the window. This gauge holds 0 across the whole
+	// outage regardless of requeue, so `ephemeris_push_ready == 0` for N minutes
+	// alerts on the permanent push failures the counter cannot (issue #216). Emitted
+	// only for CRs that configure a runtime push; keyed namespace+config, deleted on
+	// CR removal (and cleared when a CR stops configuring a push).
+	EphemerisPushReady = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "ntn_operators_ephemeris_push_ready",
+			Help: "1 if the CR's runtime NTN ephemeris push to the gNB is currently healthy, 0 if the last push failed.",
+		},
+		[]string{"namespace", "config"},
 	)
 
 	// ReaderQueryDuration measures how long a single PromQL fetch made
@@ -197,7 +234,9 @@ func init() {
 		GPSatelliteCount,
 		GPDeepSpaceRejectedCount,
 		EphemerisEpochStaleCount,
+		GPFetchReady,
 		EphemerisPushErrorsTotal,
+		EphemerisPushReady,
 		ReaderQueryDuration,
 		ReaderErrorsTotal,
 		ReaderStaleUsedTotal,

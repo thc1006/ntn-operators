@@ -46,6 +46,18 @@ spec:
           annotations:
             summary: "SatelliteEphemeris {{`{{ $labels.namespace }}/{{ $labels.ephemeris }}`}} tracks zero satellites"
             description: "The latest GP fetch produced no satellites for 30m."
+        # The GP pipeline has NEVER produced usable element data (fetcher setup /
+        # credentials failing, or every fetch erroring with no cache). Unlike
+        # gp_satellite_count == 0, this fires on a cold start that never fetched
+        # successfully — that counter's series is absent, so `== 0` never matches.
+        - alert: NTNGPFetchNotReady
+          expr: ntn_operators_gp_fetch_ready == 0
+          for: 30m
+          labels:
+            severity: warning
+          annotations:
+            summary: "SatelliteEphemeris {{`{{ $labels.namespace }}/{{ $labels.ephemeris }}`}} has no usable GP data"
+            description: "No usable element set (fresh fetch, 304, or cache) has been obtained for 30m — the GP pipeline may never have come up."
     - name: ntn-operators.gnb-push
       rules:
         # Runtime NTN ephemeris push to the gNB is failing (findings.md I-19). This
@@ -58,6 +70,18 @@ spec:
           annotations:
             summary: "NTNCellConfig {{`{{ $labels.namespace }}/{{ $labels.config }}`}} ephemeris push is failing ({{`{{ $labels.reason }}`}})"
             description: "Runtime NTN ephemeris push to the gNB has failed in the last 15m."
+        # The push has been failing continuously — catches PERMANENT reasons
+        # (EphemerisRefNotFound / PayloadMissing / EphemerisStale / ProviderPushRejected)
+        # that do not requeue, so the per-failure counter above increments only once and
+        # its rate alert decays. The gauge holds 0 across the whole outage regardless.
+        - alert: NTNEphemerisPushNotReady
+          expr: ntn_operators_ephemeris_push_ready == 0
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "NTNCellConfig {{`{{ $labels.namespace }}/{{ $labels.config }}`}} ephemeris push is not ready"
+            description: "Runtime NTN ephemeris push to the gNB has been failing for 15m (covers permanent, non-requeuing failures the rate alert misses)."
         # Static provider config apply is erroring.
         - alert: NTNConfigApplyErrors
           expr: increase(ntn_operators_config_apply_errors_total[15m]) > 0
