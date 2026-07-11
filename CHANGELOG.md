@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **Runtime NTN push no longer follows redirects on the WebSocket handshake.** A
+  gNB/proxy `302` from `wss://` to a plaintext `http://` on the same host could
+  otherwise make the client re-send the `Authorization: Bearer` shared secret over
+  cleartext (`coder/websocket` follows redirects by default, and Go preserves the
+  header on a same-host redirect). The handshake now refuses redirects
+  (`CheckRedirect` → `ErrUseLastResponse`), mutation-tested against the leak.
+- **`remoteControl.tls` Secret handling hardened (partial confused-deputy mitigation).**
+  The operator reads the referenced Secret with its own cluster-wide `secrets get`, on
+  behalf of whoever authored the `NTNCellConfig`; a principal who can write the CR (but
+  not read Secrets) could otherwise point the operator at an arbitrary namespace Secret
+  and have its `token` shipped to a CR-controlled endpoint. Two gates raise the bar: the
+  Secret's **owner** must label it `ntn.operators.dev/remote-control-credential: "true"`,
+  and a `kubernetes.io/service-account-token` / `bootstrap.kubernetes.io/token` Secret is
+  refused outright. ⚠ **This is attack-surface reduction, not an authorization boundary:**
+  the label is namespace-scoped (any `NTNCellConfig` in the namespace may use a labelled
+  Secret), a `patch`-only principal could add the label to a Secret it cannot read, and
+  the type check does not stop an `Opaque` Secret from holding some other bearer token. A
+  real per-CR/endpoint authorization control (SubjectAccessReview or a grant resource) is
+  a tracked follow-up.
+- **Refused handshake redirects and other definitive HTTP handshake responses (3xx/4xx)
+  are classified as permanent**, not transient — so the runtime push does not tight-requeue
+  a redirect/auth rejection every minute.
+- **Credential-resolution failures no longer leak Secret existence/type to the CR.** The
+  `EphemerisPushed=False` condition/event now carries a uniform "credential unavailable or
+  not authorized" message; the specific cause is logged for the operator only (closes a
+  Secret existence/type oracle for a CR-writer without `secrets get`).
+
+### Upgrade notes
+
+- **Breaking (`remoteControl.tls`):** an existing remote-control credential Secret must
+  gain the label `ntn.operators.dev/remote-control-credential: "true"` (set by the
+  Secret owner), or the runtime push reports `EphemerisPushed=False` with reason
+  `RemoteControlConfigInvalid` (a permanent, non-tight-requeuing error that clears when
+  the Secret is fixed). Add the label before upgrading. Note the opt-in is
+  namespace-scoped; a per-CR grant is a future hardening.
+
 ## [0.7.0] - 2026-07-12
 
 The audit season: runtime-resilience, validation, event/GitOps, and observability

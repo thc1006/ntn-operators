@@ -25,6 +25,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
 	"math/big"
 	"testing"
 	"time"
@@ -87,8 +88,15 @@ func TestResolveRemoteControlTLS(t *testing.T) {
 		// Exercise the uncached-read path: APIReader is what production wires.
 		return &NTNCellConfigReconciler{Client: c, APIReader: c}
 	}
+	// Correctly owner-opted-in credential Secret (the label is now mandatory).
 	secret := func(name string, data map[string][]byte) *corev1.Secret {
-		return &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns}, Data: data}
+		return &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: name, Namespace: ns,
+				Labels: map[string]string{remoteControlCredentialLabel: "true"},
+			},
+			Data: data,
+		}
 	}
 	ctx := context.Background()
 
@@ -173,4 +181,83 @@ func TestResolveRemoteControlTLS(t *testing.T) {
 			t.Fatal("expected an error for an invalid ca.crt PEM")
 		}
 	})
+
+	// SECURITY — confused-deputy gates.
+	t.Run("secret without the opt-in label → rejected", func(t *testing.T) {
+		unlabelled := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: "s", Namespace: ns}, // no remoteControlCredentialLabel
+			Data:       map[string][]byte{"ca.crt": certPEM, "token": []byte("shhh")},
+		}
+		r := newR(unlabelled)
+		rc := &ntnv1alpha1.RemoteControlRef{Endpoint: "h:1",
+			TLS: &ntnv1alpha1.RemoteControlTLS{Mode: "tls", SecretName: "s"}}
+		_, tok, err := r.resolveRemoteControlTLS(ctx, ns, rc)
+		if err == nil {
+			t.Fatal("an un-opted-in Secret (no owner label) must be rejected — a CR author must not point the operator at an arbitrary Secret")
+		}
+		if tok != "" {
+			t.Fatalf("no token may be returned on rejection, got %q", tok)
+		}
+		if !errors.Is(err, errRemoteControlCredentialInvalid) {
+			t.Errorf("a credential-config rejection must be classified permanent (wrap errRemoteControlCredentialInvalid) so it does not tight-requeue; got %v", err)
+		}
+	})
+
+	t.Run("service-account-token Secret → rejected even if labelled", func(t *testing.T) {
+		saTok := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "s", Namespace: ns,
+				Labels: map[string]string{remoteControlCredentialLabel: "true"}, // even opted-in
+			},
+			Type: corev1.SecretTypeServiceAccountToken,
+			Data: map[string][]byte{"token": []byte("apiserver-cred"), "ca.crt": certPEM},
+		}
+		r := newR(saTok)
+		rc := &ntnv1alpha1.RemoteControlRef{Endpoint: "h:1",
+			TLS: &ntnv1alpha1.RemoteControlTLS{Mode: "tls", SecretName: "s"}}
+		_, tok, err := r.resolveRemoteControlTLS(ctx, ns, rc)
+		if err == nil {
+			t.Fatal("a service-account-token Secret must never be usable as a remote-control credential — its token is an apiserver credential")
+		}
+		if tok != "" {
+			t.Fatalf("the apiserver token must never be returned, got %q", tok)
+		}
+		if !errors.Is(err, errRemoteControlCredentialInvalid) {
+			t.Errorf("a rejected Secret type must be classified permanent (wrap errRemoteControlCredentialInvalid); got %v", err)
+		}
+	})
+
+	t.Run("bootstrap-token Secret → rejected even if labelled", func(t *testing.T) {
+		bootstrap := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "s", Namespace: ns,
+				Labels: map[string]string{remoteControlCredentialLabel: "true"},
+			},
+			Type: secretTypeBootstrapToken,
+			Data: map[string][]byte{"token": []byte("bootstrap-cred"), "ca.crt": certPEM},
+		}
+		r := newR(bootstrap)
+		rc := &ntnv1alpha1.RemoteControlRef{Endpoint: "h:1",
+			TLS: &ntnv1alpha1.RemoteControlTLS{Mode: "tls", SecretName: "s"}}
+		_, tok, err := r.resolveRemoteControlTLS(ctx, ns, rc)
+		if err == nil || tok != "" {
+			t.Fatal("a bootstrap-token Secret must never be usable as a remote-control credential")
+		}
+		if !errors.Is(err, errRemoteControlCredentialInvalid) {
+			t.Errorf("must be classified permanent; got %v", err)
+		}
+	})
+}
+
+// TestEphemerisPushShouldRequeue_RemoteControlConfigIsPermanent pins that a
+// deterministic remoteControl.tls credential error does NOT tight-requeue: it clears
+// only on a Secret/spec edit (which re-triggers reconcile), so hammering the apiserver
+// every minute would be pointless — unlike a transient ProviderPushFailed.
+func TestEphemerisPushShouldRequeue_RemoteControlConfigIsPermanent(t *testing.T) {
+	if ephemerisPushShouldRequeue(ephemerisReasonRemoteControlConfig) {
+		t.Error("RemoteControlConfigInvalid is a permanent config error and must NOT requeue")
+	}
+	if !ephemerisPushShouldRequeue(ephemerisReasonProviderPushFailed) {
+		t.Error("a transient ProviderPushFailed must still requeue (control)")
+	}
 }

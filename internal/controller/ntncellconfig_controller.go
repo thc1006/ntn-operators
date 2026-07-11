@@ -70,6 +70,7 @@ const (
 	ephemerisReasonProviderPushFailed   = "ProviderPushFailed"
 	ephemerisReasonProviderPushRejected = "ProviderPushRejected"
 	ephemerisReasonEphemerisStale       = "EphemerisStale"
+	ephemerisReasonRemoteControlConfig  = "RemoteControlConfigInvalid"
 )
 
 // epochSkewMargin is how far in the future a propagated epoch must be to be worth
@@ -118,6 +119,7 @@ func ephemerisPushShouldRequeue(reason string) bool {
 	case ephemerisReasonRefNotFound,
 		ephemerisReasonPayloadMissing,
 		ephemerisReasonEphemerisStale,
+		ephemerisReasonRemoteControlConfig,
 		ephemerisReasonProviderPushRejected:
 		// These clear only on an external change — a spec edit (generation bump)
 		// or a SatelliteEphemeris refresh (new marker) — both of which re-trigger
@@ -623,7 +625,19 @@ func (r *NTNCellConfigReconciler) pushRuntimeEphemeris(
 	// referenced Secret; nil TLSConfig keeps the plaintext ws:// behavior (N-12).
 	tlsConfig, authToken, tlsErr := r.resolveRemoteControlTLS(ctx, eph.Namespace, spec.Provider.RemoteControl)
 	if tlsErr != nil {
-		return false, marker, newEphemerisPushError(ephemerisReasonProviderPushFailed, tlsErr)
+		// A deterministic credential/config error (wrong Secret type, missing opt-in
+		// label, malformed cert) is PERMANENT — it clears only on a Secret/spec edit,
+		// which re-triggers reconcile, so classify it non-requeuing instead of hammering
+		// the apiserver every minute. A transient Secret read error stays requeuing.
+		reason := ephemerisReasonProviderPushFailed
+		if errors.Is(tlsErr, errRemoteControlCredentialInvalid) {
+			reason = ephemerisReasonRemoteControlConfig
+		}
+		// Log the specific cause for the operator; surface only a uniform message on the
+		// CR (see errRemoteControlCredentialUnavailable — avoids a Secret existence/type
+		// oracle for a principal that can write the CR but not read Secrets).
+		logf.FromContext(ctx).Error(tlsErr, "remoteControl.tls credential could not be resolved", "cell", cc.Name)
+		return false, marker, newEphemerisPushError(reason, errRemoteControlCredentialUnavailable)
 	}
 	target := provider.ResolvedRemoteControl{
 		Endpoint:  spec.Provider.RemoteControl.Endpoint,
@@ -642,13 +656,39 @@ func (r *NTNCellConfigReconciler) pushRuntimeEphemeris(
 	return true, marker, nil
 }
 
+const (
+	// remoteControlCredentialLabel must be set to "true" by the Secret's owner for a
+	// Secret to be usable as a remoteControl.tls credential — an opt-in that prevents
+	// a CR author from redirecting the operator's Secret read at an unrelated Secret.
+	remoteControlCredentialLabel = "ntn.operators.dev/remote-control-credential"
+	// secretTypeBootstrapToken is the k8s bootstrap-token Secret type (no corev1
+	// constant); like a service-account token it is a cluster credential, not a gNB one.
+	secretTypeBootstrapToken = "bootstrap.kubernetes.io/token"
+)
+
+// errRemoteControlCredentialInvalid tags a DETERMINISTIC remoteControl.tls config
+// failure (wrong Secret type, missing opt-in label, malformed cert material). The
+// caller classifies it as permanent — it clears only on a Secret/spec edit (which
+// re-triggers reconcile via generation or the ephemeris fan-out), so it must not
+// tight-requeue like a transient failure would.
+var errRemoteControlCredentialInvalid = errors.New("not a usable remote-control credential")
+
+// errRemoteControlCredentialUnavailable is the UNIFORM, CR-facing message for any
+// remoteControl.tls resolution failure. The specific cause (Secret missing / wrong
+// type / unlabelled / malformed cert) is logged for the operator but never surfaced
+// on the CR condition/event: it would otherwise let a principal who can write the CR
+// but not read Secrets probe Secret existence and type (an oracle).
+var errRemoteControlCredentialUnavailable = errors.New("referenced remote-control credential is unavailable or not authorized")
+
 // resolveRemoteControlTLS builds the TLS config and bearer token for the runtime
 // push from the Secret referenced by remoteControl.tls. It reads the Secret from
 // the NTNCellConfig's OWN namespace (never cross-namespace) and never logs its
-// contents. Returns (nil, "", nil) when TLS is not configured — the caller then
-// dials plaintext ws:// (N-12). Recognized Secret keys: ca.crt (PEM CA to verify
-// the server; omit ⇒ system roots), token (Bearer shared secret; optional), and
-// for mode=mtls tls.crt + tls.key (client certificate).
+// contents. The Secret must be owner-opted-in (label remoteControlCredentialLabel=
+// true) and must not be a Kubernetes API credential (service-account / bootstrap
+// token) — see the confused-deputy note below. Returns (nil, "", nil) when TLS is
+// not configured — the caller then dials plaintext ws:// (N-12). Recognized Secret
+// keys: ca.crt (PEM CA to verify the server; omit ⇒ system roots), token (Bearer
+// shared secret; optional), and for mode=mtls tls.crt + tls.key (client certificate).
 func (r *NTNCellConfigReconciler) resolveRemoteControlTLS(
 	ctx context.Context, namespace string, rc *ntnv1alpha1.RemoteControlRef,
 ) (*tls.Config, string, error) {
@@ -667,6 +707,26 @@ func (r *NTNCellConfigReconciler) resolveRemoteControlTLS(
 	if err := reader.Get(ctx, client.ObjectKey{Namespace: namespace, Name: t.SecretName}, secret); err != nil {
 		return nil, "", fmt.Errorf("reading remoteControl.tls secret %q: %w", t.SecretName, err)
 	}
+	// SECURITY (partial confused-deputy MITIGATION, not an authorization boundary): the
+	// operator reads this Secret with its OWN cluster-wide secrets-get, on behalf of
+	// whoever authored the NTNCellConfig — who may not be able to read Secrets. Two gates
+	// raise the bar against a CR author pointing the operator at an arbitrary Secret and
+	// shipping its contents to a CR-controlled endpoint:
+	//   (1) refuse a Kubernetes API credential — a service-account or bootstrap token
+	//       Secret stores its apiserver token under the same "token" key we read;
+	//   (2) require the Secret's owner to opt it in via a label.
+	// Known LIMITS (a real per-CR/per-endpoint SubjectAccessReview or grant resource is a
+	// tracked follow-up): the opt-in is namespace-scoped — once labelled, ANY NTNCellConfig
+	// in the namespace may use the Secret; a principal with secrets `patch` but not `get`
+	// could add the label to a Secret it cannot read; and the type check does not stop an
+	// Opaque Secret from holding some other bearer token.
+	switch secret.Type {
+	case corev1.SecretTypeServiceAccountToken, secretTypeBootstrapToken:
+		return nil, "", fmt.Errorf("remoteControl.tls secret %q has type %q — a Kubernetes API credential must not be used as a gNB remote-control secret: %w", t.SecretName, secret.Type, errRemoteControlCredentialInvalid)
+	}
+	if secret.Labels[remoteControlCredentialLabel] != "true" {
+		return nil, "", fmt.Errorf("remoteControl.tls secret %q must be labelled %s=true by its owner to be usable as a remote-control credential: %w", t.SecretName, remoteControlCredentialLabel, errRemoteControlCredentialInvalid)
+	}
 
 	cfg := &tls.Config{MinVersion: tls.VersionTLS12}
 	// ServerName verified against the certificate SANs: explicit override, else the
@@ -680,7 +740,7 @@ func (r *NTNCellConfigReconciler) resolveRemoteControlTLS(
 	if ca := secret.Data["ca.crt"]; len(ca) > 0 {
 		pool := x509.NewCertPool()
 		if !pool.AppendCertsFromPEM(ca) {
-			return nil, "", fmt.Errorf("remoteControl.tls secret %q: ca.crt is not valid PEM", t.SecretName)
+			return nil, "", fmt.Errorf("remoteControl.tls secret %q: ca.crt is not valid PEM: %w", t.SecretName, errRemoteControlCredentialInvalid)
 		}
 		cfg.RootCAs = pool
 	}
@@ -688,11 +748,11 @@ func (r *NTNCellConfigReconciler) resolveRemoteControlTLS(
 	if t.Mode == "mtls" {
 		crt, key := secret.Data["tls.crt"], secret.Data["tls.key"]
 		if len(crt) == 0 || len(key) == 0 {
-			return nil, "", fmt.Errorf("remoteControl.tls mode=mtls requires tls.crt and tls.key in secret %q", t.SecretName)
+			return nil, "", fmt.Errorf("remoteControl.tls mode=mtls requires tls.crt and tls.key in secret %q: %w", t.SecretName, errRemoteControlCredentialInvalid)
 		}
 		pair, err := tls.X509KeyPair(crt, key)
 		if err != nil {
-			return nil, "", fmt.Errorf("remoteControl.tls secret %q: invalid client certificate/key: %w", t.SecretName, err)
+			return nil, "", fmt.Errorf("remoteControl.tls secret %q: invalid client certificate/key (%v): %w", t.SecretName, err, errRemoteControlCredentialInvalid)
 		}
 		cfg.Certificates = []tls.Certificate{pair}
 	}

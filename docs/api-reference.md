@@ -1938,7 +1938,15 @@ trust and auth material. Recognized keys: "ca.crt" (PEM CA to verify the
 gNB/proxy server certificate — omit to use the system roots), "token" (the
 shared secret sent as Authorization: Bearer — optional), and, for mode=mtls,
 "tls.crt" + "tls.key" (the client certificate/key). A bare shared secret is
-replayable, so it is only ever sent over the wss:// (TLS) connection.<br/>
+replayable, so it is only ever sent over the wss:// (TLS) connection.
+
+SECURITY: the Secret's owner must opt it in for remote-control use with the label
+"ntn.operators.dev/remote-control-credential: true", and a Kubernetes API
+credential (a service-account or bootstrap-token Secret) is refused. This is a
+mitigation, not a full authorization boundary: the opt-in is namespace-scoped, so
+ANY NTNCellConfig in the namespace may use a labelled Secret. Do not grant
+NTNCellConfig write to principals who should not be able to use every labelled
+remote-control credential in that namespace.<br/>
         </td>
         <td>true</td>
       </tr><tr>
