@@ -6,6 +6,10 @@ type: application
 version: 0.6.0
 appVersion: "0.6.0"
 
+# The CRD validation uses the CEL IP-address library (isIP), available since
+# Kubernetes 1.31; -0 admits vendor/pre-release version strings (e.g. GKE/EKS).
+kubeVersion: ">=1.31.0-0"
+
 keywords:
   - kubernetes
   - operator

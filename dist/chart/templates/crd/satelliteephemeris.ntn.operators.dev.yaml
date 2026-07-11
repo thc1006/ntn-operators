@@ -74,7 +74,9 @@ spec:
                       groundStations is a list of GroundStationLifecycle resource names
                       to compute pass windows against.
                     items:
+                      maxLength: 253
                       type: string
+                    maxItems: 64
                     minItems: 1
                     type: array
                   horizon:
@@ -104,6 +106,7 @@ spec:
                       to track.
                     items:
                       type: integer
+                    maxItems: 512
                     type: array
                 type: object
               source:

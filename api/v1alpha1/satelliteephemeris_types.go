@@ -75,6 +75,7 @@ type SatelliteSelector struct {
 
 	// noradIDs is an explicit list of NORAD catalog IDs to track.
 	// +optional
+	// +kubebuilder:validation:MaxItems=512
 	NoradIDs []int `json:"noradIDs,omitempty"`
 }
 
@@ -83,6 +84,8 @@ type PassPredictionSpec struct {
 	// groundStations is a list of GroundStationLifecycle resource names
 	// to compute pass windows against.
 	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=64
+	// +kubebuilder:validation:items:MaxLength=253
 	GroundStations []string `json:"groundStations"`
 
 	// minElevation is the minimum elevation angle in degrees (string, e.g., "10").

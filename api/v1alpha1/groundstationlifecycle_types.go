@@ -40,6 +40,8 @@ type HardwareSpec struct {
 
 	// bands lists the supported frequency bands (e.g., ["Ka", "Ku", "S"]).
 	// +optional
+	// +kubebuilder:validation:MaxItems=16
+	// +kubebuilder:validation:items:MaxLength=16
 	Bands []string `json:"bands,omitempty"`
 }
 

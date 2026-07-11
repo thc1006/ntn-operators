@@ -18,10 +18,13 @@ package controller
 
 import (
 	"fmt"
+	"strings"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	ntnv1alpha1 "github.com/thc1006/ntn-operators/api/v1alpha1"
 )
@@ -68,5 +71,90 @@ var _ = Describe("NTNCellConfig remoteControl.endpoint admission (CEL)", func() 
 		Entry("bracketed hex that is not a valid IP", "[fff]:443", false),
 		Entry("missing port", "127.0.0.1", false),
 		Entry("scheme included (must be bare host:port)", "ws://127.0.0.1:8001", false),
+		Entry("out-of-range IPv4 (all-numeric host must be a real IPv4)", "999.999.999.999:8001", false),
+		Entry("IPv4 octet over 255", "300.1.1.1:443", false),
+		Entry("double-dot hostname", "foo..bar:8001", false),
+		Entry("dashes-only host", "---:8001", false),
+		Entry("underscore host (not DNS-1123)", "_host:8001", false),
+	)
+})
+
+// Real admission-time boundary checks for the MaxLength ratchets — one accept-at-limit
+// / reject-over-limit pair per limit category, against the envtest API server.
+var _ = Describe("CRD string-length admission (MaxLength boundaries)", func() {
+	rep := func(c string, n int) string { return strings.Repeat(c, n) }
+	seq := 0
+	nm := func(p string) string { seq++; return fmt.Sprintf("%s-%d", p, seq) }
+	assertAdmit := func(err error, accepted bool, obj client.Object, what string) {
+		if accepted {
+			Expect(err).NotTo(HaveOccurred(), "%s should be admitted", what)
+			DeferCleanup(func() { _ = k8sClient.Delete(ctx, obj) })
+		} else {
+			Expect(err).To(HaveOccurred(), "%s should be rejected", what)
+		}
+	}
+
+	DescribeTable("NTNCellConfig provider.namespace (limit 63)",
+		func(nsLen int, ok bool) {
+			cc := &ntnv1alpha1.NTNCellConfig{
+				ObjectMeta: metav1.ObjectMeta{Name: nm("adm-ns"), Namespace: "default"},
+				Spec: ntnv1alpha1.NTNCellConfigSpec{
+					Provider: ntnv1alpha1.ProviderRef{Type: "ocudu", Namespace: rep("a", nsLen)},
+					NTN:      ntnv1alpha1.NTNParams{EphemerisECEF: &ntnv1alpha1.EphemerisECEF{PosX: 1, PosY: 2, PosZ: 3}},
+				},
+			}
+			assertAdmit(k8sClient.Create(ctx, cc), ok, cc, fmt.Sprintf("namespace len %d", nsLen))
+		},
+		Entry("at 63", 63, true),
+		Entry("over at 64", 64, false),
+	)
+
+	mkEph := func(mutate func(*ntnv1alpha1.SatelliteEphemeris)) *ntnv1alpha1.SatelliteEphemeris {
+		eph := &ntnv1alpha1.SatelliteEphemeris{
+			ObjectMeta: metav1.ObjectMeta{Name: nm("adm-eph"), Namespace: "default"},
+			Spec: ntnv1alpha1.SatelliteEphemerisSpec{
+				Source: ntnv1alpha1.EphemerisSource{
+					Type: "CelesTrak", URL: "https://celestrak.org/x",
+					RefreshInterval: metav1.Duration{Duration: 4 * time.Hour},
+				},
+			},
+		}
+		mutate(eph)
+		return eph
+	}
+
+	DescribeTable("SatelliteEphemeris source.url (limit 2048)",
+		func(urlLen int, ok bool) {
+			eph := mkEph(func(e *ntnv1alpha1.SatelliteEphemeris) {
+				e.Spec.Source.URL = "https://" + rep("a", urlLen-len("https://"))
+			})
+			assertAdmit(k8sClient.Create(ctx, eph), ok, eph, fmt.Sprintf("url len %d", urlLen))
+		},
+		Entry("at 2048", 2048, true),
+		Entry("over at 2049", 2049, false),
+	)
+
+	DescribeTable("SatelliteEphemeris credentials.name (limit 253)",
+		func(nameLen int, ok bool) {
+			eph := mkEph(func(e *ntnv1alpha1.SatelliteEphemeris) {
+				e.Spec.Source.Credentials = &ntnv1alpha1.SecretReference{Name: rep("a", nameLen)}
+			})
+			assertAdmit(k8sClient.Create(ctx, eph), ok, eph, fmt.Sprintf("cred name len %d", nameLen))
+		},
+		Entry("at 253", 253, true),
+		Entry("over at 254", 254, false),
+	)
+
+	DescribeTable("SatelliteEphemeris minElevation numeric string (limit 32)",
+		func(mLen int, ok bool) {
+			eph := mkEph(func(e *ntnv1alpha1.SatelliteEphemeris) {
+				e.Spec.PassPrediction = &ntnv1alpha1.PassPredictionSpec{
+					GroundStations: []string{"gs-1"}, MinElevation: rep("1", mLen),
+				}
+			})
+			assertAdmit(k8sClient.Create(ctx, eph), ok, eph, fmt.Sprintf("minElevation len %d", mLen))
+		},
+		Entry("at 32", 32, true),
+		Entry("over at 33", 33, false),
 	)
 })
