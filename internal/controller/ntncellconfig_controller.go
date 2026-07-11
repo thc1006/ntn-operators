@@ -484,7 +484,7 @@ func (r *NTNCellConfigReconciler) pushEphemerisUpdateIfNeeded(
 		)
 	}
 
-	if err := prov.PushEphemerisUpdate(ctx, cc.Name, spec.Provider.Namespace, update); err != nil {
+	if err := prov.PushEphemerisUpdate(ctx, cc, update); err != nil {
 		return false, marker, newEphemerisPushError(
 			ephemerisReasonProviderPushFailed,
 			fmt.Errorf("provider PushEphemerisUpdate: %w", err),

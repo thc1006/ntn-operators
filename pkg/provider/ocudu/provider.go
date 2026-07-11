@@ -84,7 +84,7 @@ func isOperatorManaged(cm *corev1.ConfigMap) bool {
 // controller-owned by owner (UID match via metav1.IsControlledBy) — a same-named
 // ConfigMap the operator does not own is left untouched. Called by the finalizer
 // during CR deletion.
-func (p *Provider) Cleanup(ctx context.Context, owner client.Object) error {
+func (p *Provider) Cleanup(ctx context.Context, owner *ntnv1alpha1.NTNCellConfig) error {
 	cm := &corev1.ConfigMap{}
 	key := types.NamespacedName{Name: ConfigMapNameFor(owner.GetName()), Namespace: owner.GetNamespace()}
 	if err := p.client.Get(ctx, key, cm); err != nil {
@@ -107,13 +107,20 @@ func NewProvider(c client.Client) *Provider {
 // (or adopts an unowned but operator-labeled one from a pre-atomic-ref version),
 // returning ErrConfigMapNotOwned for a foreign object.
 func (p *Provider) ApplyCellConfig(
-	ctx context.Context, owner client.Object, spec *ntnv1alpha1.NTNCellConfigSpec, scheme *runtime.Scheme,
+	ctx context.Context, owner *ntnv1alpha1.NTNCellConfig, spec *ntnv1alpha1.NTNCellConfigSpec, scheme *runtime.Scheme,
 ) error {
 	if spec == nil {
 		return fmt.Errorf("spec must not be nil")
 	}
 	if spec.Provider.Namespace == "" {
 		return fmt.Errorf("provider namespace must be set")
+	}
+	// Defense-in-depth: the ConfigMap is created in spec.Provider.Namespace with a
+	// controller reference to owner, which Kubernetes forbids across namespaces — so
+	// require them equal here rather than trusting the caller to have aligned them.
+	if owner.GetNamespace() != spec.Provider.Namespace {
+		return fmt.Errorf("owner namespace %q must equal provider namespace %q",
+			owner.GetNamespace(), spec.Provider.Namespace)
 	}
 
 	yamlData, err := GenerateConfig(spec)
@@ -222,10 +229,10 @@ func (p *Provider) GetCellStatus(
 // Phase 1 implementation: reads the current config, replaces the ephemeris
 // data, and writes it back. Future Phase 2 will use OCUDU's WebSocket API.
 func (p *Provider) PushEphemerisUpdate(
-	ctx context.Context, crName, namespace string, update provider.EphemerisUpdate,
+	ctx context.Context, owner *ntnv1alpha1.NTNCellConfig, update provider.EphemerisUpdate,
 ) error {
-	if namespace == "" {
-		return fmt.Errorf("namespace must not be empty")
+	if owner.GetNamespace() == "" {
+		return fmt.Errorf("owner namespace must not be empty")
 	}
 	if update.ECEF == nil && update.Orbital == nil {
 		return fmt.Errorf("either ECEF or Orbital must be set")
@@ -234,6 +241,8 @@ func (p *Provider) PushEphemerisUpdate(
 		return fmt.Errorf("ECEF and Orbital are mutually exclusive")
 	}
 
+	crName := owner.GetName()
+	namespace := owner.GetNamespace()
 	cm := &corev1.ConfigMap{}
 	key := types.NamespacedName{
 		Name:      ConfigMapNameFor(crName),
@@ -242,6 +251,12 @@ func (p *Provider) PushEphemerisUpdate(
 	if err := p.client.Get(ctx, key, cm); err != nil {
 		return fmt.Errorf("reading ConfigMap %s/%s: %w",
 			namespace, ConfigMapNameFor(crName), err)
+	}
+	// Re-verify ownership before mutating: never rewrite a ConfigMap the operator
+	// does not control — e.g. a same-named foreign object created between the
+	// ApplyCellConfig that made this CM and this bootstrap ephemeris rewrite.
+	if !metav1.IsControlledBy(cm, owner) {
+		return fmt.Errorf("%w: %s/%s", provider.ErrConfigMapNotOwned, namespace, ConfigMapNameFor(crName))
 	}
 
 	yamlContent, ok := cm.Data["geo_ntn.yml"]

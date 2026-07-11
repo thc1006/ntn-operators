@@ -21,7 +21,6 @@ import (
 	"sync"
 
 	"k8s.io/apimachinery/pkg/runtime"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	ntnv1alpha1 "github.com/thc1006/ntn-operators/api/v1alpha1"
 )
@@ -50,7 +49,7 @@ type MockProvider struct {
 }
 
 func (m *MockProvider) ApplyCellConfig(
-	_ context.Context, _ client.Object, spec *ntnv1alpha1.NTNCellConfigSpec, _ *runtime.Scheme,
+	_ context.Context, _ *ntnv1alpha1.NTNCellConfig, spec *ntnv1alpha1.NTNCellConfigSpec, _ *runtime.Scheme,
 ) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -69,7 +68,9 @@ func (m *MockProvider) GetCellStatus(_ context.Context, _, _ string) (*ntnv1alph
 	return &ntnv1alpha1.NTNCellConfigStatus{}, m.StatusErr
 }
 
-func (m *MockProvider) PushEphemerisUpdate(_ context.Context, _, _ string, update EphemerisUpdate) error {
+func (m *MockProvider) PushEphemerisUpdate(
+	_ context.Context, _ *ntnv1alpha1.NTNCellConfig, update EphemerisUpdate,
+) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.EphemerisCalls++
@@ -86,7 +87,7 @@ func (m *MockProvider) PushRuntimeUpdate(_ context.Context, target ResolvedRemot
 	return m.RuntimeErr
 }
 
-func (m *MockProvider) Cleanup(_ context.Context, _ client.Object) error {
+func (m *MockProvider) Cleanup(_ context.Context, _ *ntnv1alpha1.NTNCellConfig) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.CleanupCalls++

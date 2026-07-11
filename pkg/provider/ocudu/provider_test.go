@@ -451,7 +451,7 @@ func TestPushEphemerisUpdate_ECEF(t *testing.T) {
 			VelX: 10, VelY: 20, VelZ: 30,
 		},
 	}
-	if err := p.PushEphemerisUpdate(ctx, "test-cr", "ntn-system", update); err != nil {
+	if err := p.PushEphemerisUpdate(ctx, ownerFor("test-cr"), update); err != nil {
 		t.Fatalf("PushEphemerisUpdate: %v", err)
 	}
 
@@ -499,7 +499,7 @@ func TestPushEphemerisUpdate_Orbital(t *testing.T) {
 			MeanAnomaly:    100000,
 		},
 	}
-	if err := p.PushEphemerisUpdate(ctx, "test-cr", "ntn-system", update); err != nil {
+	if err := p.PushEphemerisUpdate(ctx, ownerFor("test-cr"), update); err != nil {
 		t.Fatalf("PushEphemerisUpdate: %v", err)
 	}
 
@@ -527,7 +527,7 @@ func TestPushEphemerisUpdate_Orbital(t *testing.T) {
 func TestPushEphemerisUpdate_BothSet(t *testing.T) {
 	p := newTestProvider(t)
 	err := p.PushEphemerisUpdate(
-		context.Background(), "cr", "ns",
+		context.Background(), ownerFor("cr"),
 		provider.EphemerisUpdate{
 			ECEF:    &ntnv1alpha1.EphemerisECEF{PosX: 1},
 			Orbital: &ntnv1alpha1.EphemerisOrbital{SemiMajorAxis: 1},
@@ -545,7 +545,7 @@ func TestPushEphemerisUpdate_NoConfigMap(t *testing.T) {
 	update := provider.EphemerisUpdate{
 		ECEF: &ntnv1alpha1.EphemerisECEF{PosX: 1},
 	}
-	err := p.PushEphemerisUpdate(ctx, "nonexistent", "ntn-system", update)
+	err := p.PushEphemerisUpdate(ctx, ownerFor("nonexistent"), update)
 	if err == nil {
 		t.Fatal("expected error when ConfigMap doesn't exist")
 	}
@@ -554,7 +554,7 @@ func TestPushEphemerisUpdate_NoConfigMap(t *testing.T) {
 func TestPushEphemerisUpdate_NeitherSet(t *testing.T) {
 	p := newTestProvider(t)
 	err := p.PushEphemerisUpdate(
-		context.Background(), "cr", "ns", provider.EphemerisUpdate{},
+		context.Background(), ownerFor("cr"), provider.EphemerisUpdate{},
 	)
 	if err == nil {
 		t.Fatal("expected error when neither ECEF nor Orbital is set")
@@ -588,6 +588,10 @@ cell_cfg:
 		},
 		Data: map[string]string{"geo_ntn.yml": yamlWithComments},
 	}
+	// The push path re-verifies ownership, so the seeded ConfigMap must be owned.
+	if err := controllerutil.SetControllerReference(ownerFor("test"), cm, scheme); err != nil {
+		t.Fatal(err)
+	}
 	ns := &corev1.Namespace{
 		ObjectMeta: metav1.ObjectMeta{Name: "ntn-system"},
 	}
@@ -602,7 +606,7 @@ cell_cfg:
 		},
 	}
 	err := p.PushEphemerisUpdate(
-		context.Background(), "test", "ntn-system", update,
+		context.Background(), ownerFor("test"), update,
 	)
 	if err != nil {
 		t.Fatalf("PushEphemerisUpdate: %v", err)
@@ -647,6 +651,10 @@ func TestPushEphemerisUpdate_MissingGeoNtn(t *testing.T) {
 		},
 		Data: map[string]string{}, // missing geo_ntn.yml
 	}
+	// The push path re-verifies ownership, so the seeded ConfigMap must be owned.
+	if err := controllerutil.SetControllerReference(ownerFor("test"), cm, scheme); err != nil {
+		t.Fatal(err)
+	}
 	ns := &corev1.Namespace{
 		ObjectMeta: metav1.ObjectMeta{Name: "ntn-system"},
 	}
@@ -658,12 +666,26 @@ func TestPushEphemerisUpdate_MissingGeoNtn(t *testing.T) {
 		ECEF: &ntnv1alpha1.EphemerisECEF{PosX: 1, PosY: 2, PosZ: 3},
 	}
 	err := p.PushEphemerisUpdate(
-		context.Background(), "test", "ntn-system", update,
+		context.Background(), ownerFor("test"), update,
 	)
 	if err == nil {
 		t.Fatal("expected error for missing geo_ntn.yml")
 	}
 	if !contains(err.Error(), "missing geo_ntn.yml") {
 		t.Errorf("expected 'missing geo_ntn.yml' in error, got: %v", err)
+	}
+}
+
+// PushEphemerisUpdate must refuse to rewrite a same-named ConfigMap owned by a
+// different CR (defense-in-depth for a foreign object created between apply and
+// push), mirroring ApplyCellConfig/Cleanup.
+func TestPushEphemerisUpdate_RefusesForeignConfigMap(t *testing.T) {
+	other := ownerFor("cell-a")
+	other.UID = "different-uid"
+	p := newTestProviderWith(t, seedConfigMap(t, true, other))
+	err := p.PushEphemerisUpdate(context.Background(), ownerFor("cell-a"),
+		provider.EphemerisUpdate{ECEF: &ntnv1alpha1.EphemerisECEF{PosX: 9, PosY: 9, PosZ: 9}})
+	if !errors.Is(err, provider.ErrConfigMapNotOwned) {
+		t.Fatalf("want ErrConfigMapNotOwned, got %v", err)
 	}
 }

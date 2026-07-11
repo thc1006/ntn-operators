@@ -22,7 +22,6 @@ import (
 	"errors"
 
 	"k8s.io/apimachinery/pkg/runtime"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	ntnv1alpha1 "github.com/thc1006/ntn-operators/api/v1alpha1"
 )
@@ -116,15 +115,17 @@ type NTNProvider interface {
 	// with the CR). An existing artifact is overwritten only when it is already
 	// controller-owned by owner; otherwise ErrConfigMapNotOwned is returned.
 	ApplyCellConfig(
-		ctx context.Context, owner client.Object, spec *ntnv1alpha1.NTNCellConfigSpec, scheme *runtime.Scheme,
+		ctx context.Context, owner *ntnv1alpha1.NTNCellConfig, spec *ntnv1alpha1.NTNCellConfigSpec, scheme *runtime.Scheme,
 	) error
 
 	// GetCellStatus returns the current applied configuration status.
 	GetCellStatus(ctx context.Context, crName, namespace string) (*ntnv1alpha1.NTNCellConfigStatus, error)
 
 	// PushEphemerisUpdate pushes fresh ephemeris data to the backend by rewriting
-	// the bootstrap ConfigMap (the gNB must reload). Kept as the baseline path.
-	PushEphemerisUpdate(ctx context.Context, crName, namespace string, update EphemerisUpdate) error
+	// the bootstrap ConfigMap (the gNB must reload). Kept as the baseline path. It
+	// re-verifies the ConfigMap is controller-owned by owner before mutating it, so
+	// it never rewrites a foreign object (ErrConfigMapNotOwned if it is not).
+	PushEphemerisUpdate(ctx context.Context, owner *ntnv1alpha1.NTNCellConfig, update EphemerisUpdate) error
 
 	// PushRuntimeUpdate pushes a runtime NTN config update to the gNB's
 	// remote-control WebSocket (OCUDU ntn_config_update, MR !798) — a live update
@@ -137,5 +138,5 @@ type NTNProvider interface {
 	// controller-owned by owner (UID match via metav1.IsControlledBy), so a
 	// same-named artifact the operator does not own is left untouched. Returns nil
 	// if there is nothing to clean up.
-	Cleanup(ctx context.Context, owner client.Object) error
+	Cleanup(ctx context.Context, owner *ntnv1alpha1.NTNCellConfig) error
 }
