@@ -343,6 +343,13 @@ Import `config/grafana/ntn-operators-dashboard.json` into your Grafana instance 
 
 See [docs/api-reference.md](docs/api-reference.md) for the complete CRD field reference.
 
+## GitOps (Argo CD / Flux)
+
+The operators coexist cleanly with Argo CD and Flux: they never write `.spec`, and
+derived state lives in `.status`. See [docs/gitops.md](docs/gitops.md) for
+drift-detection setup (server-side diff/apply) and the ownership boundary for
+operator-generated artifacts (provider ConfigMaps, runtime gNB pushes).
+
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for development guidelines.

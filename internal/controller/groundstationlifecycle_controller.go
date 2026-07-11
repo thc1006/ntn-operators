@@ -127,21 +127,23 @@ func (r *GroundStationLifecycleReconciler) Reconcile(ctx context.Context, req ct
 	r.reconcileHealth(ctx, gs, node, err)
 
 	// Step 4: Check firmware OTA (skip when node lookup failed to avoid
-	// clearing firmware status on transient API errors).
+	// clearing firmware status on transient API errors). Firmware events are
+	// queued and emitted post-persist (Step 8).
+	var pending []deferredEvent
 	if err == nil {
-		r.reconcileFirmware(ctx, gs, node)
+		r.reconcileFirmware(ctx, gs, node, &pending)
 	}
 
-	// Step 5: Record events for phase transitions.
+	// Step 5: Queue a phase-transition event. It is emitted post-persist (Step 8)
+	// so a rolled-back status write never announces a phase change that did not
+	// become durable. The previousPhase compare keeps it one event per transition.
 	if previousPhase != gs.Status.Phase {
-		eventType := "Normal"
+		eventType := corev1.EventTypeNormal
 		if gs.Status.Phase == ntnv1alpha1.PhaseOffline || gs.Status.Phase == ntnv1alpha1.PhaseDegraded {
-			eventType = "Warning"
+			eventType = corev1.EventTypeWarning
 		}
-		if r.Recorder != nil {
-			r.Recorder.Eventf(gs, nil, eventType, "PhaseChanged", "PhaseChanged",
-				"Phase transitioned from %s to %s", previousPhase, gs.Status.Phase)
-		}
+		pending = append(pending, deferredEvent{eventType, "PhaseChanged",
+			fmt.Sprintf("Phase transitioned from %s to %s", previousPhase, gs.Status.Phase)})
 	}
 
 	// Step 6: Update health metrics (keyed by namespace+station — see #183; the
@@ -169,6 +171,15 @@ func (r *GroundStationLifecycleReconciler) Reconcile(ctx context.Context, req ct
 	// Step 7: Update status.
 	if err := r.Status().Update(ctx, gs); err != nil {
 		return ctrl.Result{}, err
+	}
+
+	// Step 8: Emit queued events only after the status persisted (WO-20 / N-1): a
+	// discarded status write must not announce a phase/firmware transition it never
+	// recorded, then re-announce it on the retry.
+	if r.Recorder != nil {
+		for _, e := range pending {
+			r.Recorder.Eventf(gs, nil, e.eventType, e.reason, e.reason, "%s", e.message)
+		}
 	}
 
 	log.Info("Reconciled ground station", "phase", gs.Status.Phase)
@@ -388,6 +399,7 @@ func (r *GroundStationLifecycleReconciler) reconcileFirmware(
 	ctx context.Context,
 	gs *ntnv1alpha1.GroundStationLifecycle,
 	node *corev1.Node,
+	pending *[]deferredEvent,
 ) {
 	log := logf.FromContext(ctx)
 	if gs.Spec.Firmware == nil {
@@ -448,10 +460,8 @@ func (r *GroundStationLifecycleReconciler) reconcileFirmware(
 			})
 			gs.Status.Phase = ntnv1alpha1.PhaseDegraded
 			gs.Status.FirmwareUpdateStarted = nil
-			if r.Recorder != nil {
-				r.Recorder.Eventf(gs, nil, "Warning", "FirmwareUpdateTimedOut", "FirmwareUpdateTimedOut",
-					"Firmware update started at %s timed out after 30m", startedAt)
-			}
+			*pending = append(*pending, deferredEvent{corev1.EventTypeWarning, "FirmwareUpdateTimedOut",
+				fmt.Sprintf("Firmware update started at %s timed out after 30m", startedAt)})
 			return
 		}
 	}
@@ -487,10 +497,8 @@ func (r *GroundStationLifecycleReconciler) reconcileFirmware(
 				ObservedGeneration: gs.Generation,
 			})
 			gs.Status.Phase = ntnv1alpha1.PhaseRunning
-			if r.Recorder != nil {
-				r.Recorder.Eventf(gs, nil, "Normal", "FirmwareUpdated", "FirmwareUpdated",
-					"Firmware updated to %s", availableVersion)
-			}
+			*pending = append(*pending, deferredEvent{corev1.EventTypeNormal, "FirmwareUpdated",
+				fmt.Sprintf("Firmware updated to %s", availableVersion)})
 			return
 		}
 		// Node agent hasn't reported completion yet — stay in Updating.
@@ -519,10 +527,8 @@ func (r *GroundStationLifecycleReconciler) reconcileFirmware(
 		now := r.now()
 		gs.Status.Phase = ntnv1alpha1.PhaseUpdating
 		gs.Status.FirmwareUpdateStarted = &metav1.Time{Time: now}
-		if r.Recorder != nil {
-			r.Recorder.Eventf(gs, nil, "Normal", "FirmwareUpdateStarted", "FirmwareUpdateStarted",
-				"Starting firmware update from %s to %s", currentVersion, availableVersion)
-		}
+		*pending = append(*pending, deferredEvent{corev1.EventTypeNormal, "FirmwareUpdateStarted",
+			fmt.Sprintf("Starting firmware update from %s to %s", currentVersion, availableVersion)})
 	}
 }
 

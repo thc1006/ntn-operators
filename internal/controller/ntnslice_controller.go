@@ -26,6 +26,7 @@ import (
 	"sync"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -192,7 +193,11 @@ func (r *NTNSliceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	// is replaced by EvaluateSafeHold, which holds the current path but still honors
 	// the orbital signal from Step 3) — findings.md B-4 / I-8. readPathQuality never
 	// early-returns on a metrics failure, so Step 3's orbital check always runs.
-	metrics, qualityReliable := r.readPathQuality(ctx, ns, now)
+	// Events queued by the quality/trigger helpers are emitted only after the status
+	// write persists (WO-20 / N-1), so a rolled-back Status().Update never announces
+	// (then re-announces on retry) a transition that did not become durable.
+	var pending []deferredEvent
+	metrics, qualityReliable := r.readPathQuality(ctx, ns, now, &pending)
 
 	// Step 3: Check satellite availability via SatelliteEphemeris. satelliteKnown is
 	// false on a transient ephemeris read error — availability is unknown and the
@@ -226,7 +231,7 @@ func (r *NTNSliceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		// I-10: surface any trigger whose metric has no configured source — it is
 		// armed-but-dead (never fires against the healthy placeholder). Only
 		// meaningful once metrics were actually read (qualityReliable).
-		r.reportInertTriggers(ns, slice.InertTriggers(ns.Spec.FailoverPolicy.Triggers, metrics))
+		r.reportInertTriggers(ns, slice.InertTriggers(ns.Spec.FailoverPolicy.Triggers, metrics), &pending)
 	}
 
 	// Step 4: Evaluate the failover decision. With reliable metrics the full
@@ -333,16 +338,8 @@ func (r *NTNSliceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 			"from_path": previousPath, "to_path": string(result.TargetPath),
 		}
 		log.Info("Failover triggered", "from", previousPath, "to", result.TargetPath, "reason", result.Reason)
-		if r.Recorder != nil {
-			r.Recorder.Eventf(ns, nil, "Warning", "FailoverTriggered", "FailoverTriggered",
-				"Failover from %s to %s: %s", previousPath, result.TargetPath, result.Reason)
-		}
 	case slice.DecisionSwitchback:
 		log.Info("Switchback", "from", previousPath, "to", result.TargetPath, "reason", result.Reason)
-		if r.Recorder != nil {
-			r.Recorder.Eventf(ns, nil, "Normal", "Switchback", "Switchback",
-				"Switched back from %s to %s: %s", previousPath, result.TargetPath, result.Reason)
-		}
 	case slice.DecisionStay:
 		// No action needed.
 	}
@@ -388,6 +385,28 @@ func (r *NTNSliceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	// status.FailoverCount.
 	if failoverLabels != nil {
 		ntnmetrics.FailoverTotal.With(failoverLabels).Inc()
+	}
+
+	// Emit the decision event only after the status write persisted (same discipline
+	// as the FailoverTotal counter above): a conflicting/stale reconcile that
+	// discards its status update must not announce a failover/switchback it never
+	// recorded, then re-announce it on retry. The Failover/Switchback decision is
+	// itself one-per-transition (steady reconciles return Stay), so it needs no extra
+	// condition gate.
+	if r.Recorder != nil {
+		switch result.Decision {
+		case slice.DecisionFailover:
+			r.Recorder.Eventf(ns, nil, corev1.EventTypeWarning, "FailoverTriggered", "FailoverTriggered",
+				"Failover from %s to %s: %s", previousPath, result.TargetPath, result.Reason)
+		case slice.DecisionSwitchback:
+			r.Recorder.Eventf(ns, nil, corev1.EventTypeNormal, "Switchback", "Switchback",
+				"Switched back from %s to %s: %s", previousPath, result.TargetPath, result.Reason)
+		}
+		// Flush the quality/trigger events queued earlier this reconcile, also only
+		// after the status persisted (WO-20 / N-1).
+		for _, e := range pending {
+			r.Recorder.Eventf(ns, nil, e.eventType, e.reason, e.reason, "%s", e.message)
+		}
 	}
 
 	return ctrl.Result{RequeueAfter: sliceRequeueInterval}, nil
@@ -463,7 +482,7 @@ func (r *NTNSliceReconciler) applyBillingStatus(ns *ntnv1alpha1.NTNSlice, active
 // the degraded conditions and returns qualityReliable=false so the caller fails
 // static (findings.md B-4/I-8). It mutates conditions on ns in memory; the caller
 // persists them once at the end of the reconcile.
-func (r *NTNSliceReconciler) readPathQuality(ctx context.Context, ns *ntnv1alpha1.NTNSlice, now time.Time) (slice.Metrics, bool) {
+func (r *NTNSliceReconciler) readPathQuality(ctx context.Context, ns *ntnv1alpha1.NTNSlice, now time.Time, pending *[]deferredEvent) (slice.Metrics, bool) {
 	log := logf.FromContext(ctx)
 
 	reader, err := r.readerProvider().For(ns)
@@ -490,8 +509,12 @@ func (r *NTNSliceReconciler) readPathQuality(ctx context.Context, ns *ntnv1alpha
 	}
 
 	// Fresh read: record freshness. The stale Event is emitted only on the
-	// transition into stale (one event per outage, not one per interval).
-	prevStale := meta.FindStatusCondition(ns.Status.Conditions, ntnv1alpha1.ConditionMetricsStale)
+	// transition into stale (one event per outage, not one per interval). Snapshot
+	// the prior state as a VALUE before mutating — meta.FindStatusCondition returns a
+	// pointer INTO the slice that SetStatusCondition then mutates in place, so a
+	// pointer read after the write would always see True and miss every False->True
+	// (fresh->stale) transition.
+	wasStale := meta.IsStatusConditionTrue(ns.Status.Conditions, ntnv1alpha1.ConditionMetricsStale)
 	if !readResult.Stale {
 		meta.SetStatusCondition(&ns.Status.Conditions, metav1.Condition{
 			Type:               ntnv1alpha1.ConditionMetricsStale,
@@ -513,9 +536,9 @@ func (r *NTNSliceReconciler) readPathQuality(ctx context.Context, ns *ntnv1alpha
 		Message:            fmt.Sprintf("Using stale metrics last observed at %s (age %s)", readResult.LastFreshAt.Format(time.RFC3339), age.Round(time.Second)),
 		ObservedGeneration: ns.Generation,
 	})
-	if r.Recorder != nil && (prevStale == nil || prevStale.Status != metav1.ConditionTrue) {
-		r.Recorder.Eventf(ns, nil, "Warning", "MetricsStale", "MetricsStale",
-			"Using stale metrics last observed at %s", readResult.LastFreshAt.Format(time.RFC3339))
+	if !wasStale {
+		*pending = append(*pending, deferredEvent{corev1.EventTypeWarning, "MetricsStale",
+			fmt.Sprintf("Using stale metrics last observed at %s", readResult.LastFreshAt.Format(time.RFC3339))})
 	}
 	if age <= metricsMaxStaleness {
 		// Stale but within the freshness bound — still usable for a decision.
@@ -562,12 +585,18 @@ func (r *NTNSliceReconciler) setMetricsDegraded(ns *ntnv1alpha1.NTNSlice, reason
 	})
 }
 
-// reportInertTriggers sets the TriggersReady condition and, only on the first
-// transition into the not-ready state, emits a Warning event listing the inert
-// triggers — those whose metric has no configured source and can never fire
-// (findings.md I-10). True/AllTriggersSourced otherwise. The transition gate keeps
-// the event stream quiet across steady reconciles.
-func (r *NTNSliceReconciler) reportInertTriggers(ns *ntnv1alpha1.NTNSlice, inert []string) {
+// reportInertTriggers sets the TriggersReady condition and, once per inert EPISODE,
+// emits a Warning event listing the inert triggers — those whose metric has no
+// configured source and can never fire (findings.md I-10). True/AllTriggersSourced
+// otherwise. The episode gate keeps the event stream quiet across steady reconciles.
+//
+// The gate is conditionEpisodeChanged (Status/Reason/Generation), not a bare
+// into-False transition, so a NEW spec generation whose inert set changed — still
+// False/InertTriggers but a higher generation, e.g. one inert trigger swapped for
+// another — re-warns once, matching the generation-aware failure-event policy the
+// other conditions use. The message (the inert-trigger list) is deliberately outside
+// the gate: it varies per spec but does not by itself begin a new episode.
+func (r *NTNSliceReconciler) reportInertTriggers(ns *ntnv1alpha1.NTNSlice, inert []string, pending *[]deferredEvent) {
 	if len(inert) == 0 {
 		meta.SetStatusCondition(&ns.Status.Conditions, metav1.Condition{
 			Type:               ntnv1alpha1.ConditionTriggersReady,
@@ -578,8 +607,10 @@ func (r *NTNSliceReconciler) reportInertTriggers(ns *ntnv1alpha1.NTNSlice, inert
 		})
 		return
 	}
-	firstTransition := !meta.IsStatusConditionPresentAndEqual(
-		ns.Status.Conditions, ntnv1alpha1.ConditionTriggersReady, metav1.ConditionFalse)
+	// Evaluate the episode BEFORE SetStatusCondition mutates the slice element in place.
+	episode := conditionEpisodeChanged(
+		meta.FindStatusCondition(ns.Status.Conditions, ntnv1alpha1.ConditionTriggersReady),
+		metav1.ConditionFalse, "InertTriggers", ns.Generation)
 	msg := fmt.Sprintf("failover triggers reference metrics with no configured source and will never fire: %s",
 		strings.Join(inert, "; "))
 	meta.SetStatusCondition(&ns.Status.Conditions, metav1.Condition{
@@ -589,8 +620,8 @@ func (r *NTNSliceReconciler) reportInertTriggers(ns *ntnv1alpha1.NTNSlice, inert
 		Message:            msg,
 		ObservedGeneration: ns.Generation,
 	})
-	if firstTransition && r.Recorder != nil {
-		r.Recorder.Eventf(ns, nil, "Warning", "InertTriggers", "InertTriggers", "%s", msg)
+	if episode {
+		*pending = append(*pending, deferredEvent{corev1.EventTypeWarning, "InertTriggers", msg})
 	}
 }
 

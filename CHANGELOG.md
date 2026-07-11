@@ -7,8 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`RefreshIntervalClamped` condition on `SatelliteEphemeris`.** Surfaces whether
+  `spec.source.refreshInterval` was clamped into the supported `[2h, 24h]` range:
+  `True` (reason `BelowMinimum`/`AboveMaximum`) when clamped, `False`
+  (`WithinBounds`) when the configured interval is used as-is. The controller always
+  sets it explicitly, so an absent condition means "not yet reconciled" (Unknown),
+  distinct from a `False`.
+
 ### Changed
 
+- **Controller event hygiene.** Success and state-transition Events are emitted
+  after the reconcile's durable status write, and failure Warnings are episode-gated
+  on a condition's status/reason/observedGeneration rather than fired every reconcile,
+  so a stuck or churning reconcile no longer floods the Event stream. (One documented
+  exception: `RefreshIntervalClamped` is emitted pre-persist because it is a
+  deterministic function of the spec, and may therefore duplicate after a status
+  conflict.) A controller never writes a CR's `.spec` (only `.status` and finalizers);
+  GitOps posture is documented in [`docs/gitops.md`](docs/gitops.md).
 - **Validation tightening (may reject previously-accepted values).** Every
   free-form spec string now carries a `maxLength` and every unbounded list a
   `maxItems`, so an over-long or unbounded value is refused at admission instead
@@ -39,6 +56,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The field remains accepted in `v1alpha1`; removal is deferred to a future
   versioned API migration (conversion + stored-object migration), tracked as a
   separate issue — a version rename alone does not safely drop the data.
+
+### Fixed
+
+- **`ntn_operators_ephemeris_push_errors_total` now counts every push failure**,
+  not once per failure episode. The shipped `NTNEphemerisPushFailing` alert is
+  `increase(...[15m]) > 0 for 15m`, which only keeps firing while the counter keeps
+  advancing; counting once per episode let the alert resolve mid-outage while a
+  transient gNB push kept failing (and tight-requeuing) every minute. This matches
+  the metric's name/Help and `ntn_operators_config_apply_errors_total`. The
+  `EphemerisPushFailed` Kubernetes Event remains episode-gated. (Permanent,
+  non-requeuing reasons still increment once; the durable `EphemerisPushed=False`
+  condition covers those, with a readiness gauge as a recommended follow-up.)
 
 ## [0.6.0] - 2026-07-09
 

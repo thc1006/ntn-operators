@@ -75,34 +75,52 @@ func TestEphemerisPushConditionReason(t *testing.T) {
 	})
 }
 
-func TestEphemerisPushConditionChanged(t *testing.T) {
-	t.Run("nil previous condition is treated as changed", func(t *testing.T) {
-		if !ephemerisPushConditionChanged(nil, ephemerisReasonRefNotFound, "missing", 3) {
-			t.Fatalf("expected condition to be marked changed when previous condition is nil")
+func TestConditionEpisodeChanged(t *testing.T) {
+	t.Run("nil previous condition is a new episode", func(t *testing.T) {
+		if !conditionEpisodeChanged(nil, metav1.ConditionFalse, ephemerisReasonRefNotFound, 3) {
+			t.Fatalf("expected a nil previous condition to be a new episode")
 		}
 	})
 
-	t.Run("identical previous condition is not changed", func(t *testing.T) {
+	t.Run("identical status/reason/generation is the same episode", func(t *testing.T) {
 		prev := &metav1.Condition{
-			Status:             metav1.ConditionFalse,
-			Reason:             ephemerisReasonRefNotFound,
-			Message:            "missing",
-			ObservedGeneration: 3,
+			Status: metav1.ConditionFalse, Reason: ephemerisReasonRefNotFound, Message: "missing", ObservedGeneration: 3,
 		}
-		if ephemerisPushConditionChanged(prev, ephemerisReasonRefNotFound, "missing", 3) {
-			t.Fatalf("expected unchanged condition to be recognized as unchanged")
+		if conditionEpisodeChanged(prev, metav1.ConditionFalse, ephemerisReasonRefNotFound, 3) {
+			t.Fatalf("expected identical status/reason/generation to be the same episode")
 		}
 	})
 
-	t.Run("generation bump is treated as changed", func(t *testing.T) {
+	t.Run("message-only change is the SAME episode", func(t *testing.T) {
+		// Same status/reason/generation, only the varying error message differs — must
+		// NOT start a new episode, or a flapping message would re-emit every reconcile.
 		prev := &metav1.Condition{
-			Status:             metav1.ConditionFalse,
-			Reason:             ephemerisReasonRefNotFound,
-			Message:            "missing",
-			ObservedGeneration: 3,
+			Status: metav1.ConditionFalse, Reason: ephemerisReasonRefNotFound,
+			Message: "dial timeout after 30.001s", ObservedGeneration: 3,
 		}
-		if !ephemerisPushConditionChanged(prev, ephemerisReasonRefNotFound, "missing", 4) {
-			t.Fatalf("expected generation change to be treated as condition change")
+		if conditionEpisodeChanged(prev, metav1.ConditionFalse, ephemerisReasonRefNotFound, 3) {
+			t.Fatalf("a message-only change must not be a new episode")
+		}
+	})
+
+	t.Run("status change is a new episode", func(t *testing.T) {
+		prev := &metav1.Condition{Status: metav1.ConditionTrue, Reason: ephemerisReasonRefNotFound, ObservedGeneration: 3}
+		if !conditionEpisodeChanged(prev, metav1.ConditionFalse, ephemerisReasonRefNotFound, 3) {
+			t.Fatalf("expected a status change to be a new episode")
+		}
+	})
+
+	t.Run("reason change is a new episode", func(t *testing.T) {
+		prev := &metav1.Condition{Status: metav1.ConditionFalse, Reason: ephemerisReasonRefNotFound, ObservedGeneration: 3}
+		if !conditionEpisodeChanged(prev, metav1.ConditionFalse, ephemerisReasonPayloadMissing, 3) {
+			t.Fatalf("expected a reason change to be a new episode")
+		}
+	})
+
+	t.Run("generation bump is a new episode", func(t *testing.T) {
+		prev := &metav1.Condition{Status: metav1.ConditionFalse, Reason: ephemerisReasonRefNotFound, ObservedGeneration: 3}
+		if !conditionEpisodeChanged(prev, metav1.ConditionFalse, ephemerisReasonRefNotFound, 4) {
+			t.Fatalf("expected a generation bump to be a new episode")
 		}
 	})
 }
