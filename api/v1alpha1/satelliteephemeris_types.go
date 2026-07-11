@@ -219,6 +219,13 @@ const (
 	// derived from stale elements and drifting (SGP4 in-track error grows with
 	// age from the element epoch). False means all propagated epochs are fresh.
 	ConditionEphemerisEpochStale = "EphemerisEpochStale"
+	// ConditionRefreshIntervalClamped is True when spec.source.refreshInterval was
+	// outside [2h, 24h] and the controller clamped it (Reason BelowMinimum /
+	// AboveMaximum). False (Reason WithinBounds) means the controller evaluated the
+	// interval and used it as-is. Absent means not yet reconciled (Unknown) — the
+	// controller always sets it explicitly, so False and absent are distinct. It lets
+	// the clamp be surfaced once per episode instead of a Warning every reconcile.
+	ConditionRefreshIntervalClamped = "RefreshIntervalClamped"
 )
 
 // +kubebuilder:object:root=true

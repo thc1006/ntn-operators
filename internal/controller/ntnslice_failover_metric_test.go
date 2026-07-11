@@ -13,7 +13,6 @@ package controller
 import (
 	"context"
 	"errors"
-	"strings"
 	"testing"
 	"time"
 
@@ -98,6 +97,12 @@ func TestReconcile_FailoverCounterNotIncrementedOnStatusConflict(t *testing.T) {
 	}
 
 	sch := makeScheme(t)
+	// Capture whether the reconcile actually computed a failover in the status it
+	// tried to persist (FailoverCount bumped from 0), so the "counter unchanged"
+	// assertion below is not vacuous. The FailoverTriggered event is now emitted
+	// only AFTER a successful status write, so it is (correctly) absent on this
+	// conflict path and can no longer serve as that proxy.
+	var triedFailover bool
 	cli := fake.NewClientBuilder().
 		WithScheme(sch).
 		WithObjects(slice, eph).
@@ -105,7 +110,10 @@ func TestReconcile_FailoverCounterNotIncrementedOnStatusConflict(t *testing.T) {
 		WithInterceptorFuncs(interceptor.Funcs{
 			// Simulate the fresher reconcile having already advanced the
 			// resourceVersion: this stale reconcile's status write conflicts.
-			SubResourceUpdate: func(context.Context, client.Client, string, client.Object, ...client.SubResourceUpdateOption) error {
+			SubResourceUpdate: func(_ context.Context, _ client.Client, _ string, obj client.Object, _ ...client.SubResourceUpdateOption) error {
+				if ns, ok := obj.(*ntnv1alpha1.NTNSlice); ok && ns.Status.FailoverCount > 0 {
+					triedFailover = true
+				}
 				return apierrors.NewConflict(
 					schema.GroupResource{Group: "ntn.operators.dev", Resource: "ntnslices"},
 					sliceName, errors.New("stale revision"))
@@ -137,20 +145,22 @@ func TestReconcile_FailoverCounterNotIncrementedOnStatusConflict(t *testing.T) {
 	if !apierrors.IsConflict(err) {
 		t.Fatalf("expected a Conflict error, got: %v", err)
 	}
-	// Positive control: FailoverTriggered is emitted in the DecisionFailover
-	// branch, before the (discarded) status write. Its presence proves the
-	// reconcile actually decided to fail over — otherwise "counter unchanged"
-	// would pass vacuously even if the setup never reached a failover.
-	select {
-	case ev := <-recorder.Events:
-		if !strings.Contains(ev, "FailoverTriggered") {
-			t.Fatalf("expected a FailoverTriggered event, got: %q", ev)
-		}
-	default:
-		t.Fatal("no event emitted: the reconcile never reached the failover decision, so the counter assertion would be vacuous")
+	// Positive control: the reconcile actually decided to fail over (it bumped
+	// FailoverCount in the status it attempted to persist) — otherwise "counter
+	// unchanged" would pass vacuously even if the setup never reached a failover.
+	if !triedFailover {
+		t.Fatal("the reconcile never computed a failover decision, so the counter assertion would be vacuous")
 	}
 	// The failover was never persisted, so the counter must not have moved.
 	if got := testutil.ToFloat64(ntnmetrics.FailoverTotal.With(labels)); got != before {
 		t.Errorf("FailoverTotal moved on a discarded failover: before=%v after=%v (want unchanged)", before, got)
+	}
+	// Events are emitted only AFTER a successful status write, so a discarded
+	// (conflicted) failover must announce nothing. This guards against re-introducing
+	// a pre-persist FailoverTriggered emit that the counter check alone would miss.
+	select {
+	case ev := <-recorder.Events:
+		t.Fatalf("no event may fire when the failover status write conflicts; got %q", ev)
+	default:
 	}
 }

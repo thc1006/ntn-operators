@@ -89,6 +89,69 @@ type SatelliteEphemerisReconciler struct {
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
 
+// clampRefreshInterval clamps spec.source.refreshInterval into [minRefreshInterval,
+// maxRefreshInterval] and records the RefreshIntervalClamped condition — True with
+// reason BelowMinimum/AboveMaximum when clamped, and False/WithinBounds (NOT absent)
+// when the configured interval is used as-is, so False is distinguishable from the
+// not-yet-reconciled Unknown per the Kubernetes condition contract. The clamp Warning
+// is emitted inline (pre-persist) and episode-gated, so it fires once per spec across
+// NORMAL reconciles instead of on every ~3-minute reconcile. Inline emission is
+// deliberate: the clamp is a deterministic function of the spec, so the Warning is
+// never fabricated and is not lost on an early-return fetch-error path. The one edge
+// it does NOT cover is a status-update CONFLICT that discards the reconcile — the prior
+// condition then does not persist, so the next reconcile re-detects the episode and
+// re-emits; that is rare and benign for a spec-validation Warning, and is the accepted
+// trade-off against threading a deferred note through every status-write path.
+func (r *SatelliteEphemerisReconciler) clampRefreshInterval(ctx context.Context, eph *ntnv1alpha1.SatelliteEphemeris) time.Duration {
+	effectiveInterval := eph.Spec.Source.RefreshInterval.Duration
+	var clampReason, clampMsg string
+	switch {
+	case effectiveInterval < minRefreshInterval:
+		effectiveInterval = minRefreshInterval
+		clampReason = "BelowMinimum"
+		clampMsg = fmt.Sprintf("refreshInterval %s is below minimum 2h; using 2h", eph.Spec.Source.RefreshInterval.Duration)
+	case effectiveInterval > maxRefreshInterval:
+		effectiveInterval = maxRefreshInterval
+		clampReason = "AboveMaximum"
+		clampMsg = fmt.Sprintf("refreshInterval %s exceeds maximum 24h; using 24h to keep the element set fresh", eph.Spec.Source.RefreshInterval.Duration)
+	}
+	if clampReason == "" {
+		// Within bounds: record an explicit False (not absent) so a consumer can tell
+		// "evaluated, no clamp needed" from "not yet reconciled" (absent = Unknown).
+		meta.SetStatusCondition(&eph.Status.Conditions, metav1.Condition{
+			Type:               ntnv1alpha1.ConditionRefreshIntervalClamped,
+			Status:             metav1.ConditionFalse,
+			Reason:             "WithinBounds",
+			Message:            "Configured refreshInterval is within the supported range [2h, 24h]",
+			ObservedGeneration: eph.Generation,
+		})
+		return effectiveInterval
+	}
+	clampEpisode := conditionEpisodeChanged(
+		meta.FindStatusCondition(eph.Status.Conditions, ntnv1alpha1.ConditionRefreshIntervalClamped),
+		metav1.ConditionTrue, clampReason, eph.Generation)
+	// Log at Info once per clamp episode; drop to V(1) across steady-state reconciles
+	// so a persistently out-of-bounds spec does not print the same line every ~3
+	// minutes, mirroring the event hygiene this WO enforces.
+	clampLog := logf.FromContext(ctx)
+	if !clampEpisode {
+		clampLog = clampLog.V(1)
+	}
+	clampLog.Info("RefreshInterval clamped", "reason", clampReason,
+		"configured", eph.Spec.Source.RefreshInterval.Duration, "effective", effectiveInterval)
+	meta.SetStatusCondition(&eph.Status.Conditions, metav1.Condition{
+		Type:               ntnv1alpha1.ConditionRefreshIntervalClamped,
+		Status:             metav1.ConditionTrue,
+		Reason:             clampReason,
+		Message:            clampMsg,
+		ObservedGeneration: eph.Generation,
+	})
+	if clampEpisode && r.Recorder != nil {
+		r.Recorder.Eventf(eph, nil, corev1.EventTypeWarning, "RefreshIntervalClamped", clampReason, "%s", clampMsg)
+	}
+	return effectiveInterval
+}
+
 // Reconcile fetches GP data, computes pass predictions, and updates status.
 func (r *SatelliteEphemerisReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
@@ -119,23 +182,7 @@ func (r *SatelliteEphemerisReconciler) Reconcile(ctx context.Context, req ctrl.R
 	// re-propagate a 30-day-old element set as if fresh, and LEO SGP4 error grows
 	// ~1–3 km/day from the element epoch (findings.md I-17). metav1.Duration
 	// serialises as a string, so both bounds are enforced here rather than via CEL.
-	effectiveInterval := eph.Spec.Source.RefreshInterval.Duration
-	switch {
-	case effectiveInterval < minRefreshInterval:
-		log.Info("RefreshInterval below minimum, clamping", "configured", effectiveInterval, "effective", minRefreshInterval)
-		effectiveInterval = minRefreshInterval
-		if r.Recorder != nil {
-			r.Recorder.Eventf(eph, nil, "Warning", "RefreshIntervalClamped", "RefreshIntervalClamped",
-				"refreshInterval %s is below minimum 2h; using 2h", eph.Spec.Source.RefreshInterval.Duration)
-		}
-	case effectiveInterval > maxRefreshInterval:
-		log.Info("RefreshInterval above maximum, clamping", "configured", effectiveInterval, "effective", maxRefreshInterval)
-		effectiveInterval = maxRefreshInterval
-		if r.Recorder != nil {
-			r.Recorder.Eventf(eph, nil, "Warning", "RefreshIntervalClamped", "RefreshIntervalClamped",
-				"refreshInterval %s exceeds maximum 24h; using 24h to keep the element set fresh", eph.Spec.Source.RefreshInterval.Duration)
-		}
-	}
+	effectiveInterval := r.clampRefreshInterval(ctx, eph)
 
 	// Step 3: Select fetcher and load credentials if needed.
 	fetcher, fetcherErr := r.fetcherForSource(ctx, eph)
@@ -184,6 +231,13 @@ func (r *SatelliteEphemerisReconciler) Reconcile(ctx context.Context, req ctrl.R
 	eph.Status.SatelliteCount = result.SatelliteCount
 	eph.Status.LastUpdated = &metav1.Time{Time: result.FetchedAt}
 	ntnmetrics.GPSatelliteCount.With(prometheus.Labels{"namespace": eph.Namespace, "ephemeris": eph.Name}).Set(float64(result.SatelliteCount))
+
+	// Snapshot (before the switch mutates it) whether serve-from-cache is a NEW
+	// episode, so its Warning fires once per outage — not on every short-cadence
+	// re-propagation that keeps serving the same stale cache.
+	serveCacheEpisode := servedCacheOnError && conditionEpisodeChanged(
+		meta.FindStatusCondition(eph.Status.Conditions, ntnv1alpha1.ConditionGPDataFetched),
+		metav1.ConditionFalse, "FetchFailedServingCache", eph.Generation)
 
 	switch {
 	case servedCacheOnError:
@@ -280,26 +334,7 @@ func (r *SatelliteEphemerisReconciler) Reconcile(ctx context.Context, req ctrl.R
 	ntnmetrics.GPDeepSpaceRejectedCount.With(prometheus.Labels{"namespace": eph.Namespace, "ephemeris": eph.Name}).Set(float64(len(trackedDeepSpace)))
 
 	// Step 7: Compute pass predictions if configured; clear stale data if disabled.
-	if eph.Spec.PassPrediction != nil && len(eph.Spec.PassPrediction.GroundStations) > 0 {
-		if err := r.predictPasses(ctx, eph, result); err != nil {
-			log.Error(err, "pass prediction failed")
-			eph.Status.NextPassWindows = nil // clear stale pass data
-			meta.SetStatusCondition(&eph.Status.Conditions, metav1.Condition{
-				Type:               ntnv1alpha1.ConditionPassesPredicted,
-				Status:             metav1.ConditionFalse,
-				Reason:             "PredictionFailed",
-				Message:            err.Error(),
-				ObservedGeneration: eph.Generation,
-			})
-			if r.Recorder != nil {
-				r.Recorder.Eventf(eph, nil, "Warning", "PredictionFailed", "PredictionFailed", "%s", err.Error())
-			}
-		}
-	} else {
-		// Pass prediction not configured; clear stale pass windows and condition.
-		eph.Status.NextPassWindows = nil
-		meta.RemoveStatusCondition(&eph.Status.Conditions, ntnv1alpha1.ConditionPassesPredicted)
-	}
+	passNote, passFailNote := r.handlePassPrediction(ctx, eph, result)
 
 	// Step 7b: Propagate tracked satellites to a NEAR-now epoch for the runtime
 	// ephemeris push (#176). The epoch is only a small lead ahead of now — enough
@@ -323,14 +358,25 @@ func (r *SatelliteEphemerisReconciler) Reconcile(ctx context.Context, req ctrl.R
 	// suppresses a spurious event on a terminating object, whose Status().Update
 	// fails NotFound above. (findings.md B-5; deep-review C-#4)
 	if orbitRegimeEvent != "" && r.Recorder != nil {
-		r.Recorder.Eventf(eph, nil, "Warning", "UnsupportedOrbitRegime", "OrbitRegimeGuard", "%s", orbitRegimeEvent)
+		r.Recorder.Eventf(eph, nil, corev1.EventTypeWarning, "UnsupportedOrbitRegime", "OrbitRegimeGuard", "%s", orbitRegimeEvent)
 	}
 
 	// Same post-persist, transition-gated discipline: emit the StatesTruncated
 	// Warning only when propagateStates reported a fresh entry into the truncated
 	// state, so the ~3-minute re-propagation cadence never re-fires it.
 	if truncEvent != "" && r.Recorder != nil {
-		r.Recorder.Eventf(eph, nil, "Warning", "StatesTruncated", "StatesTruncated", "%s", truncEvent)
+		r.Recorder.Eventf(eph, nil, corev1.EventTypeWarning, "StatesTruncated", "StatesTruncated", "%s", truncEvent)
+	}
+
+	// Pass-prediction events, same post-persist + transition-gated discipline (#188):
+	// the notes are non-empty only when the PassesPredicted condition changed, so the
+	// ~3-minute cache re-propagation never re-emits an identical pass event, and a
+	// rolled-back status update fires neither.
+	if passNote != "" && r.Recorder != nil {
+		r.Recorder.Eventf(eph, nil, corev1.EventTypeNormal, "PassesPredicted", "PassesPredicted", "%s", passNote)
+	}
+	if passFailNote != "" && r.Recorder != nil {
+		r.Recorder.Eventf(eph, nil, corev1.EventTypeWarning, "PredictionFailed", "PredictionFailed", "%s", passFailNote)
 	}
 
 	// Emit the "fetched" event only on a real successful fetch — not on the
@@ -339,13 +385,13 @@ func (r *SatelliteEphemerisReconciler) Reconcile(ctx context.Context, req ctrl.R
 	// Warning so an operator sees SIB19 is running on stale cache (I-18).
 	switch {
 	case servedCacheOnError:
-		if r.Recorder != nil {
-			r.Recorder.Eventf(eph, nil, "Warning", "FetchFailedServingCache", "FetchFailedServingCache",
+		if serveCacheEpisode && r.Recorder != nil {
+			r.Recorder.Eventf(eph, nil, corev1.EventTypeWarning, "FetchFailedServingCache", "FetchFailedServingCache",
 				"GP fetch failed (%s); serving %d satellites from cached OMMs", cacheServeErr.Error(), result.SatelliteCount)
 		}
 	case !reusedCache:
 		if r.Recorder != nil {
-			r.Recorder.Eventf(eph, nil, "Normal", "GPDataFetched", "GPDataFetched", "Fetched %d satellites", result.SatelliteCount)
+			r.Recorder.Eventf(eph, nil, corev1.EventTypeNormal, "GPDataFetched", "GPDataFetched", "Fetched %d satellites", result.SatelliteCount)
 		}
 	}
 
@@ -605,12 +651,55 @@ func (r *SatelliteEphemerisReconciler) reportOrbitRegime(
 	return ""
 }
 
-// predictPasses resolves ground stations and computes pass windows.
+// handlePassPrediction runs pass prediction (when configured) and returns the
+// post-persist event notes: passNote (Normal, success) and passFailNote (Warning,
+// failure), each non-empty only on a real PassesPredicted-condition transition, so
+// the caller emits them at most once per change after the status write persists.
+func (r *SatelliteEphemerisReconciler) handlePassPrediction(
+	ctx context.Context, eph *ntnv1alpha1.SatelliteEphemeris, result ephemeris.GPFetchResult,
+) (passNote, passFailNote string) {
+	if eph.Spec.PassPrediction == nil || len(eph.Spec.PassPrediction.GroundStations) == 0 {
+		// Pass prediction not configured; clear stale pass windows and condition.
+		eph.Status.NextPassWindows = nil
+		meta.RemoveStatusCondition(&eph.Status.Conditions, ntnv1alpha1.ConditionPassesPredicted)
+		return "", ""
+	}
+	note, err := r.predictPasses(ctx, eph, result)
+	if err != nil {
+		logf.FromContext(ctx).Error(err, "pass prediction failed")
+		eph.Status.NextPassWindows = nil // clear stale pass data
+		// Gate on the failure EPISODE (Status/Reason/Generation, ignoring the varying
+		// error Message) and defer the event to after the status persists (like
+		// reportOrbitRegime), so a rolled-back status update does not fire — and a
+		// message-only change does not re-fire — a PredictionFailed event.
+		failEpisode := conditionEpisodeChanged(
+			meta.FindStatusCondition(eph.Status.Conditions, ntnv1alpha1.ConditionPassesPredicted),
+			metav1.ConditionFalse, "PredictionFailed", eph.Generation)
+		meta.SetStatusCondition(&eph.Status.Conditions, metav1.Condition{
+			Type:               ntnv1alpha1.ConditionPassesPredicted,
+			Status:             metav1.ConditionFalse,
+			Reason:             "PredictionFailed",
+			Message:            err.Error(),
+			ObservedGeneration: eph.Generation,
+		})
+		if failEpisode {
+			return "", err.Error()
+		}
+		return "", ""
+	}
+	return note, ""
+}
+
+// predictPasses resolves ground stations and computes pass windows. It sets the
+// PassesPredicted condition and RETURNS the Normal-event note the caller must emit
+// only AFTER a successful Status().Update; the note is non-empty ONLY when the
+// condition actually transitioned, so the ~3-minute cache re-propagation cadence
+// does not re-fire an identical PassesPredicted event (#179/#188).
 func (r *SatelliteEphemerisReconciler) predictPasses(
 	ctx context.Context,
 	eph *ntnv1alpha1.SatelliteEphemeris,
 	fetchResult ephemeris.GPFetchResult,
-) error {
+) (string, error) {
 	log := logf.FromContext(ctx)
 	pp := eph.Spec.PassPrediction
 
@@ -619,21 +708,21 @@ func (r *SatelliteEphemerisReconciler) predictPasses(
 	for _, gsName := range pp.GroundStations {
 		gs := &ntnv1alpha1.GroundStationLifecycle{}
 		if err := r.Get(ctx, client.ObjectKey{Namespace: eph.Namespace, Name: gsName}, gs); err != nil {
-			return fmt.Errorf("ground station %q not found: %w", gsName, err)
+			return "", fmt.Errorf("ground station %q not found: %w", gsName, err)
 		}
 		lat, err := ephemeris.ParseGeoCoord(gs.Spec.Deployment.Location.Lat)
 		if err != nil {
-			return fmt.Errorf("invalid latitude for %q: %w", gsName, err)
+			return "", fmt.Errorf("invalid latitude for %q: %w", gsName, err)
 		}
 		lon, err := ephemeris.ParseGeoCoord(gs.Spec.Deployment.Location.Lon)
 		if err != nil {
-			return fmt.Errorf("invalid longitude for %q: %w", gsName, err)
+			return "", fmt.Errorf("invalid longitude for %q: %w", gsName, err)
 		}
 		alt := 0.0
 		if gs.Spec.Deployment.Location.Alt != "" {
 			alt, err = ephemeris.ParseGeoCoord(gs.Spec.Deployment.Location.Alt)
 			if err != nil {
-				return fmt.Errorf("invalid altitude for %q: %w", gsName, err)
+				return "", fmt.Errorf("invalid altitude for %q: %w", gsName, err)
 			}
 		}
 		stations = append(stations, ephemeris.GroundStation{
@@ -647,7 +736,7 @@ func (r *SatelliteEphemerisReconciler) predictPasses(
 	// Parse minElevation.
 	minEl, err := ephemeris.ParseElevation(pp.MinElevation)
 	if err != nil {
-		return fmt.Errorf("invalid minElevation: %w", err)
+		return "", fmt.Errorf("invalid minElevation: %w", err)
 	}
 
 	// Parse horizon.
@@ -665,7 +754,7 @@ func (r *SatelliteEphemerisReconciler) predictPasses(
 	// Run pass prediction.
 	passes, err := ephemeris.PredictPasses(fetchResult.OMMs, stations, minEl, horizon, noradFilter, fetchResult.FetchedAt)
 	if err != nil {
-		return fmt.Errorf("computing passes: %w", err)
+		return "", fmt.Errorf("computing passes: %w", err)
 	}
 
 	// Convert to CRD PassWindow format.
@@ -683,19 +772,18 @@ func (r *SatelliteEphemerisReconciler) predictPasses(
 
 	log.Info("Pass prediction completed", "passCount", len(windows), "stationCount", len(stations))
 
-	meta.SetStatusCondition(&eph.Status.Conditions, metav1.Condition{
+	msg := fmt.Sprintf("Computed %d passes over %d ground stations", len(windows), len(stations))
+	changed := meta.SetStatusCondition(&eph.Status.Conditions, metav1.Condition{
 		Type:               ntnv1alpha1.ConditionPassesPredicted,
 		Status:             metav1.ConditionTrue,
 		Reason:             "PredictionSucceeded",
-		Message:            fmt.Sprintf("Computed %d passes over %d ground stations", len(windows), len(stations)),
+		Message:            msg,
 		ObservedGeneration: eph.Generation,
 	})
-
-	if r.Recorder != nil {
-		r.Recorder.Eventf(eph, nil, "Normal", "PassesPredicted", "PassesPredicted", "Computed %d passes over %d ground stations", len(windows), len(stations))
+	if changed {
+		return msg, nil
 	}
-
-	return nil
+	return "", nil
 }
 
 // publicHTTPSource reports whether raw is a cleartext http:// URL whose host
@@ -735,6 +823,9 @@ func (r *SatelliteEphemerisReconciler) handleInsecureURL(
 	msg := fmt.Sprintf(
 		"cleartext http source resolves to public IP %s; use https to prevent forged OMM injection into SIB19",
 		ip)
+	insecureEpisode := conditionEpisodeChanged(
+		meta.FindStatusCondition(eph.Status.Conditions, ntnv1alpha1.ConditionGPDataFetched),
+		metav1.ConditionFalse, "InsecureURL", eph.Generation)
 	meta.SetStatusCondition(&eph.Status.Conditions, metav1.Condition{
 		Type:               ntnv1alpha1.ConditionGPDataFetched,
 		Status:             metav1.ConditionFalse,
@@ -745,8 +836,10 @@ func (r *SatelliteEphemerisReconciler) handleInsecureURL(
 	if err := r.Status().Update(ctx, eph); err != nil {
 		return ctrl.Result{}, err
 	}
-	if r.Recorder != nil {
-		r.Recorder.Eventf(eph, nil, "Warning", "InsecureURL", "InsecureURL", "%s", msg)
+	// Gate on the episode so a permanently-insecure source emits one Warning per
+	// episode, not one per (minutely) requeue.
+	if insecureEpisode && r.Recorder != nil {
+		r.Recorder.Eventf(eph, nil, corev1.EventTypeWarning, "InsecureURL", "InsecureURL", "%s", msg)
 	}
 	return ctrl.Result{RequeueAfter: time.Minute}, nil
 }
@@ -759,6 +852,14 @@ func (r *SatelliteEphemerisReconciler) handleFetchError(
 	effectiveInterval time.Duration,
 ) (ctrl.Result, error) {
 	reason, requeueAfter, returnAsError := classifyFetchError(fetchErr, effectiveInterval)
+
+	// Gate the Warning on the fetch-failure EPISODE (Status/Reason/Generation,
+	// ignoring the varying error Message) so a persistent outage — whose message
+	// flaps between e.g. "timeout after 30.001s" and "…30.013s" — emits one Warning
+	// per episode, not one per requeue.
+	fetchEpisode := conditionEpisodeChanged(
+		meta.FindStatusCondition(eph.Status.Conditions, ntnv1alpha1.ConditionGPDataFetched),
+		metav1.ConditionFalse, reason, eph.Generation)
 
 	meta.SetStatusCondition(&eph.Status.Conditions, metav1.Condition{
 		Type:               ntnv1alpha1.ConditionGPDataFetched,
@@ -784,8 +885,8 @@ func (r *SatelliteEphemerisReconciler) handleFetchError(
 		return ctrl.Result{}, err
 	}
 
-	if r.Recorder != nil {
-		r.Recorder.Eventf(eph, nil, "Warning", reason, reason, "%s", fetchErr.Error())
+	if fetchEpisode && r.Recorder != nil {
+		r.Recorder.Eventf(eph, nil, corev1.EventTypeWarning, reason, reason, "%s", fetchErr.Error())
 	}
 
 	if returnAsError {

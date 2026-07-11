@@ -19,10 +19,13 @@ package controller
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -35,6 +38,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	ntnv1alpha1 "github.com/thc1006/ntn-operators/api/v1alpha1"
+	ntnmetrics "github.com/thc1006/ntn-operators/pkg/metrics"
 	"github.com/thc1006/ntn-operators/pkg/provider"
 	"github.com/thc1006/ntn-operators/pkg/provider/ocudu"
 )
@@ -578,6 +582,120 @@ var _ = Describe("NTNCellConfig Controller", func() {
 			Expect(ephCond.Status).To(Equal(metav1.ConditionFalse))
 			Expect(ephCond.Reason).To(Equal("ProviderPushFailed"))
 			Expect(ephCond.Message).To(ContainSubstring("runtime push failed"))
+
+			// The ConfigApplied event must still fire on this apply-succeeds-but-push-
+			// fails path: the config WAS applied and its transition is durably persisted
+			// here, so the event cannot be lost to the early return. It is emitted before
+			// EphemerisPushFailed, so it is the first buffered event.
+			Expect(reconciler.Recorder.(*events.FakeRecorder).Events).
+				To(Receive(ContainSubstring("ConfigApplied")))
+		})
+
+		It("emits SatSwitchIgnored once per spec even while the push keeps failing", func() {
+			createReferencedEphemeris()
+			kmac := 200
+			// ConfigMap bootstrap path (no remoteControl+cellID) with a satSwitch that
+			// cannot be delivered there, and a provider whose push always fails so the
+			// reconcile re-enters the not-up-to-date path every requeue.
+			cr := &ntnv1alpha1.NTNCellConfig{
+				ObjectMeta: metav1.ObjectMeta{Name: cellName, Namespace: namespace},
+				Spec: ntnv1alpha1.NTNCellConfigSpec{
+					Provider: ntnv1alpha1.ProviderRef{Type: "ocudu", Namespace: namespace},
+					NTN: ntnv1alpha1.NTNParams{
+						CellSpecificKoffset: 150,
+						EphemerisECEF:       &ntnv1alpha1.EphemerisECEF{PosX: 20922195, PosY: 1967783, PosZ: 19770302},
+						PayloadType:         "transparent",
+						SatSwitchWithResync: &ntnv1alpha1.SatSwitchWithResync{
+							NTNConfig: ntnv1alpha1.SatSwitchNTNConfig{
+								EphemerisECEF: &ntnv1alpha1.EphemerisECEF{PosX: 6000000, PosY: 1, PosZ: 1},
+								KMac:          &kmac,
+							},
+						},
+					},
+					EphemerisRef: ephName,
+				},
+			}
+			Expect(k8sClient.Create(context.Background(), cr)).To(Succeed())
+
+			mock := &provider.MockProvider{EphemerisErr: errors.New("runtime push failed")}
+			reconciler := newReconciler(mock)
+			// finalizer add, then apply (push fails), then two more failing requeues.
+			for range 4 {
+				_, _ = reconciler.Reconcile(context.Background(), reconcile.Request{NamespacedName: cellNN})
+			}
+
+			rec := reconciler.Recorder.(*events.FakeRecorder)
+			satSwitch, pushFailed := 0, 0
+			for drained := false; !drained; {
+				select {
+				case ev := <-rec.Events:
+					if strings.Contains(ev, "SatSwitchIgnored") {
+						satSwitch++
+					}
+					if strings.Contains(ev, "EphemerisPushFailed") {
+						pushFailed++
+					}
+				default:
+					drained = true
+				}
+			}
+			Expect(satSwitch).To(Equal(1), "SatSwitchIgnored must fire once per spec, not on every push-failure requeue")
+			Expect(pushFailed).To(Equal(1), "EphemerisPushFailed must be episode-gated across the failing requeues")
+		})
+
+		It("counts every ephemeris push failure while emitting the Warning once per episode", func() {
+			createReferencedEphemeris()
+			// A runtime push that always fails with a transient (requeuing) reason. The
+			// COUNTER must advance on every failure so the shipped NTNEphemerisPushFailing
+			// alert — increase(ephemeris_push_errors_total[15m]) > 0 for 15m — keeps firing
+			// through an outage that tight-requeues each minute; an episode-gated counter
+			// would increment once and let the alert resolve mid-outage. The EVENT stays
+			// episode-gated. Mirrors ConfigApplyErrorsTotal's per-failure counting.
+			cr := &ntnv1alpha1.NTNCellConfig{
+				ObjectMeta: metav1.ObjectMeta{Name: cellName, Namespace: namespace},
+				Spec: ntnv1alpha1.NTNCellConfigSpec{
+					Provider: ntnv1alpha1.ProviderRef{Type: "ocudu", Namespace: namespace},
+					NTN: ntnv1alpha1.NTNParams{
+						CellSpecificKoffset: 150,
+						EphemerisECEF:       &ntnv1alpha1.EphemerisECEF{PosX: 20922195, PosY: 1967783, PosZ: 19770302},
+						PayloadType:         "transparent",
+					},
+					EphemerisRef: ephName,
+				},
+			}
+			Expect(k8sClient.Create(context.Background(), cr)).To(Succeed())
+
+			// reason is ProviderPushFailed (a raw provider error), which requeues.
+			labels := prometheus.Labels{"namespace": namespace, "config": cellName, "reason": "ProviderPushFailed"}
+			before := testutil.ToFloat64(ntnmetrics.EphemerisPushErrorsTotal.With(labels))
+
+			mock := &provider.MockProvider{EphemerisErr: errors.New("runtime push failed")}
+			reconciler := newReconciler(mock)
+			// finalizer add, then three apply-ok-but-push-fails requeues.
+			for range 4 {
+				_, _ = reconciler.Reconcile(context.Background(), reconcile.Request{NamespacedName: cellNN})
+			}
+
+			rec := reconciler.Recorder.(*events.FakeRecorder)
+			pushFailed := 0
+			for drained := false; !drained; {
+				select {
+				case ev := <-rec.Events:
+					if strings.Contains(ev, "EphemerisPushFailed") {
+						pushFailed++
+					}
+				default:
+					drained = true
+				}
+			}
+
+			delta := testutil.ToFloat64(ntnmetrics.EphemerisPushErrorsTotal.With(labels)) - before
+			Expect(mock.EphemerisCalls).To(BeNumerically(">=", 2),
+				"the setup must drive more than one failing push, else per-failure counting is untested")
+			Expect(delta).To(Equal(float64(mock.EphemerisCalls)),
+				"EphemerisPushErrorsTotal must advance on EVERY push failure (alert continuity), not once per episode")
+			Expect(pushFailed).To(Equal(1),
+				"EphemerisPushFailed Event must stay episode-gated across the failing requeues")
 		})
 
 		It("should avoid tight requeue when ephemerisRef does not exist", func() {

@@ -113,18 +113,6 @@ func ephemerisPushConditionReason(err error) string {
 	return ephemerisReasonPushFailed
 }
 
-func ephemerisPushConditionChanged(
-	prev *metav1.Condition,
-	reason, message string,
-	generation int64,
-) bool {
-	return prev == nil ||
-		prev.Status != metav1.ConditionFalse ||
-		prev.Reason != reason ||
-		prev.Message != message ||
-		prev.ObservedGeneration != generation
-}
-
 func ephemerisPushShouldRequeue(reason string) bool {
 	switch reason {
 	case ephemerisReasonRefNotFound,
@@ -151,6 +139,27 @@ func ephemerisPushShouldRequeue(reason string) bool {
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
+
+// emitConfigApplied records the ConfigApplied Normal event. It is invoked on every
+// reconcile path that persists a ConfigApplied=True transition (the
+// ephemeris-push-failure early return as well as the full-success path), so the
+// event is never lost when a status write other than the last one carries the
+// transition. Callers gate it on the transition (configApplyChanged).
+func (r *NTNCellConfigReconciler) emitConfigApplied(cc *ntnv1alpha1.NTNCellConfig, spec *ntnv1alpha1.NTNCellConfigSpec) {
+	if r.Recorder == nil {
+		return
+	}
+	r.Recorder.Eventf(cc, nil, corev1.EventTypeNormal, "ConfigApplied", "ConfigApplied",
+		"Applied NTN config (koffset=%d) via %s", spec.NTN.CellSpecificKoffset, spec.Provider.Type)
+	// A satSwitchWithResync on the ConfigMap path (no remoteControl+cellID) cannot be
+	// delivered (its k_mac has no bootstrap-YAML surface, issue #52). Surface it here,
+	// gated on the same ConfigApplied episode as its caller (configApplyChanged), so it
+	// warns once per spec rather than on every (minutely) push-failure requeue.
+	if spec.NTN.SatSwitchWithResync != nil && (spec.Provider.RemoteControl == nil || spec.CellID == nil) {
+		r.Recorder.Eventf(cc, nil, corev1.EventTypeWarning, "SatSwitchIgnored", "SatSwitchIgnored",
+			"%s", "satSwitchWithResync (incl. k_mac) requires remoteControl+cellID; ignored on the ConfigMap path")
+	}
+}
 
 // Reconcile applies NTN cell configuration to the specified provider backend.
 func (r *NTNCellConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -234,7 +243,13 @@ func (r *NTNCellConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		if errors.Is(err, provider.ErrConfigMapNotOwned) {
 			reason = "OwnershipConflict"
 		}
-		// Preserve existing ConfigMapRef for best-effort finalizer cleanup.
+		// Preserve existing ConfigMapRef for best-effort finalizer cleanup. Gate the
+		// Warning on a real episode (Status/Reason/Generation change, IGNORING the
+		// error Message) so a persistent failure whose message merely varies does not
+		// re-emit on every (minutely) requeue.
+		applyFailEpisode := conditionEpisodeChanged(
+			meta.FindStatusCondition(cc.Status.Conditions, ntnv1alpha1.ConditionConfigApplied),
+			metav1.ConditionFalse, reason, cc.Generation)
 		meta.SetStatusCondition(&cc.Status.Conditions, metav1.Condition{
 			Type:               ntnv1alpha1.ConditionConfigApplied,
 			Status:             metav1.ConditionFalse,
@@ -245,8 +260,8 @@ func (r *NTNCellConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		if err := r.Status().Update(ctx, cc); err != nil {
 			return ctrl.Result{}, err
 		}
-		if r.Recorder != nil {
-			r.Recorder.Eventf(cc, nil, "Warning", reason, reason, "%s", err.Error())
+		if applyFailEpisode && r.Recorder != nil {
+			r.Recorder.Eventf(cc, nil, corev1.EventTypeWarning, reason, reason, "%s", err.Error())
 		}
 		return ctrl.Result{RequeueAfter: time.Minute}, nil
 	}
@@ -272,8 +287,19 @@ func (r *NTNCellConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	cc.Status.AppliedKoffset = status.AppliedKoffset
 	cc.Status.ConfigMapRef = status.ConfigMapRef
 
-	// Step 7: Set success condition.
-	meta.SetStatusCondition(&cc.Status.Conditions, metav1.Condition{
+	// Step 7: Set success condition. Capture whether it actually changed (status/
+	// reason/generation, or a new object) so the ConfigApplied event fires once per
+	// change, not on every reconcile. The events.k8s.io/v1 recorder this operator uses
+	// correlates events by type, reason, action, reporting identity, AND the full
+	// regarding ObjectReference — which carries resourceVersion (client-go
+	// reference.GetReference). Because this event is emitted after a Status().Update
+	// that bumps the object's resourceVersion, a per-reconcile Normal event would NOT
+	// fold into one EventSeries; each reconcile would mint a distinct Event object.
+	// Gating on a real change therefore avoids both redundant Event objects and
+	// needless broadcaster/series churn, and keeps the human-relevant history legible.
+	// (The message here is constant, so meta.SetStatusCondition's return is a fine
+	// gate; failure events whose message varies use conditionEpisodeChanged instead.)
+	configApplyChanged := meta.SetStatusCondition(&cc.Status.Conditions, metav1.Condition{
 		Type:               ntnv1alpha1.ConditionConfigApplied,
 		Status:             metav1.ConditionTrue,
 		Reason:             "Applied",
@@ -293,7 +319,7 @@ func (r *NTNCellConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			reason := ephemerisPushConditionReason(pushErr)
 			message := pushErr.Error()
 			prevEphemerisCondition := meta.FindStatusCondition(cc.Status.Conditions, ntnv1alpha1.ConditionEphemerisPushed)
-			conditionChanged := ephemerisPushConditionChanged(prevEphemerisCondition, reason, message, cc.Generation)
+			conditionChanged := conditionEpisodeChanged(prevEphemerisCondition, metav1.ConditionFalse, reason, cc.Generation)
 
 			meta.SetStatusCondition(&cc.Status.Conditions, metav1.Condition{
 				Type:               ntnv1alpha1.ConditionEphemerisPushed,
@@ -305,16 +331,31 @@ func (r *NTNCellConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			if err := r.Status().Update(ctx, cc); err != nil {
 				return ctrl.Result{}, err
 			}
-			if conditionChanged {
-				// Count distinct push-failure episodes by reason (I-19). Gated on
-				// conditionChanged like the event, so a steady non-ready state
-				// (e.g. PayloadMissing) is counted once per entry, not per reconcile.
-				ntnmetrics.EphemerisPushErrorsTotal.With(prometheus.Labels{
-					"namespace": cc.Namespace, "config": cc.Name, "reason": reason,
-				}).Inc()
-				if r.Recorder != nil {
-					r.Recorder.Eventf(cc, nil, "Warning", "EphemerisPushFailed", "EphemerisPushFailed", "%s", message)
-				}
+			// This persist path durably records the ConfigApplied=True transition, so
+			// emit its event here too — the config WAS applied; the push is a separate
+			// concern reported below. Without this, a first apply whose ephemeris push
+			// fails would swallow ConfigApplied forever: the success-path emit below is
+			// skipped by this branch's early return, and later reconciles see no
+			// transition (findings: WO-20 adversarial review).
+			if configApplyChanged {
+				r.emitConfigApplied(cc, spec)
+			}
+			// Count EVERY real push failure by reason (I-19), NOT once per episode:
+			// _errors_total is a failure counter, and the shipped NTNEphemerisPushFailing
+			// alert is increase(...[15m]) > 0 for 15m — which only stays firing while the
+			// series keeps advancing. A transient outage tight-requeues every minute, so
+			// per-failure counting keeps increase() > 0 across the outage; an episode gate
+			// would increment once and let the alert resolve mid-outage. This mirrors
+			// ConfigApplyErrorsTotal (counted per failure above). (Permanent reasons that
+			// do not requeue still increment only once — a durable EphemerisPushed=False
+			// condition covers those; a readiness gauge is a recommended follow-up.)
+			ntnmetrics.EphemerisPushErrorsTotal.With(prometheus.Labels{
+				"namespace": cc.Namespace, "config": cc.Name, "reason": reason,
+			}).Inc()
+			// The Event stays episode-gated (once per outage) to keep the Event stream
+			// legible; the counter above carries the per-failure signal.
+			if conditionChanged && r.Recorder != nil {
+				r.Recorder.Eventf(cc, nil, corev1.EventTypeWarning, "EphemerisPushFailed", "EphemerisPushFailed", "%s", message)
 			}
 			if !ephemerisPushShouldRequeue(reason) {
 				return ctrl.Result{}, nil
@@ -336,9 +377,8 @@ func (r *NTNCellConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, err
 	}
 
-	if r.Recorder != nil {
-		r.Recorder.Eventf(cc, nil, "Normal", "ConfigApplied", "ConfigApplied",
-			"Applied NTN config (koffset=%d) via %s", spec.NTN.CellSpecificKoffset, spec.Provider.Type)
+	if configApplyChanged {
+		r.emitConfigApplied(cc, spec)
 	}
 
 	log.Info("NTN cell configuration applied successfully")
@@ -460,13 +500,13 @@ func (r *NTNCellConfigReconciler) pushEphemerisUpdateIfNeeded(
 	// that observable instead of silently dropping it — a cell that sets a switch
 	// without remoteControl+cellID is misconfigured.
 	if spec.NTN.SatSwitchWithResync != nil {
-		logf.FromContext(ctx).Info(
+		// The SatSwitchIgnored Warning is emitted post-persist, once per ConfigApplied
+		// episode, in emitConfigApplied — NOT here. Emitting inline re-fired it on every
+		// (minutely) push-failure requeue, since this path is re-entered whenever the
+		// push is not up to date, which it never is while the push keeps failing.
+		logf.FromContext(ctx).V(1).Info(
 			"satSwitchWithResync is set but ignored: it requires spec.provider.remoteControl and spec.cellID (runtime push); the ConfigMap path cannot deliver it",
 			"cell", cc.Name)
-		if r.Recorder != nil {
-			r.Recorder.Eventf(cc, nil, "Warning", "SatSwitchIgnored", "SatSwitchIgnored",
-				"%s", "satSwitchWithResync (incl. k_mac) requires remoteControl+cellID; ignored on the ConfigMap path")
-		}
 	}
 
 	// ConfigMap bootstrap path (backward compatible): push the CR's static
