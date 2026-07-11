@@ -29,6 +29,9 @@ spec:
     - jsonPath: .spec.ntn.payloadType
       name: Payload
       type: string
+    - jsonPath: .status.conditions[?(@.type=="ConfigApplied")].status
+      name: Applied
+      type: string
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
@@ -157,6 +160,7 @@ spec:
                   referenced SatelliteEphemeris is updated and invokes runtime ephemeris push
                   on the provider reconcile path. The static ephemeris in spec.ntn
                   (ephemerisECEF or ephemerisOrbital) remains required as the source payload.
+                maxLength: 253
                 minLength: 1
                 type: string
               ntn:
@@ -811,10 +815,12 @@ spec:
                   endpoint:
                     description: endpoint is the provider-specific endpoint (e.g.,
                       O1 NETCONF address).
+                    maxLength: 261
                     type: string
                   namespace:
                     description: namespace where the provider resources (e.g., OCUDU
                       gNB) are deployed.
+                    maxLength: 63
                     type: string
                   remoteControl:
                     description: |-
@@ -831,7 +837,7 @@ spec:
                           tight-requeue on a mistyped endpoint).
                         maxLength: 261
                         minLength: 1
-                        pattern: ^[a-zA-Z0-9._-]+:[0-9]{1,5}$
+                        pattern: ^(\[[0-9a-fA-F:]+\]|[a-zA-Z0-9._-]+):[0-9]{1,5}$
                         type: string
                       tls:
                         description: |-
@@ -858,6 +864,7 @@ spec:
                               shared secret sent as Authorization: Bearer — optional), and, for mode=mtls,
                               "tls.crt" + "tls.key" (the client certificate/key). A bare shared secret is
                               replayable, so it is only ever sent over the wss:// (TLS) connection.
+                            maxLength: 253
                             minLength: 1
                             type: string
                           serverName:

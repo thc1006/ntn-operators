@@ -42,6 +42,7 @@ type NTNCellConfigSpec struct {
 	// on the provider reconcile path. The static ephemeris in spec.ntn
 	// (ephemerisECEF or ephemerisOrbital) remains required as the source payload.
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
 	// +optional
 	EphemerisRef string `json:"ephemerisRef,omitempty"`
 
@@ -83,7 +84,7 @@ type RemoteControlRef struct {
 	// tight-requeue on a mistyped endpoint).
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=261
-	// +kubebuilder:validation:Pattern=`^[a-zA-Z0-9._-]+:[0-9]{1,5}$`
+	// +kubebuilder:validation:Pattern=`^(\[[0-9a-fA-F:]+\]|[a-zA-Z0-9._-]+):[0-9]{1,5}$`
 	Endpoint string `json:"endpoint"`
 
 	// tls, when set, secures the runtime push: the provider dials wss:// (TLS)
@@ -113,6 +114,7 @@ type RemoteControlTLS struct {
 	// "tls.crt" + "tls.key" (the client certificate/key). A bare shared secret is
 	// replayable, so it is only ever sent over the wss:// (TLS) connection.
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
 	SecretName string `json:"secretName"`
 
 	// serverName overrides the TLS ServerName (SNI) verified against the server
@@ -132,6 +134,7 @@ type ProviderRef struct {
 
 	// namespace where the provider resources (e.g., OCUDU gNB) are deployed.
 	// +optional
+	// +kubebuilder:validation:MaxLength=63
 	Namespace string `json:"namespace,omitempty"`
 
 	// remoteControl configures the gNB remote_control WebSocket for live NTN
@@ -142,6 +145,7 @@ type ProviderRef struct {
 
 	// endpoint is the provider-specific endpoint (e.g., O1 NETCONF address).
 	// +optional
+	// +kubebuilder:validation:MaxLength=261
 	Endpoint string `json:"endpoint,omitempty"`
 }
 
@@ -665,6 +669,7 @@ const (
 // +kubebuilder:printcolumn:name="Provider",type=string,JSONPath=`.spec.provider.type`
 // +kubebuilder:printcolumn:name="Koffset",type=integer,JSONPath=`.spec.ntn.cellSpecificKoffset`
 // +kubebuilder:printcolumn:name="Payload",type=string,JSONPath=`.spec.ntn.payloadType`
+// +kubebuilder:printcolumn:name="Applied",type=string,JSONPath=`.status.conditions[?(@.type=="ConfigApplied")].status`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
 // NTNCellConfig manages NTN-specific radio parameters for a gNB cell,

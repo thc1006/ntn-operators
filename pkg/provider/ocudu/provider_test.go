@@ -22,6 +22,7 @@ import (
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -64,6 +65,63 @@ func newTestProvider(t *testing.T) *Provider {
 
 // Compile-time check: Provider implements NTNProvider.
 var _ provider.NTNProvider = &Provider{}
+
+// TestCleanup_OwnershipCheck asserts Cleanup only deletes a ConfigMap that is
+// controller-owned by the named NTNCellConfig (N-3), mirroring the reconciler's
+// finalizer, and leaves a same-named but unowned/foreign ConfigMap alone.
+func TestCleanup_OwnershipCheck(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme(corev1): %v", err)
+	}
+	if err := ntnv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme(ntnv1alpha1): %v", err)
+	}
+	const crName = "cell-a"
+	const ns = "ntn-system"
+	cmName := ConfigMapNameFor(crName)
+	isController := true
+
+	mkRef := func(apiVersion, kind, name string, controller bool) metav1.OwnerReference {
+		ref := metav1.OwnerReference{APIVersion: apiVersion, Kind: kind, Name: name, UID: "uid-owner"}
+		if controller {
+			ref.Controller = &isController
+		}
+		return ref
+	}
+	grp := ntnv1alpha1.GroupVersion.String()
+
+	tests := []struct {
+		name        string
+		refs        []metav1.OwnerReference
+		wantDeleted bool
+	}{
+		{"controller-owned by this CR", []metav1.OwnerReference{mkRef(grp, "NTNCellConfig", crName, true)}, true},
+		{"no owner references", nil, false},
+		{"owned by a different CR name", []metav1.OwnerReference{mkRef(grp, "NTNCellConfig", "cell-b", true)}, false},
+		{"owned by a different kind", []metav1.OwnerReference{mkRef(grp, "SomethingElse", crName, true)}, false},
+		{"owned by a different group", []metav1.OwnerReference{mkRef("other/v1", "NTNCellConfig", crName, true)}, false},
+		{"present but not the controller", []metav1.OwnerReference{mkRef(grp, "NTNCellConfig", crName, false)}, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cm := &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{Name: cmName, Namespace: ns, OwnerReferences: tc.refs},
+				Data:       map[string]string{"geo_ntn.yml": "x"},
+			}
+			c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(cm).Build()
+			p := NewProvider(c)
+			if err := p.Cleanup(context.Background(), crName, ns); err != nil {
+				t.Fatalf("Cleanup: %v", err)
+			}
+			err := c.Get(context.Background(), types.NamespacedName{Name: cmName, Namespace: ns}, &corev1.ConfigMap{})
+			deleted := apierrors.IsNotFound(err)
+			if deleted != tc.wantDeleted {
+				t.Errorf("deleted=%v, want %v (get err=%v)", deleted, tc.wantDeleted, err)
+			}
+		})
+	}
+}
 
 func TestApplyCellConfig_CreatesConfigMap(t *testing.T) {
 	p := newTestProvider(t)
