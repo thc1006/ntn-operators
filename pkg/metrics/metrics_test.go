@@ -34,7 +34,9 @@ func TestMetricsRegistered(t *testing.T) {
 	GPSatelliteCount.With(prometheus.Labels{"namespace": "_", "ephemeris": "_"}).Set(0)
 	GPDeepSpaceRejectedCount.With(prometheus.Labels{"namespace": "_", "ephemeris": "_"}).Set(0)
 	EphemerisEpochStaleCount.With(prometheus.Labels{"namespace": "_", "ephemeris": "_"}).Set(0)
+	GPFetchReady.With(prometheus.Labels{"namespace": "_", "ephemeris": "_"}).Set(0)
 	EphemerisPushErrorsTotal.With(prometheus.Labels{"namespace": "_", "config": "_", "reason": "_"}).Add(0)
+	EphemerisPushReady.With(prometheus.Labels{"namespace": "_", "config": "_"}).Set(0)
 	ReaderQueryDuration.With(prometheus.Labels{"source": "_", "outcome": "_"}).Observe(0)
 	ReaderErrorsTotal.With(prometheus.Labels{"source": "_", "reason": "_"}).Add(0)
 	ReaderStaleUsedTotal.With(prometheus.Labels{"namespace": "_", "name": "_"}).Add(0)
@@ -53,7 +55,9 @@ func TestMetricsRegistered(t *testing.T) {
 		"ntn_operators_gp_satellite_count",
 		"ntn_operators_gp_deep_space_rejected_count",
 		"ntn_operators_ephemeris_epoch_stale_count",
+		"ntn_operators_gp_fetch_ready",
 		"ntn_operators_ephemeris_push_errors_total",
+		"ntn_operators_ephemeris_push_ready",
 		"ntn_operators_reader_query_duration_seconds",
 		"ntn_operators_reader_errors_total",
 		"ntn_operators_reader_stale_value_used_total",

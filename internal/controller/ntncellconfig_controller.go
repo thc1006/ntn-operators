@@ -311,6 +311,9 @@ func (r *NTNCellConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// Keep ConfigApplied semantics independent from ephemeris push status.
 	if cc.Spec.EphemerisRef == "" {
 		meta.RemoveStatusCondition(&cc.Status.Conditions, ntnv1alpha1.ConditionEphemerisPushed)
+		// No runtime push configured: clear any readiness series from a prior spec
+		// that did configure one, so a stale 0/1 does not linger and misfire the alert.
+		ntnmetrics.EphemerisPushReady.DeletePartialMatch(prometheus.Labels{"namespace": cc.Namespace, "config": cc.Name})
 	} else {
 		pushed, marker, err := r.pushEphemerisUpdateIfNeeded(ctx, cc, spec, prov)
 		if err != nil {
@@ -352,6 +355,12 @@ func (r *NTNCellConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			ntnmetrics.EphemerisPushErrorsTotal.With(prometheus.Labels{
 				"namespace": cc.Namespace, "config": cc.Name, "reason": reason,
 			}).Inc()
+			// Readiness gauge: 0 while the push is failing. Unlike the counter, this
+			// holds across a PERMANENT (non-requeuing) failure, so `push_ready == 0 for
+			// 15m` alerts even when the counter stops advancing (issue #216).
+			ntnmetrics.EphemerisPushReady.With(prometheus.Labels{
+				"namespace": cc.Namespace, "config": cc.Name,
+			}).Set(0)
 			// The Event stays episode-gated (once per outage) to keep the Event stream
 			// legible; the counter above carries the per-failure signal.
 			if conditionChanged && r.Recorder != nil {
@@ -371,6 +380,12 @@ func (r *NTNCellConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 				ObservedGeneration: cc.Generation,
 			})
 		}
+		// Reaching here means the push did not error (the failure branch returns
+		// early), so the runtime push is healthy — freshly pushed or already up to
+		// date. Mark ready=1 (this also clears a prior 0 once the outage recovers).
+		ntnmetrics.EphemerisPushReady.With(prometheus.Labels{
+			"namespace": cc.Namespace, "config": cc.Name,
+		}).Set(1)
 	}
 
 	if err := r.Status().Update(ctx, cc); err != nil {
@@ -398,6 +413,7 @@ func (r *NTNCellConfigReconciler) handleFinalizer(
 		// accumulate dead series across create/delete churn (idempotent).
 		ntnmetrics.ConfigApplyErrorsTotal.DeletePartialMatch(prometheus.Labels{"namespace": cc.Namespace, "config": cc.Name})
 		ntnmetrics.EphemerisPushErrorsTotal.DeletePartialMatch(prometheus.Labels{"namespace": cc.Namespace, "config": cc.Name})
+		ntnmetrics.EphemerisPushReady.DeletePartialMatch(prometheus.Labels{"namespace": cc.Namespace, "config": cc.Name})
 		if controllerutil.ContainsFinalizer(cc, finalizerName) {
 			if prov == nil {
 				// Best-effort cleanup using Status.ConfigMapRef when provider is missing.

@@ -698,6 +698,28 @@ var _ = Describe("NTNCellConfig Controller", func() {
 				"EphemerisPushFailed Event must stay episode-gated across the failing requeues")
 		})
 
+		It("holds ephemeris_push_ready at 0 through the outage and returns it to 1 on recovery", func() {
+			createReferencedEphemeris()
+			createCellConfig()
+			labels := prometheus.Labels{"namespace": namespace, "config": cellName}
+
+			// Push keeps failing → readiness 0. Unlike the per-failure counter, this
+			// holds even for a PERMANENT (non-requeuing) reason, so the companion
+			// `ephemeris_push_ready == 0 for 15m` alert fires where the rate alert can't.
+			failing := newReconciler(&provider.MockProvider{EphemerisErr: errors.New("runtime push failed")})
+			for range 2 {
+				_, _ = failing.Reconcile(context.Background(), reconcile.Request{NamespacedName: cellNN})
+			}
+			Expect(testutil.ToFloat64(ntnmetrics.EphemerisPushReady.With(labels))).To(Equal(float64(0)),
+				"push_ready must be 0 while the runtime push is failing")
+
+			// A healthy push → readiness back to 1.
+			healthy := newReconciler(&provider.MockProvider{})
+			_, _ = healthy.Reconcile(context.Background(), reconcile.Request{NamespacedName: cellNN})
+			Expect(testutil.ToFloat64(ntnmetrics.EphemerisPushReady.With(labels))).To(Equal(float64(1)),
+				"push_ready must return to 1 once the push recovers")
+		})
+
 		It("should avoid tight requeue when ephemerisRef does not exist", func() {
 			createCellConfig()
 
