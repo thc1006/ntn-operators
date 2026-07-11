@@ -468,18 +468,6 @@ func (r *SatelliteEphemerisReconciler) propagateStates(
 		norad = eph.Spec.Satellites.NoradIDs
 	}
 	omms := ephemeris.FilterOMMs(result.OMMs, norad)
-	truncated := 0
-	if len(omms) > maxPropagatedStates {
-		truncated = len(omms) - maxPropagatedStates
-		// Not silent: a satellite beyond the cap won't be pushable at runtime (its
-		// NoradID selector would miss). It is surfaced as status.truncatedSatelliteCount
-		// + the StatesTruncated condition, and — only on the transition into the
-		// truncated state — a Warning event (see reportStatesTruncated).
-		logf.FromContext(ctx).Info("propagated-state list capped; some satellites omitted from runtime-push status",
-			"tracked", len(omms), "cap", maxPropagatedStates,
-			"hint", "set spec.satellites.noradIDs to the satellites pushed at runtime")
-	}
-	truncEvent := r.reportStatesTruncated(eph, len(omms), truncated)
 	epochMs := epoch.UnixMilli()
 
 	// I-17: count tracked element sets whose OWN epoch is stale — a data property
@@ -492,9 +480,18 @@ func (r *SatelliteEphemerisReconciler) propagateStates(
 		}
 	}
 
-	states := make([]ntnv1alpha1.PropagatedState, 0, len(omms))
+	states := make([]ntnv1alpha1.PropagatedState, 0, min(len(omms), maxPropagatedStates))
+	skippedByCap := 0
 	for i := range omms {
 		if len(states) >= maxPropagatedStates {
+			// The cap is reached; the remaining OMMs are NOT attempted. This is the
+			// truthful count dropped by the cap — propagation failures above already
+			// reduced the successful set, so len(omms)-cap would over-report a
+			// truncation that never actually happened.
+			skippedByCap = len(omms) - i
+			logf.FromContext(ctx).Info("propagated-state list capped; some satellites omitted from runtime-push status",
+				"selected", len(omms), "cap", maxPropagatedStates, "omitted", skippedByCap,
+				"hint", "set spec.satellites.noradIDs to the satellites pushed at runtime")
 			break
 		}
 		ecef, err := ephemeris.PropagateToECEF(omms[i], epoch)
@@ -515,6 +512,7 @@ func (r *SatelliteEphemerisReconciler) propagateStates(
 		})
 	}
 	eph.Status.PropagatedStates = states
+	truncEvent := r.reportStatesTruncated(eph, len(omms), skippedByCap)
 	r.reportEphemerisEpochStale(eph, staleEpochs, len(omms))
 	return truncEvent
 }

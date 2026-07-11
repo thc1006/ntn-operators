@@ -161,11 +161,13 @@ type SatelliteEphemerisStatus struct {
 	// +optional
 	SatelliteCount int `json:"satelliteCount,omitempty"`
 
-	// truncatedSatelliteCount is how many satellites were dropped because the
-	// selected set exceeded the maxPropagatedStates cap (128); 0 when nothing was
-	// dropped. Narrow spec.satellites.noradIDs or the source URL's GROUP= to
-	// eliminate it. Mirrored by the StatesTruncated condition, and a Warning
-	// StatesTruncated event is emitted once per transition into the truncated state.
+	// truncatedSatelliteCount is how many selected satellites were NOT propagated
+	// because the maxPropagatedStates cap (128) had already been reached — the count
+	// actually dropped by the cap, not merely (selected - 128), so satellites that
+	// fail SGP4 propagation do not inflate it. ABSENT or 0 means nothing was dropped
+	// (the field is omitempty). Narrow spec.satellites.noradIDs or the source URL's
+	// GROUP= to eliminate it. Mirrored by the StatesTruncated condition; a Warning
+	// StatesTruncated event fires once per transition into the truncated state.
 	// +optional
 	TruncatedSatelliteCount int `json:"truncatedSatelliteCount,omitempty"`
 
