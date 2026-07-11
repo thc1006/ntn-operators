@@ -21,7 +21,6 @@ import (
 	"crypto/tls"
 	"errors"
 
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 
 	ntnv1alpha1 "github.com/thc1006/ntn-operators/api/v1alpha1"
@@ -95,6 +94,13 @@ var ErrRuntimeUnsupported = errors.New("runtime NTN config push is not supported
 // (unlike a transient unreachable-endpoint error). Test with errors.Is.
 var ErrRuntimePushRejected = errors.New("runtime NTN config push permanently rejected")
 
+// ErrConfigMapNotOwned is returned by ApplyCellConfig when a ConfigMap with the
+// provider's deterministic name already exists but is NOT controller-owned by the
+// applying CR (a name collision with a foreign/user-created object, or a leftover
+// from a different CR that reused the name). The provider refuses to overwrite it;
+// the controller surfaces an OwnershipConflict condition + event. Test with errors.Is.
+var ErrConfigMapNotOwned = errors.New("existing ConfigMap is not owned by this NTNCellConfig")
+
 // NTNProvider abstracts NTN backend interactions for cell configuration
 // and ephemeris updates. Ground station lifecycle is handled directly
 // by its respective controller.
@@ -103,16 +109,23 @@ var ErrRuntimePushRejected = errors.New("runtime NTN config push permanently rej
 // ConfigMap. If a future provider uses a different artifact type,
 // the interface and controller should be generalized at that time.
 type NTNProvider interface {
-	// ApplyCellConfig applies NTN radio parameters to the backend.
-	// crName is the NTNCellConfig CR name (used to scope the provider artifact).
-	ApplyCellConfig(ctx context.Context, crName string, spec *ntnv1alpha1.NTNCellConfigSpec) error
+	// ApplyCellConfig applies NTN radio parameters to the backend. owner is the
+	// NTNCellConfig CR: its name scopes the artifact, and a controller reference to
+	// it is set ATOMICALLY when the artifact is created (so K8s garbage-collects it
+	// with the CR). An existing artifact is overwritten only when it is already
+	// controller-owned by owner; otherwise ErrConfigMapNotOwned is returned.
+	ApplyCellConfig(
+		ctx context.Context, owner *ntnv1alpha1.NTNCellConfig, spec *ntnv1alpha1.NTNCellConfigSpec, scheme *runtime.Scheme,
+	) error
 
 	// GetCellStatus returns the current applied configuration status.
 	GetCellStatus(ctx context.Context, crName, namespace string) (*ntnv1alpha1.NTNCellConfigStatus, error)
 
 	// PushEphemerisUpdate pushes fresh ephemeris data to the backend by rewriting
-	// the bootstrap ConfigMap (the gNB must reload). Kept as the baseline path.
-	PushEphemerisUpdate(ctx context.Context, crName, namespace string, update EphemerisUpdate) error
+	// the bootstrap ConfigMap (the gNB must reload). Kept as the baseline path. It
+	// re-verifies the ConfigMap is controller-owned by owner before mutating it, so
+	// it never rewrites a foreign object (ErrConfigMapNotOwned if it is not).
+	PushEphemerisUpdate(ctx context.Context, owner *ntnv1alpha1.NTNCellConfig, update EphemerisUpdate) error
 
 	// PushRuntimeUpdate pushes a runtime NTN config update to the gNB's
 	// remote-control WebSocket (OCUDU ntn_config_update, MR !798) — a live update
@@ -120,13 +133,10 @@ type NTNProvider interface {
 	// provider or target has no runtime transport configured.
 	PushRuntimeUpdate(ctx context.Context, target ResolvedRemoteControl, update RuntimeUpdate) error
 
-	// EnsureOwnership sets ownership metadata (e.g., OwnerReference) on
-	// the provider's managed artifact so it is garbage-collected when
-	// the parent NTNCellConfig CR is deleted.
-	EnsureOwnership(ctx context.Context, crName string, owner metav1.Object, scheme *runtime.Scheme) error
-
-	// Cleanup removes provider-managed artifacts for the given CR name
-	// and namespace. Called by the finalizer during CR deletion.
-	// Returns nil if there is nothing to clean up (artifact not found).
-	Cleanup(ctx context.Context, crName, namespace string) error
+	// Cleanup removes provider-managed artifacts owned by the given CR. Called by
+	// the finalizer during CR deletion. It deletes the artifact only when it is
+	// controller-owned by owner (UID match via metav1.IsControlledBy), so a
+	// same-named artifact the operator does not own is left untouched. Returns nil
+	// if there is nothing to clean up.
+	Cleanup(ctx context.Context, owner *ntnv1alpha1.NTNCellConfig) error
 }

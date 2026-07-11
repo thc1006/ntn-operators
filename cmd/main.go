@@ -219,7 +219,11 @@ func main() {
 		os.Exit(1)
 	}
 	providers := map[string]provider.NTNProvider{
-		"ocudu": ocudu.NewProvider(mgr.GetClient()),
+		// WithAPIReader wires the uncached reader so ownership checks and the status
+		// read-back see a just-created ConfigMap immediately, instead of racing the
+		// eventually-consistent informer cache (which would persist an empty
+		// configMapRef on the first reconcile and only self-heal on the 5m requeue).
+		"ocudu": ocudu.NewProvider(mgr.GetClient()).WithAPIReader(mgr.GetAPIReader()),
 	}
 	if err := (&controller.NTNCellConfigReconciler{
 		Client:                  mgr.GetClient(),

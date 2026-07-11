@@ -441,6 +441,65 @@ var _ = Describe("Manager", Ordered, func() {
 			}, 60*time.Second, 2*time.Second).Should(Succeed())
 		})
 
+		It("should recreate a same-named NTNCellConfig with a fresh owned ConfigMap", func() {
+			const testNS = "default"
+			const cmName = "ocudu-ntn-ntn-cell-geo-demo"
+			sample := filepath.Join("config", "samples", "ntn_v1alpha1_ntncellconfig.yaml")
+
+			apply := func() {
+				out, err := utils.Run(exec.Command("kubectl", "apply", "-n", testNS, "-f", sample))
+				Expect(err).NotTo(HaveOccurred(), out)
+			}
+			waitApplied := func() {
+				Eventually(func(g Gomega) {
+					out, err := utils.Run(exec.Command("kubectl", "get", "ntncellconfigs", "ntn-cell-geo-demo",
+						"-n", testNS, "-o", "jsonpath={.status.conditions[?(@.type=='ConfigApplied')].status}"))
+					g.Expect(err).NotTo(HaveOccurred())
+					g.Expect(out).To(Equal("True"))
+				}, 2*time.Minute, 5*time.Second).Should(Succeed())
+			}
+			crUID := func() string {
+				out, err := utils.Run(exec.Command("kubectl", "get", "ntncellconfigs", "ntn-cell-geo-demo",
+					"-n", testNS, "-o", "jsonpath={.metadata.uid}"))
+				Expect(err).NotTo(HaveOccurred())
+				return out
+			}
+			cmOwnerUID := func() string {
+				out, _ := utils.Run(exec.Command("kubectl", "get", "configmap", cmName,
+					"-n", testNS, "-o", "jsonpath={.metadata.ownerReferences[0].uid}"))
+				return out
+			}
+
+			By("creating NTNCellConfig and confirming the ConfigMap is controller-owned by it")
+			apply()
+			DeferCleanup(func() {
+				_, _ = utils.Run(exec.Command("kubectl", "delete", "-n", testNS, "ntncellconfigs",
+					"ntn-cell-geo-demo", "--ignore-not-found", "--timeout=30s"))
+			})
+			waitApplied()
+			firstUID := crUID()
+			Expect(firstUID).NotTo(BeEmpty())
+			Eventually(cmOwnerUID, 30*time.Second, 2*time.Second).Should(Equal(firstUID),
+				"ConfigMap must carry an ownerReference to the CR (controller reference set atomically at create)")
+
+			By("deleting the NTNCellConfig and confirming the ConfigMap is removed")
+			out, err := utils.Run(exec.Command("kubectl", "delete", "-n", testNS, "ntncellconfigs",
+				"ntn-cell-geo-demo", "--timeout=60s"))
+			Expect(err).NotTo(HaveOccurred(), out)
+			Eventually(func(g Gomega) {
+				o, e := utils.Run(exec.Command("kubectl", "get", "configmap", cmName, "-n", testNS))
+				g.Expect(e != nil || strings.Contains(o, "NotFound") || strings.Contains(o, "not found")).To(BeTrue())
+			}, 60*time.Second, 2*time.Second).Should(Succeed())
+
+			By("recreating a same-named NTNCellConfig and confirming a FRESH ConfigMap owned by the new CR")
+			apply()
+			waitApplied()
+			secondUID := crUID()
+			Expect(secondUID).NotTo(Equal(firstUID), "the recreated CR must have a new UID")
+			Eventually(cmOwnerUID, 30*time.Second, 2*time.Second).Should(Equal(secondUID),
+				"the recreated CR must own a fresh ConfigMap, not a stale/foreign one")
+		})
+
 		It("should reconcile SatelliteEphemeris and populate status", func() {
 			const testNS = "default"
 

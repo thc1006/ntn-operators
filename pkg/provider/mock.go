@@ -20,7 +20,6 @@ import (
 	"context"
 	"sync"
 
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 
 	ntnv1alpha1 "github.com/thc1006/ntn-operators/api/v1alpha1"
@@ -40,6 +39,8 @@ type MockProvider struct {
 	EphemerisCalls int
 	RuntimeErr     error
 	RuntimeCalls   int
+	CleanupErr     error
+	CleanupCalls   int
 	LastSpec       *ntnv1alpha1.NTNCellConfigSpec
 	LastEphemeris  *EphemerisUpdate
 	LastRuntime    *RuntimeUpdate
@@ -47,7 +48,9 @@ type MockProvider struct {
 	StatusValue    *ntnv1alpha1.NTNCellConfigStatus
 }
 
-func (m *MockProvider) ApplyCellConfig(_ context.Context, _ string, spec *ntnv1alpha1.NTNCellConfigSpec) error {
+func (m *MockProvider) ApplyCellConfig(
+	_ context.Context, _ *ntnv1alpha1.NTNCellConfig, spec *ntnv1alpha1.NTNCellConfigSpec, _ *runtime.Scheme,
+) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.ApplyCalls++
@@ -65,7 +68,9 @@ func (m *MockProvider) GetCellStatus(_ context.Context, _, _ string) (*ntnv1alph
 	return &ntnv1alpha1.NTNCellConfigStatus{}, m.StatusErr
 }
 
-func (m *MockProvider) PushEphemerisUpdate(_ context.Context, _, _ string, update EphemerisUpdate) error {
+func (m *MockProvider) PushEphemerisUpdate(
+	_ context.Context, _ *ntnv1alpha1.NTNCellConfig, update EphemerisUpdate,
+) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.EphemerisCalls++
@@ -82,12 +87,9 @@ func (m *MockProvider) PushRuntimeUpdate(_ context.Context, target ResolvedRemot
 	return m.RuntimeErr
 }
 
-func (m *MockProvider) EnsureOwnership(
-	_ context.Context, _ string, _ metav1.Object, _ *runtime.Scheme,
-) error {
-	return nil
-}
-
-func (m *MockProvider) Cleanup(_ context.Context, _, _ string) error {
-	return nil
+func (m *MockProvider) Cleanup(_ context.Context, _ *ntnv1alpha1.NTNCellConfig) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.CleanupCalls++
+	return m.CleanupErr
 }

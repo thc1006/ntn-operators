@@ -18,6 +18,7 @@ package ocudu
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -25,7 +26,9 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	ntnv1alpha1 "github.com/thc1006/ntn-operators/api/v1alpha1"
 	"github.com/thc1006/ntn-operators/pkg/provider"
@@ -57,19 +60,207 @@ func newTestProvider(t *testing.T) *Provider {
 
 	// Pre-create the target namespace.
 	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "ntn-system"}}
-	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(ns).Build()
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(ns).Build()
 
-	return NewProvider(client)
+	return NewProvider(cl)
+}
+
+// ownerFor returns an NTNCellConfig usable as the ApplyCellConfig/Cleanup owner,
+// in the provider namespace with a stable UID derived from name (so a same-named
+// owner compares equal under metav1.IsControlledBy, and a different name → a
+// different UID).
+func ownerFor(name string) *ntnv1alpha1.NTNCellConfig {
+	return &ntnv1alpha1.NTNCellConfig{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "ntn-system", UID: types.UID("uid-" + name)},
+	}
+}
+
+// ownerScheme is a scheme with the types SetControllerReference needs to resolve
+// the owner's GroupVersionKind.
+func ownerScheme(t *testing.T) *runtime.Scheme {
+	t.Helper()
+	s := runtime.NewScheme()
+	if err := corev1.AddToScheme(s); err != nil {
+		t.Fatalf("AddToScheme(corev1): %v", err)
+	}
+	if err := ntnv1alpha1.AddToScheme(s); err != nil {
+		t.Fatalf("AddToScheme(ntnv1alpha1): %v", err)
+	}
+	return s
 }
 
 // Compile-time check: Provider implements NTNProvider.
 var _ provider.NTNProvider = &Provider{}
 
+// newTestProviderWith builds a Provider whose fake client is pre-seeded with the
+// target namespace plus the given objects.
+func newTestProviderWith(t *testing.T, objs ...client.Object) *Provider {
+	t.Helper()
+	scheme := ownerScheme(t)
+	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "ntn-system"}}
+	b := fake.NewClientBuilder().WithScheme(scheme).WithObjects(ns)
+	for _, o := range objs {
+		b = b.WithObjects(o)
+	}
+	return NewProvider(b.Build())
+}
+
+// seedConfigMap builds the ConfigMap for the "cell-a" test CR, optionally
+// operator-labeled and/or controller-owned by controllerRef.
+func seedConfigMap(t *testing.T, labeled bool, controllerRef *ntnv1alpha1.NTNCellConfig) *corev1.ConfigMap {
+	t.Helper()
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: ConfigMapNameFor("cell-a"), Namespace: "ntn-system"},
+		Data:       map[string]string{"geo_ntn.yml": "seed"},
+	}
+	if labeled {
+		cm.Labels = map[string]string{managedByLabel: managedByValue, componentLabel: componentValue}
+	}
+	if controllerRef != nil {
+		if err := controllerutil.SetControllerReference(controllerRef, cm, ownerScheme(t)); err != nil {
+			t.Fatalf("SetControllerReference: %v", err)
+		}
+	}
+	return cm
+}
+
+// TestApplyCellConfig_SetsControllerReferenceAtomically: the ConfigMap is
+// controller-owned by the CR the instant it is created (so K8s GC removes it with
+// the CR), not via a separate best-effort step.
+func TestApplyCellConfig_SetsControllerReferenceAtomically(t *testing.T) {
+	p := newTestProvider(t)
+	owner := ownerFor("cell-a")
+	if err := p.ApplyCellConfig(context.Background(), owner, geoSpec(), ownerScheme(t)); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	cm := &corev1.ConfigMap{}
+	key := types.NamespacedName{Name: ConfigMapNameFor("cell-a"), Namespace: "ntn-system"}
+	if err := p.client.Get(context.Background(), key, cm); err != nil {
+		t.Fatal(err)
+	}
+	if !metav1.IsControlledBy(cm, owner) {
+		t.Fatalf("ConfigMap not controller-owned at create; ownerRefs=%v", cm.OwnerReferences)
+	}
+}
+
+// TestApplyCellConfig_OwnershipCollision: a same-named ConfigMap owned by another
+// CR (different UID) or an unlabeled foreign object is refused (ErrConfigMapNotOwned)
+// and left unchanged; an unowned but operator-labeled leftover is adopted.
+func TestApplyCellConfig_OwnershipCollision(t *testing.T) {
+	ctx := context.Background()
+	cmName := ConfigMapNameFor("cell-a")
+	get := func(p *Provider) *corev1.ConfigMap {
+		cm := &corev1.ConfigMap{}
+		_ = p.client.Get(ctx, types.NamespacedName{Name: cmName, Namespace: "ntn-system"}, cm)
+		return cm
+	}
+
+	t.Run("owned by a different-UID CR -> refused, unchanged", func(t *testing.T) {
+		other := ownerFor("cell-a")
+		other.UID = "different-uid"
+		p := newTestProviderWith(t, seedConfigMap(t, true, other))
+		err := p.ApplyCellConfig(ctx, ownerFor("cell-a"), geoSpec(), ownerScheme(t))
+		if !errors.Is(err, provider.ErrConfigMapNotOwned) {
+			t.Fatalf("want ErrConfigMapNotOwned, got %v", err)
+		}
+		if get(p).Data["geo_ntn.yml"] != "seed" {
+			t.Error("foreign ConfigMap must not be overwritten")
+		}
+	})
+
+	t.Run("unlabeled foreign object -> refused", func(t *testing.T) {
+		p := newTestProviderWith(t, seedConfigMap(t, false, nil))
+		err := p.ApplyCellConfig(ctx, ownerFor("cell-a"), geoSpec(), ownerScheme(t))
+		if !errors.Is(err, provider.ErrConfigMapNotOwned) {
+			t.Fatalf("want ErrConfigMapNotOwned, got %v", err)
+		}
+	})
+
+	t.Run("unowned but operator-labeled -> adopted", func(t *testing.T) {
+		p := newTestProviderWith(t, seedConfigMap(t, true, nil))
+		owner := ownerFor("cell-a")
+		if err := p.ApplyCellConfig(ctx, owner, geoSpec(), ownerScheme(t)); err != nil {
+			t.Fatalf("adopt should succeed: %v", err)
+		}
+		if !metav1.IsControlledBy(get(p), owner) {
+			t.Error("operator-labeled leftover should be adopted (controller ref set)")
+		}
+	})
+
+	t.Run("labeled but no geo_ntn.yml -> refused (not adopted)", func(t *testing.T) {
+		// A labeled-but-empty impostor never held our config: adoption must require
+		// the geo_ntn.yml key, not the labels alone, so a squatter cannot get itself
+		// controller-owned (and GC-cascaded) by copying two well-known label values.
+		impostor := &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      cmName,
+				Namespace: "ntn-system",
+				Labels:    map[string]string{managedByLabel: managedByValue, componentLabel: componentValue},
+			},
+		}
+		p := newTestProviderWith(t, impostor)
+		err := p.ApplyCellConfig(ctx, ownerFor("cell-a"), geoSpec(), ownerScheme(t))
+		if !errors.Is(err, provider.ErrConfigMapNotOwned) {
+			t.Fatalf("want ErrConfigMapNotOwned, got %v", err)
+		}
+		if metav1.GetControllerOf(get(p)) != nil {
+			t.Error("labeled-but-empty impostor must not be adopted")
+		}
+	})
+}
+
+// TestCleanup_OwnershipUID: Cleanup deletes only a ConfigMap controlled by owner
+// (UID match); a same-name/different-UID one is left intact.
+func TestCleanup_OwnershipUID(t *testing.T) {
+	ctx := context.Background()
+	cmName := ConfigMapNameFor("cell-a")
+	exists := func(p *Provider) bool {
+		err := p.client.Get(ctx, types.NamespacedName{Name: cmName, Namespace: "ntn-system"}, &corev1.ConfigMap{})
+		return err == nil
+	}
+
+	t.Run("deletes an owned ConfigMap", func(t *testing.T) {
+		p := newTestProvider(t)
+		owner := ownerFor("cell-a")
+		if err := p.ApplyCellConfig(ctx, owner, geoSpec(), ownerScheme(t)); err != nil {
+			t.Fatal(err)
+		}
+		if err := p.Cleanup(ctx, owner); err != nil {
+			t.Fatalf("cleanup: %v", err)
+		}
+		if exists(p) {
+			t.Error("owned ConfigMap should be deleted")
+		}
+	})
+
+	t.Run("skips a same-name ConfigMap owned by a different-UID CR", func(t *testing.T) {
+		other := ownerFor("cell-a")
+		other.UID = "different-uid"
+		p := newTestProviderWith(t, seedConfigMap(t, true, other))
+		if err := p.Cleanup(ctx, ownerFor("cell-a")); err != nil {
+			t.Fatalf("cleanup: %v", err)
+		}
+		if !exists(p) {
+			t.Error("different-UID ConfigMap must NOT be deleted")
+		}
+	})
+
+	t.Run("skips an unowned ConfigMap", func(t *testing.T) {
+		p := newTestProviderWith(t, seedConfigMap(t, true, nil))
+		if err := p.Cleanup(ctx, ownerFor("cell-a")); err != nil {
+			t.Fatalf("cleanup: %v", err)
+		}
+		if !exists(p) {
+			t.Error("unowned ConfigMap must NOT be deleted")
+		}
+	})
+}
+
 func TestApplyCellConfig_CreatesConfigMap(t *testing.T) {
 	p := newTestProvider(t)
 	ctx := context.Background()
 
-	err := p.ApplyCellConfig(ctx, "test-cr", geoSpec())
+	err := p.ApplyCellConfig(ctx, ownerFor("test-cr"), geoSpec(), ownerScheme(t))
 	if err != nil {
 		t.Fatalf("ApplyCellConfig error: %v", err)
 	}
@@ -99,14 +290,14 @@ func TestApplyCellConfig_UpdatesExistingConfigMap(t *testing.T) {
 
 	// First apply.
 	spec := geoSpec()
-	err := p.ApplyCellConfig(ctx, "test-cr", spec)
+	err := p.ApplyCellConfig(ctx, ownerFor("test-cr"), spec, ownerScheme(t))
 	if err != nil {
 		t.Fatalf("first apply: %v", err)
 	}
 
 	// Update koffset and re-apply.
 	spec.NTN.CellSpecificKoffset = 500
-	err = p.ApplyCellConfig(ctx, "test-cr", spec)
+	err = p.ApplyCellConfig(ctx, ownerFor("test-cr"), spec, ownerScheme(t))
 	if err != nil {
 		t.Fatalf("second apply: %v", err)
 	}
@@ -127,7 +318,7 @@ func TestGetCellStatus_ReturnsAppliedConfig(t *testing.T) {
 	ctx := context.Background()
 
 	spec := geoSpec()
-	err := p.ApplyCellConfig(ctx, "test-cr", spec)
+	err := p.ApplyCellConfig(ctx, ownerFor("test-cr"), spec, ownerScheme(t))
 	if err != nil {
 		t.Fatalf("ApplyCellConfig: %v", err)
 	}
@@ -163,7 +354,7 @@ func TestApplyCellConfig_EmptyNamespace(t *testing.T) {
 
 	spec := geoSpec()
 	spec.Provider.Namespace = ""
-	err := p.ApplyCellConfig(ctx, "test-cr", spec)
+	err := p.ApplyCellConfig(ctx, ownerFor("test-cr"), spec, ownerScheme(t))
 	if err == nil {
 		t.Fatal("expected error for empty namespace")
 	}
@@ -175,13 +366,13 @@ func TestApplyCellConfig_UpdateExisting(t *testing.T) {
 
 	// First apply creates the ConfigMap.
 	spec := geoSpec()
-	if err := p.ApplyCellConfig(ctx, "test-cr", spec); err != nil {
+	if err := p.ApplyCellConfig(ctx, ownerFor("test-cr"), spec, ownerScheme(t)); err != nil {
 		t.Fatalf("first apply: %v", err)
 	}
 
 	// Second apply with different koffset should update.
 	spec.NTN.CellSpecificKoffset = 200
-	if err := p.ApplyCellConfig(ctx, "test-cr", spec); err != nil {
+	if err := p.ApplyCellConfig(ctx, ownerFor("test-cr"), spec, ownerScheme(t)); err != nil {
 		t.Fatalf("second apply: %v", err)
 	}
 
@@ -198,7 +389,7 @@ func TestApplyCellConfig_UpdateExisting(t *testing.T) {
 
 func TestApplyCellConfig_NilSpec(t *testing.T) {
 	p := newTestProvider(t)
-	err := p.ApplyCellConfig(context.Background(), "cr", nil)
+	err := p.ApplyCellConfig(context.Background(), ownerFor("cr"), nil, ownerScheme(t))
 	if err == nil {
 		t.Fatal("expected error for nil spec")
 	}
@@ -270,7 +461,7 @@ func TestPushEphemerisUpdate_ECEF(t *testing.T) {
 
 	// First apply to create the ConfigMap.
 	spec := geoSpec()
-	if err := p.ApplyCellConfig(ctx, "test-cr", spec); err != nil {
+	if err := p.ApplyCellConfig(ctx, ownerFor("test-cr"), spec, ownerScheme(t)); err != nil {
 		t.Fatalf("ApplyCellConfig: %v", err)
 	}
 
@@ -281,7 +472,7 @@ func TestPushEphemerisUpdate_ECEF(t *testing.T) {
 			VelX: 10, VelY: 20, VelZ: 30,
 		},
 	}
-	if err := p.PushEphemerisUpdate(ctx, "test-cr", "ntn-system", update); err != nil {
+	if err := p.PushEphemerisUpdate(ctx, ownerFor("test-cr"), update); err != nil {
 		t.Fatalf("PushEphemerisUpdate: %v", err)
 	}
 
@@ -314,7 +505,7 @@ func TestPushEphemerisUpdate_Orbital(t *testing.T) {
 	ctx := context.Background()
 
 	// First apply to create the ConfigMap.
-	if err := p.ApplyCellConfig(ctx, "test-cr", geoSpec()); err != nil {
+	if err := p.ApplyCellConfig(ctx, ownerFor("test-cr"), geoSpec(), ownerScheme(t)); err != nil {
 		t.Fatalf("ApplyCellConfig: %v", err)
 	}
 
@@ -329,7 +520,7 @@ func TestPushEphemerisUpdate_Orbital(t *testing.T) {
 			MeanAnomaly:    100000,
 		},
 	}
-	if err := p.PushEphemerisUpdate(ctx, "test-cr", "ntn-system", update); err != nil {
+	if err := p.PushEphemerisUpdate(ctx, ownerFor("test-cr"), update); err != nil {
 		t.Fatalf("PushEphemerisUpdate: %v", err)
 	}
 
@@ -357,7 +548,7 @@ func TestPushEphemerisUpdate_Orbital(t *testing.T) {
 func TestPushEphemerisUpdate_BothSet(t *testing.T) {
 	p := newTestProvider(t)
 	err := p.PushEphemerisUpdate(
-		context.Background(), "cr", "ns",
+		context.Background(), ownerFor("cr"),
 		provider.EphemerisUpdate{
 			ECEF:    &ntnv1alpha1.EphemerisECEF{PosX: 1},
 			Orbital: &ntnv1alpha1.EphemerisOrbital{SemiMajorAxis: 1},
@@ -375,7 +566,7 @@ func TestPushEphemerisUpdate_NoConfigMap(t *testing.T) {
 	update := provider.EphemerisUpdate{
 		ECEF: &ntnv1alpha1.EphemerisECEF{PosX: 1},
 	}
-	err := p.PushEphemerisUpdate(ctx, "nonexistent", "ntn-system", update)
+	err := p.PushEphemerisUpdate(ctx, ownerFor("nonexistent"), update)
 	if err == nil {
 		t.Fatal("expected error when ConfigMap doesn't exist")
 	}
@@ -384,7 +575,7 @@ func TestPushEphemerisUpdate_NoConfigMap(t *testing.T) {
 func TestPushEphemerisUpdate_NeitherSet(t *testing.T) {
 	p := newTestProvider(t)
 	err := p.PushEphemerisUpdate(
-		context.Background(), "cr", "ns", provider.EphemerisUpdate{},
+		context.Background(), ownerFor("cr"), provider.EphemerisUpdate{},
 	)
 	if err == nil {
 		t.Fatal("expected error when neither ECEF nor Orbital is set")
@@ -418,6 +609,10 @@ cell_cfg:
 		},
 		Data: map[string]string{"geo_ntn.yml": yamlWithComments},
 	}
+	// The push path re-verifies ownership, so the seeded ConfigMap must be owned.
+	if err := controllerutil.SetControllerReference(ownerFor("test"), cm, scheme); err != nil {
+		t.Fatal(err)
+	}
 	ns := &corev1.Namespace{
 		ObjectMeta: metav1.ObjectMeta{Name: "ntn-system"},
 	}
@@ -432,7 +627,7 @@ cell_cfg:
 		},
 	}
 	err := p.PushEphemerisUpdate(
-		context.Background(), "test", "ntn-system", update,
+		context.Background(), ownerFor("test"), update,
 	)
 	if err != nil {
 		t.Fatalf("PushEphemerisUpdate: %v", err)
@@ -477,6 +672,10 @@ func TestPushEphemerisUpdate_MissingGeoNtn(t *testing.T) {
 		},
 		Data: map[string]string{}, // missing geo_ntn.yml
 	}
+	// The push path re-verifies ownership, so the seeded ConfigMap must be owned.
+	if err := controllerutil.SetControllerReference(ownerFor("test"), cm, scheme); err != nil {
+		t.Fatal(err)
+	}
 	ns := &corev1.Namespace{
 		ObjectMeta: metav1.ObjectMeta{Name: "ntn-system"},
 	}
@@ -488,12 +687,26 @@ func TestPushEphemerisUpdate_MissingGeoNtn(t *testing.T) {
 		ECEF: &ntnv1alpha1.EphemerisECEF{PosX: 1, PosY: 2, PosZ: 3},
 	}
 	err := p.PushEphemerisUpdate(
-		context.Background(), "test", "ntn-system", update,
+		context.Background(), ownerFor("test"), update,
 	)
 	if err == nil {
 		t.Fatal("expected error for missing geo_ntn.yml")
 	}
 	if !contains(err.Error(), "missing geo_ntn.yml") {
 		t.Errorf("expected 'missing geo_ntn.yml' in error, got: %v", err)
+	}
+}
+
+// PushEphemerisUpdate must refuse to rewrite a same-named ConfigMap owned by a
+// different CR (defense-in-depth for a foreign object created between apply and
+// push), mirroring ApplyCellConfig/Cleanup.
+func TestPushEphemerisUpdate_RefusesForeignConfigMap(t *testing.T) {
+	other := ownerFor("cell-a")
+	other.UID = "different-uid"
+	p := newTestProviderWith(t, seedConfigMap(t, true, other))
+	err := p.PushEphemerisUpdate(context.Background(), ownerFor("cell-a"),
+		provider.EphemerisUpdate{ECEF: &ntnv1alpha1.EphemerisECEF{PosX: 9, PosY: 9, PosZ: 9}})
+	if !errors.Is(err, provider.ErrConfigMapNotOwned) {
+		t.Fatalf("want ErrConfigMapNotOwned, got %v", err)
 	}
 }
