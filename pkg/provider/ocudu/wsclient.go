@@ -260,6 +260,10 @@ const (
 	wsMarshal
 	// wsRejected: the gNB replied {"error": ...} — permanent (bad config).
 	wsRejected
+	// wsHandshakeRejected: the handshake got a definitive HTTP response (a refused
+	// redirect, an auth rejection, or another non-101 in the 3xx/4xx range) rather
+	// than an Upgrade — permanent (config/credential), must not tight-requeue.
+	wsHandshakeRejected
 )
 
 // wsError is a typed runtime-push error carrying a kind for requeue decisions.
@@ -302,18 +306,37 @@ func pushNTNConfigUpdate(
 	// (incl. TLS) through the supplied http.Client, so Transport.TLSClientConfig is
 	// the TLS lever; the bearer header rides only over that TLS connection.
 	scheme := "ws://"
-	var dialOpts *websocket.DialOptions
+	// Refuse to follow redirects on the handshake. coder/websocket follows redirects
+	// by default (its wrapper only rewrites the ws/wss scheme, then honors the
+	// caller's CheckRedirect) and Go preserves the Authorization header on a
+	// same-host redirect — so a gNB/proxy 302 from wss:// to http://same-host would
+	// resend the bearer over cleartext. ErrUseLastResponse stops the client at the
+	// 30x, before it re-sends anything, on both the wss and plaintext paths.
+	dialOpts := &websocket.DialOptions{
+		HTTPClient: &http.Client{
+			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		},
+	}
 	if target.TLSConfig != nil {
 		scheme = "wss://"
-		dialOpts = &websocket.DialOptions{
-			HTTPClient: &http.Client{Transport: &http.Transport{TLSClientConfig: target.TLSConfig}},
-		}
+		dialOpts.HTTPClient.Transport = &http.Transport{TLSClientConfig: target.TLSConfig}
 		if target.AuthToken != "" {
 			dialOpts.HTTPHeader = http.Header{"Authorization": {"Bearer " + target.AuthToken}}
 		}
 	}
-	conn, _, err := websocket.Dial(dialCtx, scheme+endpoint, dialOpts)
+	conn, resp, err := websocket.Dial(dialCtx, scheme+endpoint, dialOpts)
 	if err != nil {
+		// A definitive HTTP handshake response (a refused redirect, an auth rejection,
+		// or any non-101 in the 3xx/4xx range) is a PERMANENT config/credential problem,
+		// not transient unreachability — classify it non-retryable so the reconciler does
+		// not tight-requeue it every minute (mirroring RemoteControlConfigInvalid). A nil
+		// response is a connection-level failure (dial/TLS/timeout, or a 5xx server error)
+		// and stays retryable. coder/websocket owns resp.Body, so we only read the status.
+		if resp != nil && resp.StatusCode >= 300 && resp.StatusCode < 500 {
+			return &wsError{wsHandshakeRejected, fmt.Sprintf("handshake to %s rejected: HTTP %d", endpoint, resp.StatusCode)}
+		}
 		return &wsError{wsUnreachable, fmt.Sprintf("dial %s: %v", endpoint, err)}
 	}
 	// CloseNow (not the graceful Close) on every path: the single request/reply

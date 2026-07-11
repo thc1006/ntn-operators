@@ -341,6 +341,59 @@ func TestPushNTNConfigUpdate_WSS_UntrustedCertFails(t *testing.T) {
 	}
 }
 
+// TestPushNTNConfigUpdate_WSS_RefusesRedirectDowngrade pins the redirect-downgrade
+// defense: a gNB/proxy 302 from wss:// to a plaintext http:// endpoint on the same
+// host must NOT be followed, so the Authorization bearer never leaves the TLS
+// connection. Without the CheckRedirect guard, coder/websocket follows the redirect
+// and Go re-sends the same-host Authorization header over cleartext. The plaintext
+// capture server (different port, same 127.0.0.1 host — so Go would preserve the
+// header) must never see it.
+func TestPushNTNConfigUpdate_WSS_RefusesRedirectDowngrade(t *testing.T) {
+	var mu sync.Mutex
+	plaintextSawAuth := false
+	capture := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "" {
+			mu.Lock()
+			plaintextSawAuth = true
+			mu.Unlock()
+		}
+	}))
+	t.Cleanup(capture.Close)
+
+	// A TLS server that redirects the handshake to the plaintext capture endpoint.
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, capture.URL+"/downgraded", http.StatusFound)
+	}))
+	t.Cleanup(srv.Close)
+	endpoint := strings.TrimPrefix(srv.URL, "https://")
+
+	pool := x509.NewCertPool()
+	pool.AddCert(srv.Certificate())
+	target := provider.ResolvedRemoteControl{
+		Endpoint:  endpoint,
+		TLSConfig: &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12},
+		AuthToken: "s3cr3t-token",
+	}
+	env, _ := buildNTNConfigUpdate(ecefRuntimeUpdate())
+	// A 302 is not a valid WS upgrade and must not be followed → the dial fails.
+	err := pushNTNConfigUpdate(context.Background(), target, env)
+	if err == nil {
+		t.Fatal("a handshake that 302-redirects must fail, not be followed")
+	}
+	// And it must be classified PERMANENT (a refused redirect is a config/attack, not a
+	// transient blip) so the reconciler does not tight-requeue it every minute.
+	var we *wsError
+	if !errors.As(err, &we) || we.retryable() {
+		t.Fatalf("a refused-redirect handshake must be non-retryable (permanent), got %v", err)
+	}
+	mu.Lock()
+	leaked := plaintextSawAuth
+	mu.Unlock()
+	if leaked {
+		t.Fatal("SECURITY: the bearer Authorization header was sent to the plaintext redirect target")
+	}
+}
+
 func TestPushNTNConfigUpdate_Rejected(t *testing.T) {
 	endpoint, _ := wsTestServer(t, `{"error":"epoch_timestamp value is in past","cmd":"ntn_config_update"}`)
 	env, _ := buildNTNConfigUpdate(ecefRuntimeUpdate())
