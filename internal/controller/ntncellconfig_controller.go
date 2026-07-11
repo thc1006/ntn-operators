@@ -222,17 +222,23 @@ func (r *NTNCellConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		"provider", spec.Provider.Type,
 		"koffset", spec.NTN.CellSpecificKoffset)
 
-	if err := prov.ApplyCellConfig(ctx, cc.Name, spec); err != nil {
+	if err := prov.ApplyCellConfig(ctx, cc, spec, r.Scheme); err != nil {
 		log.Error(err, "Failed to apply cell config")
 		ntnmetrics.ConfigApplyErrorsTotal.With(prometheus.Labels{
 			"namespace": cc.Namespace, "config": cc.Name, "provider": spec.Provider.Type,
 		}).Inc()
 		cc.Status.AppliedKoffset = 0
+		// A ConfigMap-ownership collision is distinct from a generic apply failure:
+		// the operator refuses to overwrite a ConfigMap it does not own.
+		reason := "ApplyFailed"
+		if errors.Is(err, provider.ErrConfigMapNotOwned) {
+			reason = "OwnershipConflict"
+		}
 		// Preserve existing ConfigMapRef for best-effort finalizer cleanup.
 		meta.SetStatusCondition(&cc.Status.Conditions, metav1.Condition{
 			Type:               ntnv1alpha1.ConditionConfigApplied,
 			Status:             metav1.ConditionFalse,
-			Reason:             "ApplyFailed",
+			Reason:             reason,
 			Message:            err.Error(),
 			ObservedGeneration: cc.Generation,
 		})
@@ -240,15 +246,12 @@ func (r *NTNCellConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			return ctrl.Result{}, err
 		}
 		if r.Recorder != nil {
-			r.Recorder.Eventf(cc, nil, "Warning", "ApplyFailed", "ApplyFailed", "%s", err.Error())
+			r.Recorder.Eventf(cc, nil, "Warning", reason, reason, "%s", err.Error())
 		}
 		return ctrl.Result{RequeueAfter: time.Minute}, nil
 	}
-
-	// Step 5b: Ensure ownership on provider artifact for garbage collection.
-	if err := prov.EnsureOwnership(ctx, cc.Name, cc, r.Scheme); err != nil {
-		log.Error(err, "failed to ensure ownership on provider artifact")
-	}
+	// The controller reference is set ATOMICALLY at ConfigMap creation inside
+	// ApplyCellConfig, so no separate best-effort ownership step is needed.
 
 	// Step 6: Get applied status from provider.
 	status, err := prov.GetCellStatus(ctx, cc.Name, spec.Provider.Namespace)
@@ -385,7 +388,7 @@ func (r *NTNCellConfigReconciler) handleFinalizer(
 				controllerutil.RemoveFinalizer(cc, finalizerName)
 				return true, ctrl.Result{}, r.Update(ctx, cc)
 			}
-			if err := prov.Cleanup(ctx, cc.Name, cc.Namespace); err != nil {
+			if err := prov.Cleanup(ctx, cc); err != nil {
 				log.Error(err, "Failed to cleanup provider artifact during finalization")
 				return true, ctrl.Result{}, err
 			}
