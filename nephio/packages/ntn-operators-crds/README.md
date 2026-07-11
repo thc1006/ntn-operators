@@ -18,7 +18,7 @@ The CRD YAMLs are regenerated from `api/v1alpha1/*_types.go` via `controller-gen
 
 ## Prerequisites
 
-- Kubernetes 1.29+ (CEL validation is used extensively, and is GA from 1.29)
+- Kubernetes 1.31+ (the CRD validation uses the CEL IP-address library `isIP`, added in 1.31)
 - `kpt` v1.0.0-beta.55+ for package consumption (`kpt version`)
 - Cluster-admin permissions on the target cluster (CRD install is cluster-scoped)
 
@@ -73,10 +73,10 @@ Warning: deleting a CRD cascade-deletes every CustomResource of that kind. If yo
 
 ## Version compatibility
 
-| ntn-operators tag | Nephio release tested | K8s tested |
-|---|---|---|
-| `main` | R6 (Porch v1.5.6) | 1.29 - 1.35 |
-| `v0.1.0` | (not validated on Nephio) | 1.29+ |
+| ntn-operators tag | Nephio release tested | K8s minimum | K8s CI-exercised |
+|---|---|---|---|
+| `main` | R6 (Porch v1.5.6) | 1.31 (isIP CEL) | envtest 1.35 + Kind e2e |
+| `v0.1.0` | (not validated on Nephio) | 1.29 (pre-isIP) | — |
 
 ## License
 

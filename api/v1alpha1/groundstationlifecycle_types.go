@@ -25,18 +25,23 @@ import (
 type HardwareSpec struct {
 	// vendor is the hardware manufacturer (e.g., "ennoconn").
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
 	Vendor string `json:"vendor"`
 
 	// model is the hardware model identifier.
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
 	Model string `json:"model"`
 
 	// antennaType is the antenna type (e.g., "flat-panel", "parabolic").
 	// +optional
+	// +kubebuilder:validation:MaxLength=64
 	AntennaType string `json:"antennaType,omitempty"`
 
 	// bands lists the supported frequency bands (e.g., ["Ka", "Ku", "S"]).
 	// +optional
+	// +kubebuilder:validation:MaxItems=16
+	// +kubebuilder:validation:items:MaxLength=16
 	Bands []string `json:"bands,omitempty"`
 }
 
@@ -48,14 +53,17 @@ type HardwareSpec struct {
 type GeoLocation struct {
 	// lat is the latitude in decimal degrees (string, e.g., "25.0330").
 	// +kubebuilder:validation:Pattern=`^-?[0-9]+\.?[0-9]*$`
+	// +kubebuilder:validation:MaxLength=32
 	Lat string `json:"lat"`
 
 	// lon is the longitude in decimal degrees (string, e.g., "121.5654").
 	// +kubebuilder:validation:Pattern=`^-?[0-9]+\.?[0-9]*$`
+	// +kubebuilder:validation:MaxLength=32
 	Lon string `json:"lon"`
 
 	// alt is the altitude in meters above sea level (string, e.g., "15").
 	// +optional
+	// +kubebuilder:validation:MaxLength=32
 	Alt string `json:"alt,omitempty"`
 }
 
@@ -72,6 +80,7 @@ type DeploymentSpec struct {
 
 	// gitopsRepo is the Git repository URL for GitOps-managed configuration.
 	// +optional
+	// +kubebuilder:validation:MaxLength=2048
 	GitopsRepo string `json:"gitopsRepo,omitempty"`
 }
 
@@ -83,6 +92,7 @@ type MonitoringSpec struct {
 
 	// endpoint is the monitoring endpoint of the ground station agent.
 	// +optional
+	// +kubebuilder:validation:MaxLength=261
 	Endpoint string `json:"endpoint,omitempty"`
 }
 
@@ -94,6 +104,7 @@ type FirmwareSpec struct {
 
 	// channel is the firmware update channel (e.g., "stable", "beta").
 	// +kubebuilder:default="stable"
+	// +kubebuilder:validation:MaxLength=64
 	Channel string `json:"channel,omitempty"`
 
 	// maintenanceWindow is the time window for updates.

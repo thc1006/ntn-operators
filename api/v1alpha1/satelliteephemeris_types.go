@@ -41,6 +41,7 @@ type EphemerisSource struct {
 	// For SpaceTrack: https://www.space-track.org/basicspacedata/query/class/gp/...
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:Pattern=`^https?://`
+	// +kubebuilder:validation:MaxLength=2048
 	URL string `json:"url"`
 
 	// refreshInterval is how often to re-fetch GP data.
@@ -58,9 +59,11 @@ type EphemerisSource struct {
 // SecretReference points to a Kubernetes Secret.
 type SecretReference struct {
 	// name of the Secret.
+	// +kubebuilder:validation:MaxLength=253
 	Name string `json:"name"`
 	// key within the Secret data.
 	// +kubebuilder:default="password"
+	// +kubebuilder:validation:MaxLength=253
 	Key string `json:"key,omitempty"`
 }
 
@@ -72,6 +75,7 @@ type SatelliteSelector struct {
 
 	// noradIDs is an explicit list of NORAD catalog IDs to track.
 	// +optional
+	// +kubebuilder:validation:MaxItems=512
 	NoradIDs []int `json:"noradIDs,omitempty"`
 }
 
@@ -80,11 +84,14 @@ type PassPredictionSpec struct {
 	// groundStations is a list of GroundStationLifecycle resource names
 	// to compute pass windows against.
 	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=64
+	// +kubebuilder:validation:items:MaxLength=253
 	GroundStations []string `json:"groundStations"`
 
 	// minElevation is the minimum elevation angle in degrees (string, e.g., "10").
 	// +kubebuilder:default="10"
 	// +kubebuilder:validation:Pattern=`^-?[0-9]+\.?[0-9]*$`
+	// +kubebuilder:validation:MaxLength=32
 	MinElevation string `json:"minElevation,omitempty"`
 
 	// horizon is how far into the future to predict passes.
@@ -196,6 +203,7 @@ const (
 // +kubebuilder:resource:shortName=sateph
 // +kubebuilder:printcolumn:name="Satellites",type=integer,JSONPath=`.status.satelliteCount`
 // +kubebuilder:printcolumn:name="Last Updated",type=date,JSONPath=`.status.lastUpdated`
+// +kubebuilder:printcolumn:name="Fetched",type=string,JSONPath=`.status.conditions[?(@.type=="GPDataFetched")].status`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
 // SatelliteEphemeris manages GP data fetching (OMM JSON from CelesTrak/SpaceTrack),

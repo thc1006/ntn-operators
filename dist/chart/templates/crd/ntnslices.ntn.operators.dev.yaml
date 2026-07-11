@@ -29,6 +29,9 @@ spec:
     - jsonPath: .status.failoverCount
       name: Failovers
       type: integer
+    - jsonPath: .status.conditions[?(@.type=="FailoverReady")].status
+      name: Ready
+      type: string
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
@@ -109,6 +112,7 @@ spec:
                       the trigger (dB for RSRP, ms for latency, percent for packetLoss).
                       Example: with trigger "rsrp < -120" and hysteresisMargin "10",
                       failover fires at RSRP < -120, but switchback requires RSRP >= -110.
+                    maxLength: 32
                     pattern: ^[0-9]+\.?[0-9]*$
                     type: string
                   minTerrestrialDwell:
@@ -173,6 +177,7 @@ spec:
                       endpoint:
                         description: endpoint is the base URL of the Prometheus HTTP
                           API.
+                        maxLength: 2048
                         minLength: 1
                         pattern: ^https?://
                         type: string
@@ -183,15 +188,18 @@ spec:
                           latencyMs:
                             description: latencyMs is a PromQL expression returning
                               a scalar in milliseconds.
+                            maxLength: 1024
                             type: string
                           packetLossPercent:
                             description: |-
                               packetLossPercent is a PromQL expression returning a scalar in
                               percent (0-100).
+                            maxLength: 1024
                             type: string
                           rsrpDbm:
                             description: rsrpDbm is a PromQL expression returning
                               a scalar in dBm.
+                            maxLength: 1024
                             type: string
                         type: object
                       queryTimeout:
@@ -253,11 +261,13 @@ spec:
                 properties:
                   apn:
                     description: apn is the Access Point Name.
+                    maxLength: 253
                     type: string
                   ephemerisRef:
                     description: |-
                       ephemerisRef is the name of the SatelliteEphemeris resource
                       used to determine satellite pass availability.
+                    maxLength: 253
                     minLength: 1
                     type: string
                   priority:
@@ -268,6 +278,7 @@ spec:
                     type: string
                   provider:
                     description: provider is the network operator name (e.g., "chunghwa-telecom").
+                    maxLength: 253
                     minLength: 1
                     type: string
                 required:
@@ -298,6 +309,7 @@ spec:
                 type: object
               tenant:
                 description: tenant is the organization or entity that owns this slice.
+                maxLength: 253
                 minLength: 1
                 type: string
               terrestrialPath:
@@ -305,6 +317,7 @@ spec:
                 properties:
                   apn:
                     description: apn is the Access Point Name.
+                    maxLength: 253
                     type: string
                   priority:
                     description: priority is the path priority.
@@ -314,6 +327,7 @@ spec:
                     type: string
                   provider:
                     description: provider is the network operator name (e.g., "chunghwa-telecom").
+                    maxLength: 253
                     minLength: 1
                     type: string
                 required:

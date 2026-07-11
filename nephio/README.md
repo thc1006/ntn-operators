@@ -120,7 +120,7 @@ For multi-arch images (OCI image index, e.g. `set-labels`), pin the **index** di
 | Nephio | R6 (released 2026-04-01) |
 | Porch | v1.5.6+ |
 | `kpt` CLI | v1.0.0-beta.55 or newer |
-| Kubernetes | 1.29+ (CEL validation is GA from 1.29) |
+| Kubernetes | 1.31+ (the endpoint CEL uses the `isIP` IP-address library, added in 1.31) |
 | KRM function registry | `ghcr.io/kptdev/krm-functions-catalog` (Nephio R6 canonical; `gcr.io/kpt-fn/` tags are still current and functional) |
 | KRM function pinning | `@sha256:` digest (enforced by `hack/check-kptfile-digest-pin.sh` and `test/nephio/validate.sh` T15) |
 

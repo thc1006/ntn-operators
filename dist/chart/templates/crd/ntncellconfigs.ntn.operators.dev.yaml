@@ -29,6 +29,9 @@ spec:
     - jsonPath: .spec.ntn.payloadType
       name: Payload
       type: string
+    - jsonPath: .status.conditions[?(@.type=="ConfigApplied")].status
+      name: Applied
+      type: string
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
@@ -157,6 +160,7 @@ spec:
                   referenced SatelliteEphemeris is updated and invokes runtime ephemeris push
                   on the provider reconcile path. The static ephemeris in spec.ntn
                   (ephemerisECEF or ephemerisOrbital) remains required as the source payload.
+                maxLength: 253
                 minLength: 1
                 type: string
               ntn:
@@ -812,10 +816,12 @@ spec:
                   endpoint:
                     description: endpoint is the provider-specific endpoint (e.g.,
                       O1 NETCONF address).
+                    maxLength: 261
                     type: string
                   namespace:
                     description: namespace where the provider resources (e.g., OCUDU
                       gNB) are deployed.
+                    maxLength: 63
                     type: string
                   remoteControl:
                     description: |-
@@ -825,15 +831,39 @@ spec:
                     properties:
                       endpoint:
                         description: |-
-                          endpoint is host:port of the gNB remote_control server (e.g. "127.0.0.1:8001").
-                          The provider prepends ws://, so include NEITHER a scheme nor a path — a value
-                          like "ws://host:8001" would dial "ws://ws://host:8001" and fail. The pattern
-                          enforces bare host:port (a permanent admission error beats a silent
-                          tight-requeue on a mistyped endpoint).
+                          endpoint is host:port of the gNB remote_control server — a hostname/IPv4
+                          ("127.0.0.1:8001") or a bracketed IPv6 literal ("[::1]:8001") for dual-stack
+                          clusters. The provider prepends ws://, so include NEITHER a scheme nor a path
+                          — a value like "ws://host:8001" would dial "ws://ws://host:8001" and fail.
+                          Validation is layered: the pattern enforces the bare host:port shape with a
+                          DNS-1123 hostname or bracketed IPv6, and CEL rules enforce the port range
+                          (1-65535), that a bracketed host is a valid IP, that an all-numeric host is a
+                          valid IPv4 (so "999.999.999.999:1" is rejected, not treated as a hostname), and
+                          that a DNS host obeys the RFC 1035 length limits (whole name <= 253, each label
+                          1-63) — a permanent admission error beats a silent tight-requeue on a mistyped
+                          value. The pattern alone cannot bound the label/host length (a regex quantifier
+                          would, but the DNS-1123 label form makes that unreadable), so CEL carries it.
                         maxLength: 261
                         minLength: 1
-                        pattern: ^[a-zA-Z0-9._-]+:[0-9]{1,5}$
+                        pattern: ^(\[[0-9a-fA-F:]+\]|[a-zA-Z0-9]([-a-zA-Z0-9]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([-a-zA-Z0-9]*[a-zA-Z0-9])?)*):[0-9]{1,5}$
                         type: string
+                        x-kubernetes-validations:
+                        - message: endpoint port must be between 1 and 65535
+                          rule: int(self.substring(self.lastIndexOf(':') + 1)) >=
+                            1 && int(self.substring(self.lastIndexOf(':') + 1)) <=
+                            65535
+                        - message: a bracketed endpoint host must be a valid IP address
+                          rule: '!self.startsWith(''['') || isIP(self.substring(1,
+                            self.lastIndexOf('']'')))'
+                        - message: an all-numeric endpoint host must be a valid IPv4
+                            address
+                          rule: '!self.substring(0, self.lastIndexOf('':'')).matches(''^[0-9.]+$'')
+                            || isIP(self.substring(0, self.lastIndexOf('':'')))'
+                        - message: endpoint host must be a DNS name of at most 253
+                            characters with each dot-separated label 1-63 characters
+                          rule: self.startsWith('[') || (self.substring(0, self.lastIndexOf(':')).size()
+                            <= 253 && self.substring(0, self.lastIndexOf(':')).split('.').all(l,
+                            l.size() >= 1 && l.size() <= 63))
                       tls:
                         description: |-
                           tls, when set, secures the runtime push: the provider dials wss:// (TLS)
@@ -859,6 +889,7 @@ spec:
                               shared secret sent as Authorization: Bearer — optional), and, for mode=mtls,
                               "tls.crt" + "tls.key" (the client certificate/key). A bare shared secret is
                               replayable, so it is only ever sent over the wss:// (TLS) connection.
+                            maxLength: 253
                             minLength: 1
                             type: string
                           serverName:
@@ -876,10 +907,6 @@ spec:
                     required:
                     - endpoint
                     type: object
-                    x-kubernetes-validations:
-                    - message: endpoint port must be in 1-65535
-                      rule: int(self.endpoint.split(':')[1]) >= 1 && int(self.endpoint.split(':')[1])
-                        <= 65535
                   type:
                     description: type is the provider type. Currently only "ocudu"
                       is supported.

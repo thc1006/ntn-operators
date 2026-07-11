@@ -23,6 +23,9 @@ spec:
     - jsonPath: .status.lastUpdated
       name: Last Updated
       type: date
+    - jsonPath: .status.conditions[?(@.type=="GPDataFetched")].status
+      name: Fetched
+      type: string
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
@@ -68,7 +71,9 @@ spec:
                       groundStations is a list of GroundStationLifecycle resource names
                       to compute pass windows against.
                     items:
+                      maxLength: 253
                       type: string
+                    maxItems: 64
                     minItems: 1
                     type: array
                   horizon:
@@ -79,6 +84,7 @@ spec:
                     default: "10"
                     description: minElevation is the minimum elevation angle in degrees
                       (string, e.g., "10").
+                    maxLength: 32
                     pattern: ^-?[0-9]+\.?[0-9]*$
                     type: string
                 required:
@@ -97,6 +103,7 @@ spec:
                       to track.
                     items:
                       type: integer
+                    maxItems: 512
                     type: array
                 type: object
               source:
@@ -111,9 +118,11 @@ spec:
                       key:
                         default: password
                         description: key within the Secret data.
+                        maxLength: 253
                         type: string
                       name:
                         description: name of the Secret.
+                        maxLength: 253
                         type: string
                     required:
                     - name
@@ -141,6 +150,7 @@ spec:
                       only for a private/in-cluster mirror (NetworkPolicy-protected).
                       For CelesTrak: https://celestrak.org/NORAD/elements/gp.php?GROUP=oneweb&FORMAT=JSON
                       For SpaceTrack: https://www.space-track.org/basicspacedata/query/class/gp/...
+                    maxLength: 2048
                     minLength: 1
                     pattern: ^https?://
                     type: string
