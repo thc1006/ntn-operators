@@ -360,6 +360,14 @@ spec:
                 description: satelliteCount is the number of satellites currently
                   tracked.
                 type: integer
+              truncatedSatelliteCount:
+                description: |-
+                  truncatedSatelliteCount is how many satellites were dropped because the
+                  selected set exceeded the maxPropagatedStates cap (128); 0 when nothing was
+                  dropped. Narrow spec.satellites.noradIDs or the source URL's GROUP= to
+                  eliminate it. Mirrored by the StatesTruncated condition, and a Warning
+                  StatesTruncated event is emitted once per transition into the truncated state.
+                type: integer
             type: object
         required:
         - spec
