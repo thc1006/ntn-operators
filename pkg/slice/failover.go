@@ -257,6 +257,12 @@ type triggerSetResult struct {
 	anyTriggered bool
 	parseSuffix  string
 	allInvalid   bool
+	// hasUnknownTrigger is true if any syntactically-valid trigger was skipped because
+	// its metric has no live source (inert). Terrestrial recovery cannot be CONFIRMED
+	// while a trigger is unknown, so the caller must not treat !anyTriggered as
+	// "recovered" and switch back onto a link whose quality is unverifiable (I-10 /
+	// the inert-trigger vacuous-recovery bug): unknown != recovered.
+	hasUnknownTrigger bool
 }
 
 // parseTriggerSet parses all triggers, evaluates them (OR logic), and returns
@@ -283,6 +289,7 @@ func parseTriggerSet(log logr.Logger, triggers []string, metrics Metrics) trigge
 		if trigger.metricMissing(metrics) {
 			log.V(1).Info("trigger references a metric with no configured source; it is inert",
 				"trigger", triggerStr, "metric", trigger.Metric)
+			result.hasUnknownTrigger = true
 			continue
 		}
 		result.parsed = append(result.parsed, trigger)
@@ -299,6 +306,22 @@ func parseTriggerSet(log logr.Logger, triggers []string, metrics Metrics) trigge
 			parseErrors, len(triggers))
 	}
 	return result
+}
+
+// passEndedReason is the honest reason for the forced return to terrestrial when a
+// satellite pass has physically ended. It must not claim "terrestrial recovered" when
+// recovery is unverifiable (an unknown-source or all-invalid trigger set): the decision
+// (leave the set satellite) is right regardless, but the condition/event must not
+// mislead incident diagnosis into thinking terrestrial telemetry has recovered.
+func passEndedReason(ts triggerSetResult) string {
+	switch {
+	case ts.anyTriggered:
+		return "Satellite pass ended, falling back to degraded terrestrial"
+	case ts.hasUnknownTrigger || ts.allInvalid:
+		return "Satellite pass ended; returning to terrestrial (recovery unconfirmed)"
+	default:
+		return "Satellite pass ended, terrestrial recovered"
+	}
 }
 
 // EvaluateFailoverWithContext is the context-aware variant of EvaluateFailover.
@@ -336,6 +359,18 @@ func EvaluateFailoverWithContext(
 		currentPath = PathTerrestrial
 	}
 
+	// Orbital reality precedes everything: a satellite whose pass has physically ended
+	// must return to terrestrial regardless of trigger validity or knownness — staying
+	// would black-hole traffic on a set satellite. This MUST precede the allInvalid
+	// guard (all-invalid triggers on an ended pass would otherwise Stay on the satellite).
+	if currentPath == PathSatellite && !satelliteAvailable {
+		return finish(FailoverResult{
+			Decision:   DecisionSwitchback,
+			Reason:     passEndedReason(ts) + ts.parseSuffix,
+			TargetPath: PathTerrestrial,
+		})
+	}
+
 	if ts.allInvalid {
 		return finish(FailoverResult{
 			Decision:   DecisionStay,
@@ -367,26 +402,23 @@ func EvaluateFailoverWithContext(
 		})
 
 	case PathSatellite:
-		// If satellite pass ended, must switch back regardless.
-		if !satelliteAvailable {
-			if ts.anyTriggered {
-				return finish(FailoverResult{
-					Decision:   DecisionSwitchback,
-					Reason:     "Satellite pass ended, falling back to degraded terrestrial" + ts.parseSuffix,
-					TargetPath: PathTerrestrial,
-				})
-			}
-			return finish(FailoverResult{
-				Decision:   DecisionSwitchback,
-				Reason:     "Satellite pass ended, terrestrial recovered" + ts.parseSuffix,
-				TargetPath: PathTerrestrial,
-			})
-		}
+		// (A physically-ended pass is handled before the allInvalid guard above.)
 		if ts.anyTriggered {
 			// Terrestrial still degraded, stay on satellite.
 			return finish(FailoverResult{
 				Decision:   DecisionStay,
 				Reason:     "Terrestrial still degraded, staying on satellite" + ts.parseSuffix,
+				TargetPath: PathSatellite,
+			})
+		}
+		if ts.hasUnknownTrigger {
+			// No trigger fired, but a trigger metric is unknown — recovery is
+			// UNCONFIRMED. Hold on satellite rather than switch back onto a link whose
+			// quality can't be verified; the pass-ended path above still forces a
+			// return to terrestrial if the satellite physically sets.
+			return finish(FailoverResult{
+				Decision:   DecisionStay,
+				Reason:     "Recovery unconfirmed (a trigger metric is unsourced), holding on satellite" + ts.parseSuffix,
 				TargetPath: PathSatellite,
 			})
 		}
@@ -406,8 +438,29 @@ func EvaluateFailoverWithContext(
 		})
 
 	default:
-		// Unknown or unavailable path — try terrestrial first.
+		// Unknown or unavailable path — initializing.
 		if !ts.anyTriggered {
+			// No trigger fired. But "no trigger fired" only means "terrestrial healthy"
+			// when every trigger is KNOWN. If a trigger metric is unknown, do NOT read the
+			// silence as health: prefer a CONFIRMED-available satellite; otherwise fall back
+			// to terrestrial (the primary) but say so honestly — a partial view is not a
+			// recovered view. We do NOT park on PathUnavailable when terrestrial is a viable
+			// fallback, as that would black-hole traffic on an unproven assumption. (When a
+			// real trigger IS firing, terrestrial is confirmed degraded → the paths below.)
+			if ts.hasUnknownTrigger {
+				if satelliteAvailable {
+					return finish(FailoverResult{
+						Decision:   DecisionFailover,
+						Reason:     "Terrestrial quality unknown; using the confirmed satellite pass" + ts.parseSuffix,
+						TargetPath: PathSatellite,
+					})
+				}
+				return finish(FailoverResult{
+					Decision:   DecisionSwitchback,
+					Reason:     "Initializing on terrestrial (quality unconfirmed; no satellite pass)" + ts.parseSuffix,
+					TargetPath: PathTerrestrial,
+				})
+			}
 			return finish(FailoverResult{
 				Decision:   DecisionSwitchback,
 				Reason:     "Initializing on terrestrial path" + ts.parseSuffix,
@@ -473,6 +526,19 @@ func EvaluateFailoverWithHysteresis(
 
 	ts := parseTriggerSet(log, triggers, metrics)
 
+	// Satellite pass ended — force switchback regardless of hysteresis OR trigger
+	// validity. currentPath is guaranteed PathSatellite here (line 485 delegates
+	// otherwise), so this is a genuine set-pass. It MUST precede the allInvalid guard,
+	// else an all-invalid trigger set on an ended pass would Stay on the set satellite
+	// (a traffic black hole).
+	if !satelliteAvailable {
+		return finish(FailoverResult{
+			Decision:   DecisionSwitchback,
+			Reason:     passEndedReason(ts) + ts.parseSuffix,
+			TargetPath: PathTerrestrial,
+		})
+	}
+
 	if ts.allInvalid {
 		return finish(FailoverResult{
 			Decision:   DecisionStay,
@@ -481,26 +547,19 @@ func EvaluateFailoverWithHysteresis(
 		})
 	}
 
-	// Satellite pass ended — force switchback regardless of hysteresis.
-	if !satelliteAvailable {
-		if ts.anyTriggered {
-			return finish(FailoverResult{
-				Decision:   DecisionSwitchback,
-				Reason:     "Satellite pass ended, falling back to degraded terrestrial" + ts.parseSuffix,
-				TargetPath: PathTerrestrial,
-			})
-		}
-		return finish(FailoverResult{
-			Decision:   DecisionSwitchback,
-			Reason:     "Satellite pass ended, terrestrial recovered" + ts.parseSuffix,
-			TargetPath: PathTerrestrial,
-		})
-	}
-
 	if ts.anyTriggered {
 		return finish(FailoverResult{
 			Decision:   DecisionStay,
 			Reason:     "Terrestrial still degraded, staying on satellite" + ts.parseSuffix,
+			TargetPath: PathSatellite,
+		})
+	}
+	if ts.hasUnknownTrigger {
+		// Recovery unconfirmed: a trigger metric is unknown, so the empty/partial
+		// parsed set below would vacuously pass allRecovered. Hold on satellite.
+		return finish(FailoverResult{
+			Decision:   DecisionStay,
+			Reason:     "Recovery unconfirmed (a trigger metric is unsourced), holding on satellite" + ts.parseSuffix,
 			TargetPath: PathSatellite,
 		})
 	}
@@ -554,12 +613,15 @@ type AntiFlapConfig struct {
 	MinTerrestrialDwell time.Duration
 }
 
-// AntiFlapState is the per-slice, in-memory flap-suppression state. It is safe
-// to lose: a reset re-requires N consecutive confirmations and restarts the
-// recovery/dwell clocks, which only ever DELAYS a switch, never advances one
-// (so a controller restart or leader-election handoff cannot cause a spurious
-// flap). Per the Kubernetes API convention, such transient history is best-effort
-// and need not be persisted.
+// AntiFlapState is the per-slice, in-memory flap-suppression state. Losing it (a
+// controller restart or leader-election handoff) is MOSTLY safe: a reset re-requires N
+// consecutive confirmations and restarts the recovery clock, both of which only DELAY a
+// switch. The ONE exception is LastSwitchback: losing it drops the post-switchback
+// min-dwell, so a failover that dwell would have delayed can happen immediately — a reset
+// can ADVANCE (never fabricate) a failover on that single axis. This is an accepted
+// trade-off: a restart is rare and one early re-failover is bounded; making dwell durable
+// would require persisting LastSwitchback to status (tracked, deferred). The other two
+// clocks bias a restart toward holding, never toward a spurious flap.
 type AntiFlapState struct {
 	// ConsecutiveDegraded counts consecutive reliable samples on which the
 	// terrestrial triggers fired. Reset to 0 by any healthy/unreliable sample.
@@ -596,6 +658,42 @@ func terrestrialDegraded(triggers []string, m Metrics) bool {
 	return false
 }
 
+// terrestrialConfirmedRecovered reports whether terrestrial is CONFIRMED recovered:
+// every syntactically-valid trigger is known (has a live metric) AND has recovered
+// past the hysteresis margin. It is deliberately stricter than !terrestrialDegraded:
+//   - an unknown (inert) trigger returns false — recovery is unverifiable (C1);
+//   - a known trigger still inside the hysteresis dead-band returns false, so the
+//     switchback recovery clock measures only continuous PAST-hysteresis recovery,
+//     not time spent in the dead-band (H3).
+//
+// An EMPTY policy (no triggers) is trivially recovered (true), matching the base
+// evaluator's switch-back-to-terrestrial behavior for an empty policy. But a non-empty
+// policy whose triggers are ALL invalid is a broken config, not a recovered link — it
+// returns false so a syntactically-broken policy cannot pre-start the recovery clock
+// (the base evaluator independently Stays on allInvalid). With margin <= 0 this reduces
+// to !terrestrialDegraded (no dead-band).
+func terrestrialConfirmedRecovered(triggers []string, m Metrics, margin float64) bool {
+	sawValid := false
+	for _, s := range triggers {
+		t, err := ParseTrigger(s)
+		if err != nil {
+			continue // invalid triggers are accounted for elsewhere (allInvalid → Stay)
+		}
+		sawValid = true
+		if t.metricMissing(m) {
+			return false // unknown metric — recovery cannot be confirmed
+		}
+		if !t.EvaluateRecovery(m, margin) {
+			return false // known but still degraded or inside the dead-band
+		}
+	}
+	// A non-empty policy with no valid trigger is all-invalid: not a confirmed recovery.
+	if len(triggers) > 0 && !sawValid {
+		return false
+	}
+	return true
+}
+
 // EvaluateFailoverWithAntiFlap wraps EvaluateFailoverWithHysteresis with the
 // in-memory anti-flap gates. It must be called ONLY with reliable metrics (the
 // caller fails static via EvaluateSafeHold otherwise). It:
@@ -623,15 +721,27 @@ func EvaluateFailoverWithAntiFlap(
 	cfg AntiFlapConfig,
 	st AntiFlapState,
 ) (FailoverResult, AntiFlapState) {
-	// 1. Update the confirmation + recovery clocks from this sample.
-	if terrestrialDegraded(triggers, metrics) {
+	// 1. Update the confirmation + recovery clocks from this sample. Three states:
+	//    degraded (a raw trigger fires) / confirmed-recovered (all known triggers past
+	//    the hysteresis margin, none unknown) / neither (dead-band or an unknown
+	//    metric). The recovery clock advances ONLY while confirmed-recovered, so the
+	//    switchback delay measures continuous PAST-hysteresis recovery and never counts
+	//    dead-band or unknown-metric time as recovery (H3/C1).
+	switch {
+	case terrestrialDegraded(triggers, metrics):
 		st.ConsecutiveDegraded++
 		st.RecoveryObservedAt = time.Time{} // re-degraded → reset the switchback clock
-	} else {
+	case terrestrialConfirmedRecovered(triggers, metrics, hysteresisMargin):
 		st.ConsecutiveDegraded = 0
 		if st.RecoveryObservedAt.IsZero() {
-			st.RecoveryObservedAt = now // a fresh continuous-recovery streak begins
+			st.RecoveryObservedAt = now // a fresh continuous past-hysteresis streak begins
 		}
+	default:
+		// Dead-band or unknown metric: neither degraded nor confirmed recovered. Break
+		// the recovery streak so a later confirmed recovery must re-accumulate the full
+		// switchback delay. (The evaluator independently holds on satellite here.)
+		st.ConsecutiveDegraded = 0
+		st.RecoveryObservedAt = time.Time{}
 	}
 
 	// 2. Run the base engine, measuring the switchback delay from the recovery
@@ -666,10 +776,13 @@ func EvaluateFailoverWithAntiFlap(
 		}
 	}
 
-	// 4. Start the dwell clock only on a quality-driven hand-back (satellite still
-	//    available). A pass-ended forced switchback (satellite gone) is orbital, not
-	//    a ping-pong, so it must not block the next pass's legitimate re-failover.
-	if res.Decision == DecisionSwitchback && satelliteAvailable {
+	// 4. Start the dwell clock only on a quality-driven hand-back FROM satellite
+	//    (satellite still available). A pass-ended forced switchback (satellite gone)
+	//    is orbital, not a ping-pong; and initialising onto terrestrial from an
+	//    unavailable/unknown path also emits DecisionSwitchback but is not a hand-back —
+	//    the currentPath==PathSatellite guard excludes both so neither blocks a
+	//    legitimate re-failover.
+	if res.Decision == DecisionSwitchback && satelliteAvailable && currentPath == PathSatellite {
 		st.LastSwitchback = now
 	}
 

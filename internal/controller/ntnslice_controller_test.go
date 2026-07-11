@@ -463,6 +463,18 @@ var _ = Describe("NTNSlice Controller", func() {
 			// Put slice on satellite with old failover (5 min ago, delay is 60s).
 			ntnSlice := &ntnv1alpha1.NTNSlice{}
 			Expect(k8sClient.Get(context.Background(), typeNamespacedName, ntnSlice)).To(Succeed())
+			// Terrestrial is GENUINELY recovered — all trigger metrics are SOURCED and
+			// healthy (rsrp -90 > -120, latency 20 < 200, packetLoss 0.1 < 5). Without
+			// these annotations the metrics are Missing and the triggers are inert; the
+			// three-state fix now HOLDS on such unconfirmable "recovery" rather than
+			// switching back, so this test must supply a real, confirmed recovery.
+			ntnSlice.Annotations = map[string]string{
+				"ntn.operators.dev/simulated-rsrp":        "-90",
+				"ntn.operators.dev/simulated-latency":     "20",
+				"ntn.operators.dev/simulated-packet-loss": "0.1",
+			}
+			Expect(k8sClient.Update(context.Background(), ntnSlice)).To(Succeed())
+			Expect(k8sClient.Get(context.Background(), typeNamespacedName, ntnSlice)).To(Succeed())
 			ntnSlice.Status.ActivePathType = pathSatellite
 			ntnSlice.Status.FailoverCount = 1
 			ntnSlice.Status.LastFailover = &metav1.Time{Time: time.Date(2026, 4, 17, 11, 55, 0, 0, time.UTC)} // 5min ago
