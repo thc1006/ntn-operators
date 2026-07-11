@@ -98,7 +98,7 @@ spec:
 |---|---|
 | Target namespace | `Kptfile` → `pipeline.mutators[set-namespace].configMap.namespace` |
 | Labels stamped on all CRs | `Kptfile` → `pipeline.mutators[set-labels].configMap` |
-| Satellite constellation | `satelliteephemeris-sample.yaml` → `spec.satellites.constellation` + `spec.source.url` |
+| Satellite selection | `satelliteephemeris-sample.yaml` → `spec.source.url` (the CelesTrak `GROUP=` query parameter, e.g. `GROUP=oneweb`) or `spec.satellites.noradIDs`. The former `spec.satellites.constellation` field is deprecated and has never filtered data. |
 | Ground station hardware / location | `groundstationlifecycle-sample.yaml` → `spec.hardware`, `spec.deployment.location` |
 | Cell ephemeris / payload type | `ntncellconfig-sample.yaml` → `spec.ntn` |
 | Failover triggers / QoS / billing | `ntnslice-sample.yaml` → `spec.failoverPolicy`, `spec.qosMapping`, `spec.billing` |

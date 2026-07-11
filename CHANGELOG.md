@@ -30,6 +30,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added condition/status print columns to the CRDs for quicker `kubectl get`
   triage.
 
+### Deprecated
+
+- `SatelliteEphemeris.spec.satellites.constellation` has never been consumed by the
+  controller (it performs no filtering) and is now deprecated. Select a CelesTrak
+  constellation through `spec.source.url` (the `GROUP=` query parameter, e.g.
+  `GROUP=oneweb`), or filter explicit satellites with `spec.satellites.noradIDs`.
+  The field remains accepted in `v1alpha1`; removal is deferred to a future
+  versioned API migration (conversion + stored-object migration), tracked as a
+  separate issue — a version rename alone does not safely drop the data.
+
 ## [0.6.0] - 2026-07-09
 
 Promotion of `0.6.0-rc.1` after a short soak (the rc's release pipeline —
