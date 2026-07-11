@@ -16,8 +16,6 @@ spec:
     type: CelesTrak
     url: http://celestrak-mock.default.svc.cluster.local/gp.json
     refreshInterval: 4h
-  satellites:
-    constellation: oneweb
   passPrediction:
     groundStations:
       - gs-taipei-01

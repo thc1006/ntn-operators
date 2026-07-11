@@ -182,10 +182,9 @@ metadata:
 spec:
   source:
     type: CelesTrak
+    # GROUP=oneweb selects the constellation server-side — no client-side filter.
     url: https://celestrak.org/NORAD/elements/gp.php?GROUP=oneweb&FORMAT=JSON
     refreshInterval: 4h
-  satellites:
-    constellation: oneweb
   passPrediction:
     groundStations:
       - gs-taipei-01

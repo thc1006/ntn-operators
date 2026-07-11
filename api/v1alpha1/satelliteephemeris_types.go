@@ -69,7 +69,13 @@ type SecretReference struct {
 
 // SatelliteSelector defines which satellites to track.
 type SatelliteSelector struct {
-	// constellation filters by constellation name (e.g., "oneweb", "starlink").
+	// constellation is DEPRECATED and performs NO server-side filtering — it has
+	// never been read by the controller. Select a constellation in the source URL
+	// instead (CelesTrak's GROUP= query parameter, e.g. GROUP=oneweb, returns only
+	// that constellation's element sets) and/or list explicit noradIDs. Kept for one
+	// release for compatibility; scheduled for removal in v1alpha2.
+	//
+	// Deprecated: select the constellation via source.url (GROUP=) or spec.satellites.noradIDs.
 	// +optional
 	Constellation string `json:"constellation,omitempty"`
 
