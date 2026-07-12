@@ -21,6 +21,9 @@ spec:
     matchLabels:
       control-plane: controller-manager
       app.kubernetes.io/name: ntn-operators
+  # Single replica: this raw kustomize base is the dev / e2e deploy path (`make deploy`).
+  # Production HA (2 replicas + PDB + anti-affinity) is the Helm chart — see
+  # docs/high-availability.md.
   replicas: 1
   template:
     metadata:

@@ -63,6 +63,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   trusted host is refused. The cookie jar also uses the public-suffix list so a server cannot set
   an overly broad domain cookie. Mutation-tested.
 
+### Changed
+
+- **`/readyz` now gates on informer cache-sync (still leadership-agnostic).** It was
+  `healthz.Ping`, which reports Ready as soon as the process serves — but controller-runtime
+  starts the health server *before* the caches sync, so a broken new replica (RBAC, CRD
+  discovery, a wedged list/watch) could be counted Available and a rollout would then tear down
+  the healthy old replicas. `/readyz` now passes only once the caches have synced, wired via a
+  non-leader-election `Runnable` (`NeedLeaderElection()==false`) so every replica — leader or
+  standby — becomes Ready after its *own* cache sync, without gating on leadership (which would
+  deadlock rollouts: a standby could never become Ready). `/healthz` stays `healthz.Ping`.
+- **`passPrediction.minElevation` is constrained to `[0, 90]` degrees.** 0 is the
+  geometric horizon and 90 the zenith; a negative or `>90` mask is physically meaningless.
+  Enforced by an admission CEL rule plus a finite-value runtime range check. The value
+  pattern otherwise preserves the prior grammar (a trailing dot such as `"10."` stays
+  valid — only the leading `-` was removed). The bound is on the parsed **float64** value
+  (the pass pipeline is float64), so a literal within ~half a ULP above 90 rounds to 90 and
+  is accepted; `NaN`/`Inf` are rejected (#201-P3).
+
 ### Fixed
 
 - **Pass windows are computed from the current time, not the last fetch time.** On a cached
@@ -143,9 +161,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The mapper resolved referencing cells by scanning every `NTNCellConfig` in the namespace and
   filtering in Go; it now uses an indexed cache lookup (registered in `SetupWithManager`), with
   a fallback to the scan for non-cache clients (#204-G3).
-
-### Fixed
-
 - **Pass windows (`status.nextPassWindows`) are now conservative to the whole second.**
   AOS is rounded up and LOS down before storage, so the persisted window stays within the
   window the mask-trim computed — previously AOS/LOS carried ~200 ms of sub-second residual
@@ -154,16 +169,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (When mask-boundary evaluation succeeds that computed window is the usable ≥ minElevation
   interval; on the fail-open elevation-error path it is the wider 0°-horizon window — see
   the deferred narrow fail-closed proposal.)
-
-### Changed
-
-- **`passPrediction.minElevation` is constrained to `[0, 90]` degrees.** 0 is the
-  geometric horizon and 90 the zenith; a negative or `>90` mask is physically meaningless.
-  Enforced by an admission CEL rule plus a finite-value runtime range check. The value
-  pattern otherwise preserves the prior grammar (a trailing dot such as `"10."` stays
-  valid — only the leading `-` was removed). The bound is on the parsed **float64** value
-  (the pass pipeline is float64), so a literal within ~half a ULP above 90 rounds to 90 and
-  is accepted; `NaN`/`Inf` are rejected (#201-P3).
+- **Chart values docs corrected + HA design documented.** `dist/chart/README.md` listed
+  `podDisruptionBudget.enable` as `false` and `manager.affinity` as `{}`, but the `values.yaml`
+  defaults are `true` and a soft `podAntiAffinity`. Added `docs/high-availability.md` covering
+  the active-passive design (leader election, `LeaderElectionReleaseOnCancel`, PDB, anti-affinity,
+  cache-sync readiness, failover behavior). The Helm chart is the HA path — process-level
+  active-passive with **best-effort** node spreading (soft anti-affinity + PDB guard voluntary
+  disruptions only; not a node-failure guarantee); the `config/default` kustomize base is
+  intentionally single-replica for dev/e2e. Corrected an earlier claim that a cache-sync-gated
+  readyz would deadlock rollouts — only a *leadership*-gated one does.
 
 ### Upgrade notes
 

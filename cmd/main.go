@@ -17,10 +17,13 @@ limitations under the License.
 package main
 
 import (
+	"context"
 	"crypto/tls"
+	"errors"
 	"flag"
+	"net/http"
 	"os"
-
+	"sync/atomic"
 	"time"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
@@ -269,13 +272,24 @@ func main() {
 		setupLog.Error(err, "Failed to set up health check")
 		os.Exit(1)
 	}
-	// readyz is intentionally leadership-agnostic (healthz.Ping): under active-passive
-	// HA a NON-leader standby must still report Ready, or the Deployment never counts
-	// it Available and a rolling update deadlocks (the new pod can only become leader
-	// after the old releases the lease, but the old is not torn down until the new is
-	// Ready). A cache-sync- or leadership-gated readyz would break HA the same way,
-	// because a non-leader's cache/controllers do not start until it acquires the lease.
-	if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
+	// cachesSynced flips true once the manager's informer caches have synced; the
+	// runnable that sets it is non-leader-election, so it runs on EVERY replica
+	// (see cacheReadyRunnable). Register it before the readyz check that reads it.
+	var cachesSynced atomic.Bool
+	if err := mgr.Add(cacheReadyRunnable{ready: &cachesSynced}); err != nil {
+		setupLog.Error(err, "Failed to register cache-sync readiness runnable")
+		os.Exit(1)
+	}
+	// /readyz gates on informer cache-sync but NOT on leadership. controller-runtime
+	// starts the health server BEFORE the caches sync, so a bare healthz.Ping readyz
+	// reports Ready before (or without ever) syncing — a broken new replica would then
+	// be counted Available and the rollout would tear down the healthy old ones. Gating
+	// on cache-sync closes that. It stays leadership-AGNOSTIC on purpose: every replica
+	// syncs its cache before leader election (v0.24.1 internal.go: caches → non-leader
+	// runnables → leader election), so the standby becomes Ready without holding the
+	// lease. Gating on leadership INSTEAD would deadlock rollouts — the new pod can't win
+	// the lease until the old releases it, but the old is not removed until the new is Ready.
+	if err := mgr.AddReadyzCheck("readyz", cacheSyncReadyCheck(&cachesSynced)); err != nil {
 		setupLog.Error(err, "Failed to set up ready check")
 		os.Exit(1)
 	}
@@ -284,5 +298,38 @@ func main() {
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
 		setupLog.Error(err, "Failed to run manager")
 		os.Exit(1)
+	}
+}
+
+// cacheReadyRunnable flips its flag true once the manager's caches have synced.
+// controller-runtime starts non-leader-election runnables only AFTER the caches
+// sync, and on EVERY replica regardless of leadership (v0.24.1 internal.go order:
+// HTTPServers → Webhooks → Caches(wait for sync) → non-leader runnables → leader
+// election). So Start running means the informer caches are synced — which is what
+// lets /readyz gate on cache-sync without gating on leadership.
+type cacheReadyRunnable struct {
+	ready *atomic.Bool
+}
+
+func (c cacheReadyRunnable) Start(ctx context.Context) error {
+	c.ready.Store(true)
+	<-ctx.Done()
+	return nil
+}
+
+// NeedLeaderElection must return false: a leader-election runnable runs only on the
+// elected leader, so a standby's flag would never flip and its /readyz would never
+// pass — deadlocking rollouts. false makes this a non-leader runnable that starts on
+// every replica once caches have synced.
+func (cacheReadyRunnable) NeedLeaderElection() bool { return false }
+
+// cacheSyncReadyCheck returns a readyz Checker that passes only once ready is set
+// (i.e. the manager's caches have synced). Leadership is deliberately not consulted.
+func cacheSyncReadyCheck(ready *atomic.Bool) healthz.Checker {
+	return func(_ *http.Request) error {
+		if ready.Load() {
+			return nil
+		}
+		return errors.New("informer caches not yet synced")
 	}
 }

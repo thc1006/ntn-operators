@@ -38,7 +38,7 @@ This chart installs four Custom Resource Definitions:
 | `manager.podSecurityContext.runAsNonRoot` | bool | `true` | Run as non-root |
 | `manager.podSecurityContext.runAsUser` | int | `65532` | UID |
 | `manager.podSecurityContext.runAsGroup` | int | `65532` | GID |
-| `manager.affinity` | object | `{}` | Pod affinity rules |
+| `manager.affinity` | object | soft `podAntiAffinity` on `kubernetes.io/hostname` | Pod affinity rules; the default prefers spreading the replicas across nodes |
 | `manager.nodeSelector` | object | `{}` | Node selector |
 | `manager.tolerations` | list | `[]` | Pod tolerations |
 | `crd.enable` | bool | `true` | Install CRDs with the chart |
@@ -48,7 +48,7 @@ This chart installs four Custom Resource Definitions:
 | `metrics.port` | int | `8443` | Metrics server port |
 | `certManager.enable` | bool | `false` | Enable cert-manager integration |
 | `prometheus.enable` | bool | `false` | Create ServiceMonitor for Prometheus |
-| `podDisruptionBudget.enable` | bool | `false` | Create PodDisruptionBudget |
+| `podDisruptionBudget.enable` | bool | `true` | Create PodDisruptionBudget |
 | `podDisruptionBudget.minAvailable` | int | `1` | Minimum available pods |
 | `networkPolicy.enable` | bool | `false` | Create NetworkPolicy (requires CNI support) |
 
