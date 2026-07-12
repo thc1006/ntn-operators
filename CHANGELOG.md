@@ -133,6 +133,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (not only at the push). A far-future epoch from a corrupt or spoofed feed would otherwise
   drive SGP4 *backward* from the bogus epoch and write a wildly wrong ECEF into status; the
   consumer check alone could only block its delivery, not the propagation.
+- **The gNB ConfigMap is no longer rewritten byte-identically on every reconcile.**
+  `ApplyCellConfig` produces a deterministic, static-spec-derived config, but it Updated the
+  ConfigMap unconditionally — so each `SatelliteEphemeris` re-propagation (~3 min) fanned out
+  to every referencing `NTNCellConfig` and bumped the ConfigMap's `resourceVersion`, churning
+  every watcher. It now skips the write when the stored content (config + koffset annotation)
+  already matches and the ConfigMap is already owned (#204-G3).
+- **`SatelliteEphemeris`→`NTNCellConfig` fan-out uses a `spec.ephemerisRef` field index.**
+  The mapper resolved referencing cells by scanning every `NTNCellConfig` in the namespace and
+  filtering in Go; it now uses an indexed cache lookup (registered in `SetupWithManager`), with
+  a fallback to the scan for non-cache clients (#204-G3).
 
 ### Fixed
 

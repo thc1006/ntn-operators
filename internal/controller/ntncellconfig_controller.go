@@ -885,7 +885,27 @@ func runtimeEphemerisPushMarker(eph *ntnv1alpha1.SatelliteEphemeris, state *ntnv
 // SetupWithManager sets up the controller with the Manager.
 // Watches SatelliteEphemeris changes to trigger re-reconciliation
 // when a referenced ephemeris is updated.
+// ephemerisRefIndexKey indexes NTNCellConfig by spec.ephemerisRef so the SatelliteEphemeris
+// fan-out mapper resolves referencing cells with an indexed cache lookup instead of scanning
+// every NTNCellConfig in the namespace (#204-G3).
+const ephemerisRefIndexKey = "spec.ephemerisRef"
+
+// indexNTNCellConfigByEphemerisRef is the field-index extractor for spec.ephemerisRef.
+// Registered on the manager cache in SetupWithManager and reused by tests, so the index
+// definition has a single source of truth.
+func indexNTNCellConfigByEphemerisRef(obj client.Object) []string {
+	cc, ok := obj.(*ntnv1alpha1.NTNCellConfig)
+	if !ok || cc.Spec.EphemerisRef == "" {
+		return nil
+	}
+	return []string{cc.Spec.EphemerisRef}
+}
+
 func (r *NTNCellConfigReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &ntnv1alpha1.NTNCellConfig{},
+		ephemerisRefIndexKey, indexNTNCellConfigByEphemerisRef); err != nil {
+		return fmt.Errorf("indexing NTNCellConfig by %s: %w", ephemerisRefIndexKey, err)
+	}
 	return ctrl.NewControllerManagedBy(mgr).
 		// reconcileTriggerPredicate (predicates.go) filters status-only self-writes
 		// but passes spec changes AND deletionTimestamp transitions — the latter is
@@ -914,22 +934,44 @@ func (r *NTNCellConfigReconciler) ephemerisToNTNCellConfig(
 
 	log := logf.FromContext(ctx)
 
-	var ccList ntnv1alpha1.NTNCellConfigList
-	if err := r.List(ctx, &ccList, client.InNamespace(eph.Namespace)); err != nil {
-		log.Error(err, "Failed to list NTNCellConfigs for ephemeris mapper")
-		return nil
+	// Prefer the spec.ephemerisRef field index (registered in SetupWithManager): every
+	// returned item already references this ephemeris, so no in-Go filter is needed. Fall
+	// back to a full in-namespace list + filter when the index is unavailable — e.g. a
+	// direct (non-cache) client in tests, which cannot serve a custom field selector.
+	var matched []ntnv1alpha1.NTNCellConfig
+	var indexed ntnv1alpha1.NTNCellConfigList
+	if err := r.List(ctx, &indexed, client.InNamespace(eph.Namespace),
+		client.MatchingFields{ephemerisRefIndexKey: eph.Name}); err == nil {
+		matched = indexed.Items
+	} else {
+		// Do NOT swallow the indexed-lookup error silently: on a manager cache it means the
+		// spec.ephemerisRef index is missing/broken (a production regression that would turn
+		// every ephemeris event back into an O(namespace) scan). Bump a counter (visible at the
+		// default verbosity, unlike the V(1) log) AND log the cause, so the degradation is
+		// observable (#204-G3; #224 review-2 L1).
+		ntnmetrics.EphemerisMapperFallbackTotal.With(prometheus.Labels{"namespace": eph.Namespace}).Inc()
+		log.V(1).Info("indexed ephemerisRef lookup unavailable; falling back to a namespace scan",
+			"error", err.Error(), "ephemeris", eph.Name, "namespace", eph.Namespace)
+		var all ntnv1alpha1.NTNCellConfigList
+		if lerr := r.List(ctx, &all, client.InNamespace(eph.Namespace)); lerr != nil {
+			log.Error(lerr, "Failed to list NTNCellConfigs for ephemeris mapper")
+			return nil
+		}
+		for i := range all.Items {
+			if all.Items[i].Spec.EphemerisRef == eph.Name {
+				matched = append(matched, all.Items[i])
+			}
+		}
 	}
 
-	var requests []reconcile.Request
-	for _, cc := range ccList.Items {
-		if cc.Spec.EphemerisRef == eph.Name {
-			requests = append(requests, reconcile.Request{
-				NamespacedName: types.NamespacedName{
-					Name:      cc.Name,
-					Namespace: cc.Namespace,
-				},
-			})
-		}
+	requests := make([]reconcile.Request, 0, len(matched))
+	for i := range matched {
+		requests = append(requests, reconcile.Request{
+			NamespacedName: types.NamespacedName{
+				Name:      matched[i].Name,
+				Namespace: matched[i].Namespace,
+			},
+		})
 	}
 	return requests
 }

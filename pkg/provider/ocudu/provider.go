@@ -197,7 +197,11 @@ func (p *Provider) ApplyCellConfig(
 	// geo_ntn.yml config key (a pre-atomic-ref leftover). A ConfigMap owned by a
 	// different controller, an unlabeled foreign object, or a labeled-but-empty
 	// impostor that never held our config is refused.
-	if !metav1.IsControlledBy(cm, owner) {
+	// Capture ownership BEFORE the adoption block: SetControllerReference below sets the
+	// owner ref in memory (making IsControlledBy true), so the no-op skip must key off the
+	// pre-adoption state or a freshly-adopted CM would skip its owner-ref persist.
+	alreadyOwned := metav1.IsControlledBy(cm, owner)
+	if !alreadyOwned {
 		if metav1.GetControllerOf(cm) != nil || !isOperatorManaged(cm) || cm.Data[configDataKey] == "" {
 			return fmt.Errorf("%w: %s/%s", provider.ErrConfigMapNotOwned, namespace, ConfigMapNameFor(crName))
 		}
@@ -205,14 +209,27 @@ func (p *Provider) ApplyCellConfig(
 			return fmt.Errorf("adopting ConfigMap: %w", err)
 		}
 	}
+	desiredData := string(yamlData)
+	desiredKoffset := strconv.Itoa(spec.NTN.CellSpecificKoffset)
+	// No-op when the stored ConfigMap already carries the desired content AND we already
+	// owned it: GenerateConfig is a deterministic function of the (static) CR spec, so a
+	// SatelliteEphemeris fan-out reconcile that changed nothing must not rewrite a
+	// byte-identical ConfigMap — an unconditional Update bumps resourceVersion and churns
+	// every watcher on the ~3-minute re-propagation cadence (#204-G3). A just-adopted CM
+	// (alreadyOwned == false) always writes, so the owner reference persists.
+	if alreadyOwned &&
+		cm.Data[configDataKey] == desiredData &&
+		cm.Annotations["ntn.operators.dev/koffset"] == desiredKoffset {
+		return nil
+	}
 	if cm.Data == nil {
 		cm.Data = make(map[string]string)
 	}
-	cm.Data[configDataKey] = string(yamlData)
+	cm.Data[configDataKey] = desiredData
 	if cm.Annotations == nil {
 		cm.Annotations = make(map[string]string)
 	}
-	cm.Annotations["ntn.operators.dev/koffset"] = strconv.Itoa(spec.NTN.CellSpecificKoffset)
+	cm.Annotations["ntn.operators.dev/koffset"] = desiredKoffset
 	if err := p.client.Update(ctx, cm); err != nil {
 		return fmt.Errorf("updating ConfigMap: %w", err)
 	}
