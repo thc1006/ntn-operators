@@ -831,7 +831,9 @@ var _ = Describe("SatelliteEphemeris Controller", func() {
 			cond := meta.FindStatusCondition(updated.Status.Conditions, ntnv1alpha1.ConditionGPDataFetched)
 			Expect(cond).NotTo(BeNil())
 			Expect(cond.Reason).To(Equal("FetcherSetupFailed"))
-			Expect(cond.Message).To(ContainSubstring("reading credentials Secret"))
+			// Uniform CR-facing message (no Secret existence/key oracle); the specific cause
+			// (NotFound) is logged, not surfaced on the CR. #222 review blocker 3.
+			Expect(cond.Message).To(ContainSubstring("credentials unavailable or not authorized"))
 		})
 	})
 

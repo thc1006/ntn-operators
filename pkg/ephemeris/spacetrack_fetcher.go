@@ -32,6 +32,7 @@ import (
 
 	"github.com/akhenakh/sgp4"
 	"github.com/go-logr/logr"
+	"golang.org/x/net/publicsuffix"
 )
 
 // SpaceTrackFetcher implements GPFetcher for Space-Track.org OMM JSON endpoints.
@@ -52,10 +53,30 @@ type SpaceTrackFetcher struct {
 // baseURL is the SpaceTrack API root (e.g., "https://www.space-track.org").
 // The httpClient should be created via netutil.NewSafeHTTPClient for SSRF protection.
 func NewSpaceTrackFetcher(httpClient *http.Client, baseURL string) *SpaceTrackFetcher {
-	// Ensure the client has a cookie jar for session management.
+	// Ensure the client has a cookie jar for session management. Use the public-suffix list
+	// so a server cannot set an overly broad domain cookie that would then be sent to other
+	// hosts (cookiejar with a nil PublicSuffixList is documented as unsafe). #222 review.
 	if httpClient.Jar == nil {
-		jar, _ := cookiejar.New(nil)
+		jar, _ := cookiejar.New(&cookiejar.Options{PublicSuffixList: publicsuffix.List})
 		httpClient.Jar = jar
+	}
+	// Enforce exact-origin on EVERY redirect hop, not just the initial URL. The fetch is
+	// authenticated (a session cookie from the credential Secret) and login re-POSTs the
+	// credential body on a 307/308, so a cross-origin redirect must never carry the session
+	// or credentials off the trusted Space-Track origin. This is STRICTER than the shared
+	// SSRF CheckRedirect (which allows cross-origin public hosts), so overriding it is safe.
+	// #222 review blocker 1.
+	if base, err := url.Parse(baseURL); err == nil {
+		httpClient.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 10 {
+				return fmt.Errorf("stopped after 10 redirects")
+			}
+			if !strings.EqualFold(req.URL.Scheme, base.Scheme) || !strings.EqualFold(req.URL.Host, base.Host) {
+				return fmt.Errorf("%w: refusing a Space-Track redirect off the trusted origin %s://%s",
+					ErrBadResponse, base.Scheme, base.Host)
+			}
+			return nil
+		}
 	}
 	return &SpaceTrackFetcher{
 		httpClient: httpClient,
@@ -78,6 +99,34 @@ func (f *SpaceTrackFetcher) SetCredentials(username, password string) {
 
 // Fetch retrieves GP data using previously set credentials (via SetCredentials).
 // Deprecated: Use FetchWithCredentials for request-scoped credential isolation.
+// spaceTrackRateLimitMsg is the FIXED, classified diagnostic surfaced for a Space-Track
+// rate-limit response, so the authenticated response body is never reflected into a public
+// CR Condition/Event (#222 review). CelesTrak (unauthenticated) still surfaces its body.
+const spaceTrackRateLimitMsg = "Space-Track query rate limit exceeded"
+
+// validateGPURL rejects a query URL that is not on the SAME origin (scheme + host) as the
+// configured, operator-trusted Space-Track base — so the authenticated session is never sent
+// to a different scheme/host with the CR-controlled URL (#222 review). The base is a fixed
+// https://www.space-track.org in production (cmd/main.go), so this transitively forces the
+// query to https + www.space-track.org; tests set the base to their httptest origin.
+// (Restricting the PATH to the /basicspacedata/ data-API prefix is a deferred hardening; the
+// info-leak concern is already closed by not reflecting the response body.)
+func (f *SpaceTrackFetcher) validateGPURL(gpURL string) error {
+	base, err := url.Parse(f.baseURL)
+	if err != nil {
+		return fmt.Errorf("invalid Space-Track base URL %q: %w", f.baseURL, err)
+	}
+	u, err := url.Parse(gpURL)
+	if err != nil {
+		return fmt.Errorf("%w: invalid Space-Track query URL", ErrInvalidSourceURL)
+	}
+	if !strings.EqualFold(u.Scheme, base.Scheme) || !strings.EqualFold(u.Host, base.Host) {
+		return fmt.Errorf("%w: Space-Track query URL must be on the configured origin %s://%s (got scheme=%q host=%q)",
+			ErrInvalidSourceURL, base.Scheme, base.Host, u.Scheme, u.Host)
+	}
+	return nil
+}
+
 func (f *SpaceTrackFetcher) Fetch(ctx context.Context, gpURL string) (GPFetchResult, error) {
 	f.mu.Lock()
 	username := f.activeUsername
@@ -98,6 +147,12 @@ func (f *SpaceTrackFetcher) Fetch(ctx context.Context, gpURL string) (GPFetchRes
 func (f *SpaceTrackFetcher) FetchWithCredentials(
 	ctx context.Context, gpURL, username, password string,
 ) (GPFetchResult, error) {
+	// Validate the query URL BEFORE logging in: the fetch is authenticated with the
+	// credential Secret, so the operator must not be pointed at an arbitrary scheme/host with
+	// that session (and must not even spend a login on a misconfigured URL) (#222 review).
+	if err := f.validateGPURL(gpURL); err != nil {
+		return GPFetchResult{}, err
+	}
 	if username == "" || password == "" {
 		return GPFetchResult{}, fmt.Errorf(
 			"SpaceTrack username and password must be non-empty")
@@ -250,8 +305,17 @@ func (f *SpaceTrackFetcher) doFetchGPRaw(ctx context.Context, gpURL string) ([]b
 		return body, nil
 
 	case http.StatusForbidden, http.StatusTooManyRequests:
+		// Do NOT reflect the response body: the Space-Track fetch is AUTHENTICATED (a session
+		// from the credential Secret) and the URL is CR-controlled, so an authenticated
+		// endpoint's body could carry account/session detail — surfacing it into a public CR
+		// Condition/Event is an information leak. Use a fixed, classified message and drain the
+		// body for connection reuse (#222 review).
 		_, _ = io.Copy(io.Discard, resp.Body)
-		return nil, &RateLimitError{RetryAfter: parseRetryAfter(resp.Header), StatusCode: resp.StatusCode}
+		return nil, &RateLimitError{
+			RetryAfter: parseRetryAfter(resp.Header),
+			StatusCode: resp.StatusCode,
+			Snippet:    spaceTrackRateLimitMsg,
+		}
 
 	case http.StatusInternalServerError:
 		// Space-Track signals a query-rate-limit violation with HTTP 500 and a body
@@ -259,7 +323,13 @@ func (f *SpaceTrackFetcher) doFetchGPRaw(ctx context.Context, gpURL string) ([]b
 		// 500 is a rate limit; any other 500 is a genuine server error. I-19b.
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
 		if bytes.Contains(bytes.ToLower(body), []byte("violated your query rate limit")) {
-			return nil, &RateLimitError{RetryAfter: parseRetryAfter(resp.Header), StatusCode: resp.StatusCode}
+			// Fixed message — the authenticated body is inspected for the sentinel but NOT
+			// reflected into the CR (#222 review).
+			return nil, &RateLimitError{
+				RetryAfter: parseRetryAfter(resp.Header),
+				StatusCode: resp.StatusCode,
+				Snippet:    spaceTrackRateLimitMsg,
+			}
 		}
 		return nil, fmt.Errorf("%w: HTTP 500 from %s", ErrBadResponse, gpURL)
 

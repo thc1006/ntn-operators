@@ -214,9 +214,17 @@ func NewSafeHTTPClient(timeout time.Duration, opts ...Option) *http.Client {
 	}
 	dialer := &net.Dialer{Timeout: 5 * time.Second}
 
-	// Clone DefaultTransport to preserve proxy, connection pooling, and TLS settings.
+	// Clone DefaultTransport to inherit connection pooling and TLS settings, then
+	// override the two SSRF-critical knobs.
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.DialContext = safeDialContext(dialer, cfg.privateHostAllowlist)
+	// Proxy MUST be nil (SSRF): DefaultTransport inherits ProxyFromEnvironment, and when
+	// HTTP_PROXY/HTTPS_PROXY is set net/http dials the PROXY and passes the real target
+	// in the request/CONNECT — so safeDialContext would validate the proxy's IP, never the
+	// target's, silently bypassing the whole guard. The GP source host is CR-controlled, so
+	// the guard must not be bypassable. (Trade-off: this client ignores egress-proxy env;
+	// an opt-in proxy that re-validates the CONNECT target would be a future enhancement.)
+	transport.Proxy = nil
 
 	return &http.Client{
 		Timeout:   timeout,
@@ -230,6 +238,14 @@ func NewSafeHTTPClient(timeout time.Duration, opts ...Option) *http.Client {
 			log := logr.FromContextOrDiscard(req.Context())
 			if len(via) >= 3 {
 				return fmt.Errorf("too many redirects")
+			}
+			// Refuse an https->http downgrade: if the ORIGINAL request was https, never
+			// follow a redirect down to cleartext http, even to a public host. Space-Track
+			// carries a session cookie that a downgrade would leak in the clear; and a
+			// downgrade is never a legitimate move for a data source we reached over TLS.
+			if len(via) > 0 && via[0].URL != nil && via[0].URL.Scheme == "https" && req.URL.Scheme == "http" {
+				log.V(1).Info("blocked https->http downgrade redirect", "to", req.URL.Redacted())
+				return fmt.Errorf("refusing https->http downgrade redirect to %s", req.URL.Redacted())
 			}
 			host := req.URL.Hostname()
 			if cfg.privateHostAllowlist.ContainsHost(host) {
