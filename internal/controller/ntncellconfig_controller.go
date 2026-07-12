@@ -88,18 +88,9 @@ const (
 // producer's refresh) rather than pushed and rejected in a tight loop.
 const epochSkewMargin = 10 * time.Second
 
-// maxSourceEpochFutureSkew bounds how far into the future a SOURCE element-set epoch may
-// be before it is treated as implausible (a corrupt or spoofed feed). Real OMM/TLE epochs
-// are at or before "now"; a far-future epoch would otherwise sail past the "older than
-// maxEpochAge" check, which only catches the PAST direction.
-//
-// It is enforced in TWO places, deliberately: the producer refuses to PROPAGATE from such
-// an element set (propagateStates — SGP4 would be driven backward from the bogus epoch,
-// writing a wildly wrong ECEF into status), and the consumer refuses to PUSH one if it
-// ever reaches status anyway (defense in depth). The consumer check alone cannot prevent
-// the backward propagation, only its delivery. Generous, so legitimate near-present epochs
-// are never rejected.
-const maxSourceEpochFutureSkew = 24 * time.Hour
+// The source-epoch bounds (maxEpochAge, maxSourceEpochFutureSkew) and the sourceEpochUsable
+// rule that applies them live in the shared layer (ephemeris_freshness.go), so this consumer
+// and the SatelliteEphemeris producer apply the IDENTICAL rule to their own "now".
 
 type ephemerisPushError struct {
 	reason string
@@ -645,29 +636,30 @@ func (r *NTNCellConfigReconciler) pushRuntimeEphemeris(
 				eph.Name, state.EpochUnixMs),
 		)
 	}
-	// Hard-stale, per-satellite (#200-C4; #221 review finding 1): refuse to push the
-	// SELECTED satellite when its OWN source element-set epoch is beyond the freshness
-	// bound (drifting) or implausibly future-dated. Per-satellite, so a stale, cap-omitted,
-	// or unselected sibling in the same SatelliteEphemeris does NOT block this cell. A 0
-	// source epoch means the producer could not parse it (unknown, not stale) — allowed,
-	// matching the producer's stale-count which also skips unparseable epochs.
-	if state.SourceEpochUnixMs != 0 {
-		src := time.UnixMilli(state.SourceEpochUnixMs)
-		nowT := time.Now()
-		if nowT.Sub(src) > maxEpochAge {
-			return false, marker, newEphemerisPushError(
-				ephemerisReasonEphemerisStale,
-				fmt.Errorf("selected satellite %d source element epoch is older than %s (drifting); awaiting SatelliteEphemeris refresh",
-					state.NoradID, maxEpochAge),
-			)
-		}
-		if src.After(nowT.Add(maxSourceEpochFutureSkew)) {
-			return false, marker, newEphemerisPushError(
-				ephemerisReasonEphemerisStale,
-				fmt.Errorf("selected satellite %d source element epoch %s is implausibly future-dated; refusing",
-					state.NoradID, src.UTC()),
-			)
-		}
+	// Hard-stale, per-satellite (#200-C4): refuse to push the SELECTED satellite when its
+	// OWN source element-set epoch is beyond the freshness bound (drifting) or implausibly
+	// future-dated. Per-satellite, so a stale, cap-omitted, or unselected sibling in the
+	// same SatelliteEphemeris does NOT block this cell.
+	//
+	// Validated UNCONDITIONALLY — there is no "0 means unknown, allow it" escape any more.
+	// SourceEpochUnixMs is a plain int64, so 0 is an ambiguous sentinel: it means both
+	// "unparseable" AND the legal instant 1970-01-01T00:00:00Z, and the old fail-open let a
+	// 1970 epoch bypass the entire freshness gate. The producer no longer emits a state whose
+	// epoch it could not parse, so 0 can only be a genuine 1970 epoch — which is simply, and
+	// correctly, stale. Same rule, same bounds as the producer (shared layer).
+	nowT := time.Now()
+	src := time.UnixMilli(state.SourceEpochUnixMs)
+	if err := sourceEpochPlausible(nowT, src); err != nil {
+		return false, marker, newEphemerisPushError(
+			ephemerisReasonEphemerisStale,
+			fmt.Errorf("selected satellite %d: %w; refusing", state.NoradID, err),
+		)
+	}
+	if err := sourceEpochFresh(nowT, src); err != nil {
+		return false, marker, newEphemerisPushError(
+			ephemerisReasonEphemerisStale,
+			fmt.Errorf("selected satellite %d: %w; awaiting SatelliteEphemeris refresh", state.NoradID, err),
+		)
 	}
 
 	// Dedup on the propagated epoch (I-12): re-push whenever the SatelliteEphemeris

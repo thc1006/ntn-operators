@@ -187,35 +187,16 @@ func (r *SatelliteEphemerisReconciler) Reconcile(ctx context.Context, req ctrl.R
 	// ~1–3 km/day from the element epoch (findings.md I-17). metav1.Duration
 	// serialises as a string, so both bounds are enforced here rather than via CEL.
 	effectiveInterval := r.clampRefreshInterval(ctx, eph)
-
-	// Step 3: Select fetcher and load credentials if needed.
-	fetcher, fetcherErr := r.fetcherForSource(ctx, eph)
-	if fetcherErr != nil {
-		meta.SetStatusCondition(&eph.Status.Conditions, metav1.Condition{
-			Type:               ntnv1alpha1.ConditionGPDataFetched,
-			Status:             metav1.ConditionFalse,
-			Reason:             "FetcherSetupFailed",
-			Message:            fetcherErr.Error(),
-			ObservedGeneration: eph.Generation,
-		})
-		// No usable GP data this cycle → readiness 0. Holds across a persistent
-		// setup failure so `gp_fetch_ready == 0` alerts even on a never-fetched cold
-		// start, where `gp_satellite_count == 0` cannot (absent series).
-		ntnmetrics.GPFetchReady.With(prometheus.Labels{"namespace": eph.Namespace, "ephemeris": eph.Name}).Set(0)
-		if err := r.Status().Update(ctx, eph); err != nil {
-			return ctrl.Result{}, err
-		}
-		return ctrl.Result{RequeueAfter: time.Minute}, nil
-	}
-
-	// Step 4b: Obtain OMM data. Within the GP-refresh window, re-propagate from the
-	// cached OMMs of the last real fetch WITHOUT contacting the GP source — this is
-	// what keeps the runtime-push epoch fresh on a short cadence without re-hitting
-	// CelesTrak/SpaceTrack (their rate-limit etiquette is why the fetch is floored
-	// to effectiveInterval). Only fetch when the window has elapsed or the cache is
-	// cold (e.g. the first reconcile after a restart). (#179)
 	now := time.Now()
-	outcome, earlyResult, earlyErr := r.obtainOMMs(ctx, req, eph, fetcher, effectiveInterval, now)
+
+	// Step 3: Can this reconcile be answered from cache WITHOUT contacting the source?
+	//   (a) inside the GP-refresh window — normal (#179), or
+	//   (b) inside a failed fetch's retry backoff — degraded, but it is exactly what keeps
+	//       the runtime-push epoch alive through a long outage.
+	// Consulted BEFORE fetcher/credential setup: a reconcile the cache can answer must not
+	// read the source Secret, so a transient Secret failure (or a credential rotation) cannot
+	// break SIB19 continuity.
+	outcome, earlyResult, earlyErr := r.acquireOMMs(ctx, req, eph, effectiveInterval, now)
 	if earlyResult != nil {
 		// obtainOMMs only early-returns on no-usable-data outcomes: a refused insecure
 		// URL, or a fetch error with no cache to fall back on. Readiness 0 either way
@@ -226,6 +207,10 @@ func (r *SatelliteEphemerisReconciler) Reconcile(ctx context.Context, req ctrl.R
 	result := outcome.result
 	reusedCache := outcome.reusedCache
 	servedCacheOnError := outcome.servedCacheOnError
+	serveReason := outcome.serveReason
+	if serveReason == "" {
+		serveReason = reasonFetchFailedServingCache
+	}
 	cacheServeErr := outcome.cacheServeErr
 
 	// Step 6: Update status with new data.
@@ -252,7 +237,7 @@ func (r *SatelliteEphemerisReconciler) Reconcile(ctx context.Context, req ctrl.R
 	// re-propagation that keeps serving the same stale cache.
 	serveCacheEpisode := servedCacheOnError && conditionEpisodeChanged(
 		meta.FindStatusCondition(eph.Status.Conditions, ntnv1alpha1.ConditionGPDataFetched),
-		metav1.ConditionFalse, "FetchFailedServingCache", eph.Generation)
+		metav1.ConditionFalse, serveReason, eph.Generation)
 
 	switch {
 	case servedCacheOnError:
@@ -260,7 +245,7 @@ func (r *SatelliteEphemerisReconciler) Reconcile(ctx context.Context, req ctrl.R
 		meta.SetStatusCondition(&eph.Status.Conditions, metav1.Condition{
 			Type:   ntnv1alpha1.ConditionGPDataFetched,
 			Status: metav1.ConditionFalse,
-			Reason: "FetchFailedServingCache",
+			Reason: serveReason,
 			Message: fmt.Sprintf("GP fetch failed (%s); serving %d satellites from cached OMMs — pass windows and runtime push preserved",
 				cacheServeErr.Error(), result.SatelliteCount),
 			ObservedGeneration: eph.Generation,
@@ -365,7 +350,8 @@ func (r *SatelliteEphemerisReconciler) Reconcile(ctx context.Context, req ctrl.R
 
 	// Stamp the propagation-input digest these propagatedStates were computed under.
 	// Reaching here means the current spec's inputs were (re)propagated — from a fresh
-	// fetch OR a valid same-generation cache. A fetch failure with NO matching cache
+	// fetch OR a valid cache entry for the SAME UPSTREAM FETCH IDENTITY (fetchInputKey;
+	// the cache is deliberately NOT generation-keyed). A fetch failure with NO matching cache
 	// early-returns via handleFetchError, which deliberately does NOT restamp, so the hash
 	// keeps pointing at the LAST inputs that actually produced states. The consumer blocks
 	// only when the live spec's propagation inputs differ from this — a source/selector
@@ -411,7 +397,7 @@ func (r *SatelliteEphemerisReconciler) Reconcile(ctx context.Context, req ctrl.R
 	switch {
 	case servedCacheOnError:
 		if serveCacheEpisode && r.Recorder != nil {
-			r.Recorder.Eventf(eph, nil, corev1.EventTypeWarning, "FetchFailedServingCache", "FetchFailedServingCache",
+			r.Recorder.Eventf(eph, nil, corev1.EventTypeWarning, serveReason, serveReason,
 				"GP fetch failed (%s); serving %d satellites from cached OMMs", cacheServeErr.Error(), result.SatelliteCount)
 		}
 	case !reusedCache:
@@ -420,21 +406,20 @@ func (r *SatelliteEphemerisReconciler) Reconcile(ctx context.Context, req ctrl.R
 		}
 	}
 
-	// I-18: on a serve-cache-on-error cycle, back off the FETCH retry exactly as the
-	// wipe path would (rate-limited → slow requeue; generic transient → return the
-	// error for workqueue exponential backoff) — while the status just persisted
-	// keeps SIB19 served from cache.
-	if servedCacheOnError {
-		_, requeueAfter, returnAsError := classifyFetchError(cacheServeErr, effectiveInterval)
-		if returnAsError {
-			return ctrl.Result{}, cacheServeErr
-		}
-		return ctrl.Result{RequeueAfter: requeueAfter}, nil
-	}
-
-	// Requeue on the short propagation cadence (not the GP-refresh interval) so the
-	// runtime-push epoch stays fresh for off-cycle consumers; the fetch itself
-	// stays gated to effectiveInterval by the cache check above (#179).
+	// Requeue on the short PROPAGATION cadence — on EVERY path that produced usable states,
+	// including a serve-cache-on-error cycle. The FETCH is held back separately by
+	// cachedFetch.nextFetchAttempt (armed in obtainOMMs), so running the reconcile every
+	// 3 minutes does NOT re-hit a rate-limited source: cacheServe answers from cache without
+	// contacting it.
+	//
+	// This is the fix for the outage-continuity bug. Previously a serve-cache cycle requeued
+	// at the FETCH backoff (classifyFetchError → 2–24h for RateLimited/AuthFailed, or an
+	// error for workqueue backoff that ramps to ~1000s). The cycle re-propagated the cached
+	// OMMs once to now+propagationEpochLead (5 min) and then nothing ran for hours — so the
+	// pushed epoch expired ~5 minutes in and the consumer refused it for the rest of the
+	// window. "Serving cache preserves SIB19 continuity" was therefore only true for ONE
+	// reconcile. The two cadences are now independent: fetch politeness is enforced on the
+	// fetch, and the epoch is kept alive on the propagation heartbeat.
 	return ctrl.Result{RequeueAfter: min(effectiveInterval, propagationRefreshInterval)}, nil
 }
 
@@ -475,6 +460,202 @@ type cachedFetch struct {
 	result   ephemeris.GPFetchResult
 	fetchKey string
 	uid      types.UID
+
+	// nextFetchAttempt suppresses the UPSTREAM FETCH until this instant after a failure —
+	// INDEPENDENTLY of the reconcile cadence. Previously the fetch backoff WAS the reconcile
+	// cadence (RequeueAfter = the 2–24h fetch backoff on a serve-cache cycle), which starved
+	// the propagation heartbeat: the served cache was re-propagated once to now+5m and then
+	// nothing ran for hours, so the pushed epoch expired ~5 minutes in and SIB19 went stale
+	// for the rest of the window. The reconcile now keeps running on the 3-minute propagation
+	// cadence (which re-propagates from cache and keeps the epoch fresh) while ONLY the fetch
+	// is held back to here — polite to the source AND continuous for the gNB.
+	nextFetchAttempt time.Time
+	// lastFetchErr is the failure that armed nextFetchAttempt, replayed on each backoff-serve
+	// so the degraded status/condition/event stays truthful about WHY we are on cache.
+	lastFetchErr error
+	// fetchFailures counts consecutive failures, for the transient-error backoff ramp.
+	fetchFailures int
+	// retryKey pins the backoff to the credential/interval inputs it was built from. The
+	// payload key (fetchKey) deliberately ignores those, so without this an operator who fixed
+	// the credentials would still be suppressed by the old backoff. See retryInputKey.
+	retryKey string
+}
+
+// maxAuthRetryBackoff bounds how long an auth failure suppresses the next login attempt. The
+// operator normally fixes credentials IN PLACE (same Secret name), which changes neither the
+// spec nor retryInputKey, so nothing would otherwise clear the backoff — and we do not watch
+// Secrets (that would need list/watch RBAC; the operator deliberately holds only secrets/get).
+// A bounded re-probe recovers within minutes while staying far below any rate budget.
+const maxAuthRetryBackoff = 15 * time.Minute
+
+// fetchRetryDelay is how long to suppress the next UPSTREAM fetch after a failure. It is the
+// FETCH cadence only — the reconcile keeps running on the propagation heartbeat regardless,
+// so this can be long without starving SIB19.
+func fetchRetryDelay(fetchErr error, effectiveInterval time.Duration, failures int) time.Duration {
+	switch {
+	case errors.Is(fetchErr, ephemeris.ErrRateLimited):
+		// Honor the source's policy (and any Retry-After); never faster than the refresh floor.
+		return max(effectiveInterval, retryAfterFrom(fetchErr))
+	case errors.Is(fetchErr, ephemeris.ErrAuthFailed):
+		// Bad credentials will not fix themselves, and hammering the login endpoint risks a
+		// lockout — but the refresh interval (up to 24h) is far too long to wait for RECOVERY
+		// once an operator fixes the Secret IN PLACE (same Secret name → no spec change → no
+		// retryKey change → the backoff would otherwise hold). Cap it: a few probes an hour is
+		// nowhere near Space-Track's ~30/min budget, and it bounds recovery to minutes. A
+		// credential-REFERENCE edit still clears the backoff immediately via retryKey.
+		return min(effectiveInterval, maxAuthRetryBackoff)
+	default:
+		// Transient (network/5xx): ramp 1m, 2m, 4m … capped at the refresh interval. Bounded
+		// exponent so the shift cannot overflow.
+		shift := min(max(failures-1, 0), 10)
+		return min(time.Minute<<shift, effectiveInterval)
+	}
+}
+
+// cacheServeReason says WHY a reconcile is being served from cache without contacting the source.
+type cacheServeReason int
+
+const (
+	cacheServeNone    cacheServeReason = iota
+	cacheServeWindow                   // inside the GP-refresh window — normal, healthy
+	cacheServeBackoff                  // a fetch failed and we are inside its retry backoff — degraded
+)
+
+// cacheServe decides whether this reconcile can be answered from the cached OMMs WITHOUT
+// contacting the upstream source. It is consulted BEFORE fetcher/credential setup, so a
+// reconcile the cache can answer never reads the source Secret — a transient Secret
+// unavailability (or a credential rotation) must not break SIB19 continuity, and the cache
+// key deliberately excludes credentials (the same URL returns the same GP data whichever
+// account fetched it).
+func (r *SatelliteEphemerisReconciler) cacheServe(
+	key client.ObjectKey, eph *ntnv1alpha1.SatelliteEphemeris, now time.Time, effectiveInterval time.Duration,
+) (cachedFetch, cacheServeReason) {
+	c, ok := r.matchingCache(key, eph)
+	if !ok {
+		return cachedFetch{}, cacheServeNone
+	}
+	if now.Sub(c.result.FetchedAt) < effectiveInterval {
+		return c, cacheServeWindow
+	}
+	// Honor an armed fetch backoff — but ONLY while the retry inputs are unchanged. The
+	// payload cache key deliberately excludes credentials and the refresh interval (the same
+	// URL returns the same GP data whichever account fetched it), so without this an operator
+	// who FIXES the credentials, or lowers refreshInterval, would still be held down by the
+	// old 2–24h backoff: cacheServe would answer from cache and never even build the fetcher.
+	// A change to the retry inputs invalidates the backoff and lets the next fetch through.
+	if now.Before(c.nextFetchAttempt) && c.retryKey == retryInputKey(eph.Spec, effectiveInterval) {
+		return c, cacheServeBackoff
+	}
+	return cachedFetch{}, cacheServeNone
+}
+
+// acquireOMMs is the whole "where do this reconcile's OMMs come from" state machine, in one
+// place. Order matters, and it is the order that keeps SIB19 alive:
+//
+//  1. Cache can answer (inside the refresh window, or inside a failed fetch's retry backoff) →
+//     serve it WITHOUT contacting the source and WITHOUT reading the credential Secret.
+//  2. Otherwise a real fetch is due → build the fetcher (this is what reads the Secret).
+//     2a. Setup fails (Secret missing / unreadable / mid-rotation / wrong key) → fall back to a
+//     matching cache of ANY AGE. The raw OMMs do not depend on the credentials
+//     (fetchInputKey excludes them), so a Secret problem must not stop re-propagation. The
+//     refresh window governs whether to FETCH, not whether the payload is still propagatable.
+//     2b. Only a COLD cache (nothing to propagate) hard-fails.
+//  3. Fetcher built → obtainOMMs fetches, and on failure falls back to cache and arms the
+//     fetch backoff.
+//
+// Every path that yields usable OMMs returns a normal outcome, so the caller re-propagates and
+// requeues on the propagation heartbeat. earlyResult is non-nil only when there is nothing to
+// propagate at all.
+func (r *SatelliteEphemerisReconciler) acquireOMMs(
+	ctx context.Context, req ctrl.Request, eph *ntnv1alpha1.SatelliteEphemeris,
+	effectiveInterval time.Duration, now time.Time,
+) (ommFetchOutcome, *ctrl.Result, error) {
+	log := logf.FromContext(ctx)
+
+	switch c, why := r.cacheServe(req.NamespacedName, eph, now, effectiveInterval); why {
+	case cacheServeWindow:
+		log.V(1).Info("re-propagating from cached OMMs; GP source not contacted",
+			"cacheAge", now.Sub(c.result.FetchedAt).String(), "refreshInterval", effectiveInterval.String())
+		return ommFetchOutcome{result: c.result, reusedCache: true}, nil, nil
+	case cacheServeBackoff:
+		log.V(1).Info("re-propagating from cached OMMs; upstream fetch suppressed by retry backoff",
+			"cacheAge", now.Sub(c.result.FetchedAt).String(),
+			"nextFetchAttempt", c.nextFetchAttempt.UTC().String(), "lastErr", c.lastFetchErr.Error())
+		// Only a FETCH failure ever arms nextFetchAttempt (a setup failure is retried every
+		// cycle — it is a cheap local Secret read, not an upstream call), so a backoff-serve is
+		// always replaying a fetch failure.
+		return ommFetchOutcome{
+			result: c.result, servedCacheOnError: true,
+			cacheServeErr: c.lastFetchErr, serveReason: reasonFetchFailedServingCache,
+		}, nil, nil
+	case cacheServeNone:
+	}
+
+	fetcher, fetcherErr := r.fetcherForSource(ctx, eph)
+	if fetcherErr == nil {
+		return r.obtainOMMs(ctx, req, eph, fetcher, effectiveInterval, now)
+	}
+
+	// 2a: setup failed but the cached payload is still propagatable.
+	if c, ok := r.matchingCache(req.NamespacedName, eph); ok {
+		log.Info("fetcher/credential setup failed; serving cached OMMs for SIB19 continuity",
+			"err", fetcherErr.Error(), "cacheAge", now.Sub(c.result.FetchedAt).String())
+		return ommFetchOutcome{
+			result: c.result, servedCacheOnError: true,
+			cacheServeErr: fetcherErr, serveReason: reasonSetupFailedServingCache,
+		}, nil, nil
+	}
+
+	// 2b: cold cache — nothing to keep alive.
+	res, err := r.handleSetupFailure(ctx, eph, fetcherErr)
+	return ommFetchOutcome{}, &res, err
+}
+
+// handleSetupFailure is the cold-cache fetcher/credential failure path: no OMMs at all.
+func (r *SatelliteEphemerisReconciler) handleSetupFailure(
+	ctx context.Context, eph *ntnv1alpha1.SatelliteEphemeris, fetcherErr error,
+) (ctrl.Result, error) {
+	meta.SetStatusCondition(&eph.Status.Conditions, metav1.Condition{
+		Type:               ntnv1alpha1.ConditionGPDataFetched,
+		Status:             metav1.ConditionFalse,
+		Reason:             "FetcherSetupFailed",
+		Message:            fetcherErr.Error(),
+		ObservedGeneration: eph.Generation,
+	})
+	// No usable GP data this cycle → readiness 0. Holds across a persistent setup failure so
+	// `gp_fetch_ready == 0` alerts even on a never-fetched cold start, where
+	// `gp_satellite_count == 0` cannot (absent series).
+	ntnmetrics.GPFetchReady.With(prometheus.Labels{"namespace": eph.Namespace, "ephemeris": eph.Name}).Set(0)
+	if err := r.Status().Update(ctx, eph); err != nil {
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{RequeueAfter: time.Minute}, nil
+}
+
+// matchingCache returns the cache entry whose raw upstream payload belongs to THIS object and
+// THIS source, regardless of age. Used both for the age-aware cacheServe decision and for the
+// any-age fallback after a fetch or fetcher-SETUP failure.
+func (r *SatelliteEphemerisReconciler) matchingCache(
+	key client.ObjectKey, eph *ntnv1alpha1.SatelliteEphemeris,
+) (cachedFetch, bool) {
+	c, ok := r.cachedOMMResult(key)
+	if !ok || c.fetchKey != fetchInputKey(eph.Spec) || c.uid != eph.UID {
+		return cachedFetch{}, false
+	}
+	return c, true
+}
+
+// retryInputKey identifies the inputs that a FETCH RETRY decision depends on — the credential
+// reference and the effective refresh interval — as opposed to fetchInputKey, which identifies
+// the raw PAYLOAD (source type + url). Keeping them separate is what lets a cached payload stay
+// reusable across a credential change while the stale backoff built from the OLD credentials is
+// discarded.
+func retryInputKey(spec ntnv1alpha1.SatelliteEphemerisSpec, effectiveInterval time.Duration) string {
+	credName, credKey := "", ""
+	if spec.Source.Credentials != nil {
+		credName, credKey = spec.Source.Credentials.Name, spec.Source.Credentials.Key
+	}
+	return fmt.Sprintf("cred=%q/%q interval=%s", credName, credKey, effectiveInterval)
 }
 
 // fetchInputKey identifies WHAT RAW upstream payload a cached entry holds: the source type
@@ -501,11 +682,9 @@ func (r *SatelliteEphemerisReconciler) cachedOMMResult(key client.ObjectKey) (ca
 // propagated state, so a malformed GP feed cannot bloat the status object.
 const maxSatelliteNameLen = 64
 
-// maxEpochAge bounds how old a fetched element set's OWN epoch may be before its
-// SGP4 propagation is flagged unreliable (findings.md I-17). Independent of the
-// refresh cadence — a source can serve elements whose epoch is already stale. ~7
-// days keeps LEO in-track error to at most a few km.
-const maxEpochAge = 7 * 24 * time.Hour
+// maxEpochAge and maxSourceEpochFutureSkew, and the sourceEpochUsable rule that applies
+// them, live in the shared layer (ephemeris_freshness.go) so the producer and the consumer
+// cannot drift apart.
 
 // parseOMMEpoch parses an OMM element-set epoch (ISO-8601, with or without a
 // fractional second or trailing Z), returning ok=false when unparseable.
@@ -555,7 +734,13 @@ func propagationInputHash(spec ntnv1alpha1.SatelliteEphemerisSpec) string {
 	if spec.Satellites != nil {
 		norad = append(norad, spec.Satellites.NoradIDs...)
 	}
+	// Canonicalize: sort AND de-duplicate. FilterOMMs applies the selector through a map, so
+	// [25544] and [25544, 25544] select exactly the same satellites and yield byte-identical
+	// propagated output — they must therefore hash the SAME. Without Compact, adding a
+	// duplicate NORAD ID changed the hash, which the consumer read as EphemerisInputsStale
+	// and answered with a needless re-propagation + runtime re-push.
 	sort.Ints(norad)
+	norad = slices.Compact(norad)
 	h := sha256.New()
 	// Quote the user-controlled strings (%q) so a crafted source.url can't embed the field
 	// delimiters and collide with a different spec's serialization. hash.Hash.Write never
@@ -593,6 +778,8 @@ func (r *SatelliteEphemerisReconciler) propagateStates(
 
 	states := make([]ntnv1alpha1.PropagatedState, 0, min(len(omms), maxPropagatedStates))
 	skippedByCap := 0
+	unparseableEpochs := 0 // refused BEFORE SGP4: OMM EPOCH could not be parsed
+	futureEpochs := 0      // refused BEFORE SGP4: OMM EPOCH implausibly far in the future
 	for i := range omms {
 		if len(states) >= maxPropagatedStates {
 			// The cap is reached; the remaining OMMs are NOT attempted. This is the
@@ -605,22 +792,37 @@ func (r *SatelliteEphemerisReconciler) propagateStates(
 				"hint", "set spec.satellites.noradIDs to the satellites pushed at runtime")
 			break
 		}
-		// Parse the SOURCE element-set epoch BEFORE propagating (0 if unparseable →
-		// unknown, not stale). An implausibly FUTURE-dated epoch (corrupt or spoofed feed)
-		// must be rejected HERE, not only at the consumer: SGP4 would otherwise be driven
-		// backward from the bogus epoch down to the target, writing a wildly wrong ECEF
-		// into status. Refusing it at the push only stops delivery — it does not stop the
-		// propagation — so the guard belongs on the producer too (#221 review finding 3).
-		srcEpochMs := int64(0)
-		if t, ok := parseOMMEpoch(omms[i].EpochStr); ok {
-			if t.After(epoch.Add(maxSourceEpochFutureSkew)) {
-				logf.FromContext(ctx).Info("skipping satellite: source element epoch is implausibly future-dated",
-					"norad", omms[i].NoradCatID, "sourceEpoch", t.UTC(), "targetEpoch", epoch.UTC(),
-					"allowedSkew", maxSourceEpochFutureSkew.String())
-				continue
-			}
-			srcEpochMs = t.UnixMilli()
+		// Validate the SOURCE element-set epoch BEFORE propagating, using the SHARED rule
+		// against the SAME `now` the consumer will use (ephemeris_freshness.go). Previously
+		// this compared against the propagation TARGET epoch (now + 5m) while the consumer
+		// compared against now, so a source epoch inside that 5-minute band was propagated
+		// and hash-stamped here yet permanently refused at the push — a state that could
+		// never be delivered.
+		//
+		// An UNPARSEABLE epoch now SKIPS the satellite rather than emitting a state with
+		// SourceEpochUnixMs = 0. That 0 was an ambiguous sentinel (it also means the legal
+		// instant 1970-01-01T00:00:00Z), and the consumer's fail-open on it let a 1970 epoch
+		// bypass the whole freshness gate. Nothing is lost: SGP4's own OMM.ToTLE parses the
+		// same epoch, so an element set we cannot parse fails PropagateToECEF below anyway.
+		t, ok := parseOMMEpoch(omms[i].EpochStr)
+		if !ok {
+			unparseableEpochs++
+			logf.FromContext(ctx).Info("skipping satellite: source element epoch is unparseable",
+				"norad", omms[i].NoradCatID, "epochStr", omms[i].EpochStr)
+			continue
 		}
+		// PLAUSIBILITY only. A STALE (merely old) element set is deliberately still
+		// propagated and merely counted (EphemerisEpochStale, I-17) so a drifting feed stays
+		// observable; the consumer owns the delivery gate (#200-C4). Rejecting staleness here
+		// would collapse a precise "EphemerisStale" diagnosis into a bare "PayloadMissing".
+		if err := sourceEpochPlausible(now, t); err != nil {
+			futureEpochs++
+			logf.FromContext(ctx).Info("skipping satellite: implausible source element epoch",
+				"norad", omms[i].NoradCatID, "sourceEpoch", t.UTC(), "err", err.Error())
+			continue
+		}
+		srcEpochMs := t.UnixMilli()
+
 		ecef, err := ephemeris.PropagateToECEF(omms[i], epoch)
 		if err != nil {
 			continue // skip satellites whose SGP4 propagation fails / goes out of range
@@ -642,7 +844,53 @@ func (r *SatelliteEphemerisReconciler) propagateStates(
 	eph.Status.PropagatedStates = states
 	truncEvent := r.reportStatesTruncated(eph, len(omms), skippedByCap)
 	r.reportEphemerisEpochStale(eph, staleEpochs, len(omms))
+	r.reportSourceEpochRejected(eph, unparseableEpochs, futureEpochs, len(omms))
 	return truncEvent
+}
+
+// reportSourceEpochRejected surfaces element sets the producer refused BEFORE SGP4 — an
+// unparseable or implausibly future-dated OMM EPOCH. Without a durable condition the guard is
+// invisible: the satellite simply has no propagated state, and a cell selecting it reports a
+// bare "EphemerisPayloadMissing" with no way to tell a corrupt feed from a deep-space
+// rejection or a NORAD typo (the deep-space case already gets a cross-CR hint; this one had
+// none — it only wrote a log line).
+func (r *SatelliteEphemerisReconciler) reportSourceEpochRejected(
+	eph *ntnv1alpha1.SatelliteEphemeris, unparseable, futureDated, total int,
+) {
+	c := metav1.Condition{
+		Type:               ntnv1alpha1.ConditionSourceEpochRejected,
+		Status:             metav1.ConditionFalse,
+		Reason:             "SourceEpochsPlausible",
+		Message:            "Every tracked element set has a parseable, plausibly-dated epoch",
+		ObservedGeneration: eph.Generation,
+	}
+	// Distinct Reasons: "unparseable" and "implausibly future" are different corruptions and
+	// warrant different investigation, so an alert/automation must be able to tell them apart.
+	switch {
+	case unparseable > 0 && futureDated > 0:
+		c.Status = metav1.ConditionTrue
+		c.Reason = "SourceEpochRejected"
+		c.Message = fmt.Sprintf("%d of %d tracked element set(s) refused before propagation: %d with an "+
+			"unparseable OMM EPOCH, %d dated more than %s in the future.",
+			unparseable+futureDated, total, unparseable, futureDated, maxSourceEpochFutureSkew)
+	case unparseable > 0:
+		c.Status = metav1.ConditionTrue
+		c.Reason = "UnparseableSourceEpoch"
+		c.Message = fmt.Sprintf("%d of %d tracked element set(s) refused before propagation: the OMM EPOCH "+
+			"could not be parsed.", unparseable, total)
+	case futureDated > 0:
+		c.Status = metav1.ConditionTrue
+		c.Reason = "FutureDatedSourceEpoch"
+		c.Message = fmt.Sprintf("%d of %d tracked element set(s) refused before propagation: the OMM EPOCH is "+
+			"more than %s in the future (SGP4 would be driven backward from a bogus epoch).",
+			futureDated, total, maxSourceEpochFutureSkew)
+	default:
+		meta.SetStatusCondition(&eph.Status.Conditions, c)
+		return
+	}
+	c.Message += " They produce no propagated state, so a cell selecting one reports " +
+		"EphemerisPayloadMissing. Check the GP source for corrupt data."
+	meta.SetStatusCondition(&eph.Status.Conditions, c)
 }
 
 // reportStatesTruncated records status.truncatedSatelliteCount and the
@@ -1000,7 +1248,17 @@ type ommFetchOutcome struct {
 	reusedCache        bool
 	servedCacheOnError bool
 	cacheServeErr      error
+	// serveReason distinguishes WHY we are degraded onto cache. A failed upstream fetch and a
+	// failed fetcher/credential SETUP both keep SIB19 alive from cache, but they need
+	// different operator actions (check the source vs check the Secret), so they must not be
+	// collapsed into one reason.
+	serveReason string
 }
+
+const (
+	reasonFetchFailedServingCache = "FetchFailedServingCache"
+	reasonSetupFailedServingCache = "FetcherSetupFailedServingCache"
+)
 
 // obtainOMMs resolves the OMM data for this reconcile (Step 4b/5). It returns the
 // outcome plus an optional early Reconcile result: non-nil when the caller must
@@ -1017,13 +1275,9 @@ func (r *SatelliteEphemerisReconciler) obtainOMMs(
 ) (ommFetchOutcome, *ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 	fetchKey := fetchInputKey(eph.Spec)
-	if c, ok := r.cachedOMMResult(req.NamespacedName); ok &&
-		c.fetchKey == fetchKey && c.uid == eph.UID &&
-		now.Sub(c.result.FetchedAt) < effectiveInterval {
-		log.V(1).Info("re-propagating from cached OMMs; GP source not contacted",
-			"cacheAge", now.Sub(c.result.FetchedAt).String(), "refreshInterval", effectiveInterval.String())
-		return ommFetchOutcome{result: c.result, reusedCache: true}, nil, nil
-	}
+	// (The cache-serve decision — refresh window OR fetch-retry backoff — is made by
+	// cacheServe BEFORE fetcher/credential setup, so obtainOMMs is only reached when a real
+	// upstream fetch is actually due.)
 
 	// Refuse a cleartext http:// source that resolves to a PUBLIC IP (I-21).
 	if ip, insecure := r.publicHTTPSource(ctx, eph.Spec.Source.URL); insecure {
@@ -1045,14 +1299,31 @@ func (r *SatelliteEphemerisReconciler) obtainOMMs(
 		// and break re-propagation during an upstream outage (#221 review finding 2).
 		if c, ok := r.cachedOMMResult(req.NamespacedName); ok &&
 			c.fetchKey == fetchKey && c.uid == eph.UID {
+			// ARM THE FETCH BACKOFF on the cache entry. This — not RequeueAfter — is what
+			// keeps us polite to the source, which frees the reconcile to keep running on the
+			// 3-minute propagation cadence and keep the pushed epoch alive for the whole
+			// outage. (Before this, the serve-cache cycle requeued at the 2–24h fetch backoff,
+			// so the epoch expired ~5 minutes in and SIB19 went stale for the rest of it.)
+			c.fetchFailures++
+			// Measure the backoff from when the failure ACTUALLY happened, not from the `now`
+			// captured before the fetch: a 30s HTTP timeout (the client's timeout is exactly
+			// 30s) would otherwise eat 30s of the first 1-minute transient backoff.
+			c.nextFetchAttempt = time.Now().Add(fetchRetryDelay(fetchErr, effectiveInterval, c.fetchFailures))
+			c.lastFetchErr = fetchErr
+			c.retryKey = retryInputKey(eph.Spec, effectiveInterval)
+			r.ommCache.Store(req.NamespacedName, c)
 			log.Info("GP fetch failed; serving last cached OMMs for SIB19 continuity",
-				"err", fetchErr.Error(), "cacheAge", now.Sub(c.result.FetchedAt).String())
-			return ommFetchOutcome{result: c.result, servedCacheOnError: true, cacheServeErr: fetchErr}, nil, nil
+				"err", fetchErr.Error(), "cacheAge", now.Sub(c.result.FetchedAt).String(),
+				"nextFetchAttempt", c.nextFetchAttempt.UTC().String(), "consecutiveFailures", c.fetchFailures)
+			return ommFetchOutcome{result: c.result, servedCacheOnError: true, cacheServeErr: fetchErr, serveReason: reasonFetchFailedServingCache}, nil, nil
 		}
+		// No cache to serve: nothing to keep fresh, so the fetch backoff IS the reconcile
+		// cadence here (the wipe path) — unchanged.
 		res, err := r.handleFetchError(ctx, eph, fetchErr, effectiveInterval)
 		return ommFetchOutcome{}, &res, err
 	}
 
+	// A successful fetch clears the backoff.
 	r.ommCache.Store(req.NamespacedName, cachedFetch{result: result, fetchKey: fetchKey, uid: eph.UID})
 	return ommFetchOutcome{result: result}, nil, nil
 }
