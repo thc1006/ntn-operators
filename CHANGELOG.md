@@ -38,6 +38,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **SIB19 now survives a sustained upstream outage, not just the first reconcile of one.**
+  Serving cached OMMs on a failed GP fetch (I-18) used to re-propagate ONCE (to
+  `now + 5 min`) and then set `RequeueAfter` to the **fetch** backoff — 2–24h for
+  rate-limit/auth failures, or the workqueue's exponential backoff for a transient one. The
+  controller filters its own status writes, so nothing else re-triggered it: the pushed epoch
+  expired ~5 minutes in and the consumer refused the state for the rest of the window
+  (continuity was ~4%, not 100%). The two cadences are now independent — the **fetch** is
+  throttled on the cache entry (`nextFetchAttempt`) while the **reconcile** keeps running on
+  the 3-minute propagation heartbeat, so the source is contacted once per backoff window and
+  the epoch is refreshed for the whole outage. A **fetcher/credential setup failure** (missing,
+  unreadable or mid-rotation Secret) now takes the same cache fallback instead of giving up
+  without propagating, reported distinctly as `FetcherSetupFailedServingCache`. Fixing the
+  credentials or lowering `refreshInterval` clears a stale backoff immediately, and an auth
+  backoff is capped so an in-place Secret fix recovers in minutes rather than up to 24h.
+  ⚠ **Scope:** the OMM cache is process-local and in-memory, so this preserves continuity for
+  the lifetime of a **warm** controller cache. After a restart or leader failover the cache is
+  cold, and if the upstream is still unavailable there is nothing to re-propagate from.
+- **`propagatedStates[].sourceEpochUnixMs == 0` no longer bypasses the freshness gate.** `0`
+  meant *both* "unparseable" *and* the legal instant `1970-01-01T00:00:00Z`, and the consumer
+  failed **open** on it — so a 1970-dated element set skipped the 7-day hard-stale check
+  entirely. The producer no longer emits a state whose epoch it could not parse (SGP4's own
+  `OMM.ToTLE` parses the same epoch, so such an element set fails propagation anyway), and the
+  consumer now validates unconditionally: a 1970 epoch is simply, and correctly, stale. Element
+  sets refused before propagation are surfaced by a new `SourceEpochRejected` condition
+  (`UnparseableSourceEpoch` / `FutureDatedSourceEpoch`), so a cell reporting
+  `EphemerisPayloadMissing` can be traced to a corrupt feed rather than a NORAD typo.
 - **Runtime ephemeris push is gated on propagation-input currency and per-satellite
   freshness.** The `NTNCellConfig` runtime push consumes `SatelliteEphemeris.status.propagatedStates`
   across a watch fan-out; it now refuses to push when those states were computed under
