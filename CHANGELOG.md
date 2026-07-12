@@ -178,6 +178,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   disruptions only; not a node-failure guarantee); the `config/default` kustomize base is
   intentionally single-replica for dev/e2e. Corrected an earlier claim that a cache-sync-gated
   readyz would deadlock rollouts — only a *leadership*-gated one does.
+- **Docs/runbook corrections (audit follow-up).** `RELEASING.md`'s operator-only
+  rollback now uses `helm upgrade oci://ghcr.io/thc1006/ntn-operators --version
+  <prev> --reuse-values --set crd.enable=false`; the previous
+  `helm rollback … --set crd.enable=false` fails with `unknown flag: --set`
+  (`helm rollback` takes no `--set`), and a local `dist/chart` path ignores
+  `--version` (would redeploy current sources, not roll back). In the NOC runbook
+  (`docs/runbooks/alerts.md`): the gNB-reachability check now uses an ephemeral
+  debug container in the operator Pod (shares its netns → governed by the
+  operator's NetworkPolicy; a bare labelled `kubectl run` pod would be adopted and
+  killed by the operator ReplicaSet) with IPv6-safe endpoint parsing; the "all
+  alerts are namespaced" claim is corrected (`NTNControllerReconcileErrors` is
+  labelled by `controller` only); log commands use a release-independent label
+  selector with `--tail=-1 --prefix=true` (the selector default is 10 lines); and
+  the `GPDataFetched=False` reason list is completed
+  (`FetcherSetupFailed`/`InsecureURL`). The chart's
+  `extraEgress` help no longer implies it can *restrict* egress — NetworkPolicy
+  egress rules are additive, so a port must be left out of
+  `prometheusPorts`/`gnbPorts` to be CIDR-scoped. The README no longer states
+  stale-CRD writes are unconditionally "silently dropped" (strict server-side
+  field validation rejects them). The `runtimeEphemerisPushMarker` comment no
+  longer claims "NR max 240 s" (the `ntnUlSyncValidityDur` enum caps at 900 s)
+  or that the re-push cadence is always under `ntn-UlSyncValidityDur`.
 
 ### Upgrade notes
 

@@ -161,9 +161,14 @@ networkPolicy:
   ## distinct gNB port in use; set to [] if no NTNCellConfig configures a runtime push.
   gnbPorts:
     - 8001
-  ## Advanced: extra egress rules appended verbatim to spec.egress. Use to
-  ## restrict the Prometheus/gNB reachability to specific namespaces or CIDRs,
-  ## e.g. scope the gNB port to an external RAN subnet:
+  ## Advanced: extra egress rules appended verbatim to spec.egress. NetworkPolicy
+  ## egress rules are additive (OR'd), so these only *add* reachability — they
+  ## cannot narrow the port-only rules above (prometheusPorts/gnbPorts emit
+  ## rules with no `to:`, i.e. those ports to ALL destinations). To CIDR/namespace-
+  ## scope a port, leave it OUT of prometheusPorts/gnbPorts and express the port
+  ## AND its destination together here, so no broad port-only rule exists to OR
+  ## against — e.g. to scope the gNB port to an external RAN subnet set
+  ## `gnbPorts: []` and:
   ##   extraEgress:
   ##     - to:
   ##         - ipBlock:

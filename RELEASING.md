@@ -101,12 +101,21 @@ narrowed an `Enum`), CRs already persisted under the newer schema can be
 rejected on their next write, and fields the old schema doesn't know are
 dropped — a silent data loss.
 
-Prefer an **operator-only rollback** that leaves the CRDs forward:
+Prefer an **operator-only rollback** that leaves the CRDs forward. Note that
+`helm rollback` cannot do this: it replays a stored revision's manifests verbatim
+(re-applying that revision's CRD templates) and accepts no `--set`/`--reuse-values`
+(`helm rollback --set …` fails with `unknown flag: --set`). Roll the workload back
+with `helm upgrade` to the **previously released** chart, keeping `crd.enable=false`
+so the CRDs are untouched. Pull the previous version from the published **OCI chart**
+(or a saved `.tgz`) — a local `dist/chart` path ignores `--version` and would just
+re-deploy the *current* sources, not roll anything back:
 
 ```bash
 # CRDs stay at the newer (forward-compatible) schema; only the workload reverts.
-helm rollback ntn-operators <PREVIOUS_REVISION> \
-  --namespace ntn-operators-system --set crd.enable=false
+# --reuse-values preserves the live release config; --set overrides only crd.enable.
+helm upgrade ntn-operators oci://ghcr.io/thc1006/ntn-operators \
+  --version <PREVIOUS_CHART_VERSION> --namespace ntn-operators-system \
+  --reuse-values --set crd.enable=false
 # (Option A / make-install users manage CRDs out-of-band, so their rollback
 #  never touches CRDs either — just roll the operator image.)
 ```

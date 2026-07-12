@@ -5,17 +5,23 @@ Operational response for the alerts shipped in the chart's `PrometheusRule`
 `--set prometheus.enable=true`). One section per alert:
 **Fires when → Impact → Diagnose → Mitigate → Escalate**.
 
-All alerts are `severity: warning` and namespaced — the alert labels
-(`namespace`, and one of `ephemeris` / `config` / `slice` / `controller`) point
-at the exact CR. Assume `NS=<namespace>` and the operator lives in
-`ntn-operators-system` unless you deploy it elsewhere.
+All alerts are `severity: warning`. Most are namespaced — the labels
+(`namespace`, and one of `ephemeris` / `config` / `slice`) point at the exact CR.
+The exception is `NTNControllerReconcileErrors`, which aggregates
+`sum by (controller)` over `controller_runtime_reconcile_errors_total` (a metric
+with no `namespace` label), so it carries only `controller`. Assume
+`NS=<namespace>` and the operator lives in `ntn-operators-system` unless you
+deploy it elsewhere; the operator Deployment is `<release>-controller-manager`
+(the commands below assume a release named `ntn-operators`).
 
 First moves for any alert:
 
 ```bash
 # Which CR, and what does it say about itself?
 kubectl describe <kind> <name> -n "$NS"     # conditions + Events are the fastest signal
-kubectl logs deploy/ntn-operators-controller-manager -n ntn-operators-system --since=30m | grep -iE 'error|warn'
+# -l is release-independent (deploy/<release>-controller-manager works too).
+# --tail=-1 overrides the selector default of 10 lines; --prefix tags each pod:
+kubectl logs -l control-plane=controller-manager -n ntn-operators-system --tail=-1 --prefix=true --since=30m | grep -iE 'error|warn'
 ```
 
 Metric → alert map:
@@ -50,7 +56,8 @@ dropped sync.
 ```bash
 kubectl describe satelliteephemeris <ephemeris> -n "$NS"
 # Conditions to read:
-#   GPDataFetched=False  → the fetch itself is failing (reason: RateLimited / AuthFailed / FetchFailed)
+#   GPDataFetched=False  → the fetch itself is failing (reason: RateLimited / AuthFailed /
+#                          FetchFailed / FetcherSetupFailed / InsecureURL — full set under NTNGPFetchNotReady)
 #   EphemerisEpochStale=True with the offending NORAD IDs in the message
 #   GPDataParsed / PassesPredicted → whether anything downstream still ran
 ```
@@ -107,9 +114,17 @@ sum by (namespace, config, reason) (increase(ntn_operators_ephemeris_push_errors
 ```bash
 kubectl describe ntncellconfig <config> -n "$NS"
 #   Condition EphemerisPushed (Status/Reason/Message) + Event "EphemerisPushFailed"
-# For ProviderPushFailed, test gNB reachability from a debug pod:
+# For ProviderPushFailed, test gNB reachability AS THE OPERATOR SEES IT: attach an
+# ephemeral debug container to the operator Pod. It shares the Pod's network namespace,
+# so it is governed by the operator's NetworkPolicy — a real test of the operator's egress.
+# (Do NOT `kubectl run` a pod carrying the operator's labels to mimic it: the operator
+#  ReplicaSet would adopt that pod by selector and delete it as an excess replica.)
 ENDPOINT=$(kubectl get ntncellconfig <config> -n "$NS" -o jsonpath='{.spec.provider.remoteControl.endpoint}')
-kubectl run netcheck --rm -it --image=nicolaka/netshoot -n "$NS" -- nc -vz ${ENDPOINT%:*} ${ENDPOINT##*:}
+HOST=${ENDPOINT%:*}; HOST=${HOST#[}; HOST=${HOST%]}   # strip [ ] so [IPv6]:port works with nc
+PORT=${ENDPOINT##*:}
+POD=$(kubectl get pod -n ntn-operators-system -l control-plane=controller-manager \
+  -o jsonpath='{.items[0].metadata.name}')
+kubectl debug -n ntn-operators-system -it "$POD" --image=nicolaka/netshoot -- nc -vz "$HOST" "$PORT"
 ```
 
 **Mitigate.**
@@ -258,7 +273,7 @@ Label: `controller`. **Impact:** that controller is not converging CRs to their
 desired state — changes stall. **Diagnose:**
 
 ```bash
-kubectl logs deploy/ntn-operators-controller-manager -n ntn-operators-system --since=20m \
+kubectl logs -l control-plane=controller-manager -n ntn-operators-system --tail=-1 --prefix=true --since=20m \
   | grep -i 'error' | grep '<controller>'
 ```
 
