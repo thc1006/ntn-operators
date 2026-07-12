@@ -222,6 +222,19 @@ var (
 		},
 		[]string{"namespace", "name"},
 	)
+
+	// EphemerisMapperFallbackTotal counts times the SatelliteEphemeris->NTNCellConfig mapper
+	// fell back to a full namespace scan because the spec.ephemerisRef index was unavailable.
+	// A persistent nonzero rate in production means the field index is not registered (an
+	// O(namespace) perf regression that the V(1) fallback log would otherwise hide at the
+	// default verbosity).
+	EphemerisMapperFallbackTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "ntn_operators_ephemeris_mapper_index_fallback_total",
+			Help: "Times the ephemeris->cell mapper fell back to a full namespace scan (spec.ephemerisRef index unavailable).",
+		},
+		[]string{"namespace"},
+	)
 )
 
 func init() {
@@ -240,6 +253,7 @@ func init() {
 		ReaderQueryDuration,
 		ReaderErrorsTotal,
 		ReaderStaleUsedTotal,
+		EphemerisMapperFallbackTotal,
 	)
 	// Note: logging here is intentionally omitted because init() runs
 	// before controller-runtime's logger is configured. Registration
