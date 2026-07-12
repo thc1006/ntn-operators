@@ -36,6 +36,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   not authorized" message; the specific cause is logged for the operator only (closes a
   Secret existence/type oracle for a CR-writer without `secrets get`).
 
+### Fixed
+
+- **Runtime ephemeris push is gated on propagation-input currency and per-satellite
+  freshness.** The `NTNCellConfig` runtime push consumes `SatelliteEphemeris.status.propagatedStates`
+  across a watch fan-out; it now refuses to push when those states were computed under
+  different propagation inputs than the live spec (`status.propagatedStatesInputHash` — a
+  digest of source type/url + NORAD selector, NOT the whole spec) so a source/selector edit
+  whose re-propagate has not yet succeeded can't ship stale orbital data (reason
+  `EphemerisInputsStale`, non-requeuing). Freshness is now **per-satellite** (new
+  `propagatedStates[].sourceEpochUnixMs`): a stale sibling in the same `SatelliteEphemeris`
+  no longer blocks a cell whose selected satellite is fresh.
+- **The runtime push re-validates currency on EVERY reconcile, not just when a new push is
+  imminent.** The dedup ("already pushed this marker") check now runs AFTER the epoch and
+  source-epoch gates. Previously a stalled producer — controller down, fetcher-setup
+  failure, upstream outage — stopped re-propagating, so the dedup marker stopped changing
+  and every reconcile short-circuited past the freshness gates while the already-delivered
+  epoch expired on the gNB, all while `ephemeris_push_ready` stayed at `1` (falsely
+  healthy). The push now fails closed (`EphemerisPushed=False`, `ephemeris_push_ready=0`)
+  once the delivered data goes stale, so `push_ready == 0 for 15m` alerts (issue #216).
+- **The in-memory OMM cache is keyed on the upstream payload identity (source type + URL),
+  not `.metadata.generation`.** Generation bumps on ANY spec edit — including
+  `passPrediction` / `refreshInterval`, which do not change the upstream payload — and
+  dropping the cache on those edits left a fetch that failed right afterwards with NO
+  fallback, so the producer could not re-propagate and SIB19 continuity broke. A
+  non-propagation edit now keeps last-good OMMs usable, so re-propagation survives an
+  upstream outage. (The NORAD selector is excluded from the cache key on purpose: it is
+  applied client-side, so a selector edit must not discard the raw OMMs.)
+- **An implausibly future-dated element set is rejected by the producer, before SGP4 runs**
+  (not only at the push). A far-future epoch from a corrupt or spoofed feed would otherwise
+  drive SGP4 *backward* from the bogus epoch and write a wildly wrong ECEF into status; the
+  consumer check alone could only block its delivery, not the propagation.
+
 ### Upgrade notes
 
 - **Breaking (`remoteControl.tls`):** an existing remote-control credential Secret must
@@ -44,6 +76,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `RemoteControlConfigInvalid` (a permanent, non-tight-requeuing error that clears when
   the Secret is fixed). Add the label before upgrading. Note the opt-in is
   namespace-scoped; a per-CR grant is a future hardening.
+- **Runtime push is fail-closed for one reconcile cycle after upgrade.** Existing
+  `SatelliteEphemeris` objects have no `status.propagatedStatesInputHash` until the
+  controller re-propagates them, so the runtime push briefly reports
+  `EphemerisPushed=False` (reason `EphemerisInputsStale`) until the first successful
+  post-upgrade fetch+propagate stamps the hash. The gNB retains its last-pushed config in
+  the meantime. Ensure the GP source (CelesTrak/Space-Track) is reachable during the
+  rollout — a fetch outage coinciding with the upgrade (e.g. a CelesTrak per-update-window
+  rate-limit) extends the window until the next successful fetch. This is intentional
+  fail-closed behavior (never push data of unverified currency), not a data loss.
 
 ## [0.7.0] - 2026-07-12
 

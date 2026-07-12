@@ -3325,6 +3325,22 @@ under the etcd object-size limit.<br/>
         </td>
         <td>false</td>
       </tr><tr>
+        <td><b>propagatedStatesInputHash</b></td>
+        <td>string</td>
+        <td>
+          propagatedStatesInputHash is a digest of the spec fields that determine WHICH
+orbital data is fetched and WHICH satellites are propagated (source type/url and the
+NORAD selector) — NOT the whole spec. It is stamped whenever the current
+propagatedStates are (re)computed, from a fresh fetch or a valid same-generation
+cache. The NTNCellConfig runtime-push consumer recomputes the hash from the live
+spec and refuses to push when it differs — i.e. the persisted states were computed
+under different propagation inputs (a source/selector edit whose re-propagate has
+not yet succeeded), WITHOUT falsely invalidating on a pass-prediction-only edit
+(#204-G1). Empty means the states predate this field (never re-propagated since
+upgrade) or no successful reconcile yet.<br/>
+        </td>
+        <td>false</td>
+      </tr><tr>
         <td><b>satelliteCount</b></td>
         <td>integer</td>
         <td>
@@ -3535,6 +3551,21 @@ as OCUDU's ntn_config_update requires).<br/>
 truncates the externally-sourced name to this length).<br/>
         </td>
         <td>true</td>
+      </tr><tr>
+        <td><b>sourceEpochUnixMs</b></td>
+        <td>integer</td>
+        <td>
+          sourceEpochUnixMs is the epoch of the SOURCE orbital element set (the OMM EPOCH)
+this state was propagated FROM, in Unix milliseconds. Unlike epochUnixMs (the
+future propagation target), this is the element-set age used by the runtime-push
+consumer to refuse pushing THIS satellite's drifting elements — a per-satellite
+freshness bound, so a stale sibling in the same SatelliteEphemeris does not block
+this one. 0 means the source epoch could not be parsed (treated as unknown, not
+stale).<br/>
+          <br/>
+            <i>Format</i>: int64<br/>
+        </td>
+        <td>false</td>
       </tr></tbody>
 </table>
 

@@ -18,11 +18,14 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net"
 	neturl "net/url"
 	"slices"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -360,6 +363,16 @@ func (r *SatelliteEphemerisReconciler) Reconcile(ctx context.Context, req ctrl.R
 	// epoch keeps OCUDU's internal propagation short and forward.
 	truncEvent := r.propagateStates(ctx, eph, result, now.Add(propagationEpochLead))
 
+	// Stamp the propagation-input digest these propagatedStates were computed under.
+	// Reaching here means the current spec's inputs were (re)propagated — from a fresh
+	// fetch OR a valid same-generation cache. A fetch failure with NO matching cache
+	// early-returns via handleFetchError, which deliberately does NOT restamp, so the hash
+	// keeps pointing at the LAST inputs that actually produced states. The consumer blocks
+	// only when the live spec's propagation inputs differ from this — a source/selector
+	// edit whose re-propagate has not yet succeeded — not on a pass-prediction-only edit
+	// (#204-G1; #221 review finding 2).
+	eph.Status.PropagatedStatesInputHash = propagationInputHash(eph.Spec)
+
 	if err := r.Status().Update(ctx, eph); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -446,15 +459,32 @@ const propagationEpochLead = 5 * time.Minute
 // NTNCellConfig watch) a fresh push to every referencing cell.
 const propagationRefreshInterval = 3 * time.Minute
 
-// cachedFetch is a per-CR OMM cache entry. generation+uid pin it to the exact
-// spec revision of the exact object: a spec/source edit (generation bump) or a
-// delete-recreate reusing the same name (uid change) invalidates the entry and
-// forces a fresh fetch, so an edited source.URL/type/credentials takes effect
-// immediately rather than after the refresh window (#179 regression guard).
+// cachedFetch is a per-CR OMM cache entry. fetchKey+uid pin it to the RAW UPSTREAM
+// PAYLOAD identity of the exact object: an edited source.type/URL (fetchKey change) or a
+// delete-recreate reusing the same name (uid change) invalidates the entry and forces a
+// fresh fetch, so a changed source takes effect immediately rather than after the refresh
+// window (#179 regression guard).
+//
+// It is deliberately NOT keyed on .metadata.generation. Generation bumps on ANY spec edit
+// — including passPrediction / refreshInterval, which do not change the upstream payload —
+// and dropping the cache on those edits meant a fetch failing right afterwards had NO
+// cache to fall back on, so the producer could not re-propagate and SIB19 continuity broke.
+// Keying on the fetch inputs keeps last-good OMMs usable across non-fetch edits
+// (#221 review finding 2).
 type cachedFetch struct {
-	result     ephemeris.GPFetchResult
-	generation int64
-	uid        types.UID
+	result   ephemeris.GPFetchResult
+	fetchKey string
+	uid      types.UID
+}
+
+// fetchInputKey identifies WHAT RAW upstream payload a cached entry holds: the source type
+// and URL. It deliberately EXCLUDES the NORAD selector — FilterOMMs applies that
+// client-side to the raw payload, so a selector edit must NOT discard the raw OMMs — and
+// every non-fetch field (passPrediction, refreshInterval, credentials: the same URL returns
+// the same GP data regardless of which account fetched it). %q-quoted so a crafted URL
+// cannot forge another spec's key.
+func fetchInputKey(spec ntnv1alpha1.SatelliteEphemerisSpec) string {
+	return fmt.Sprintf("type=%q url=%q", spec.Source.Type, spec.Source.URL)
 }
 
 // cachedOMMResult returns the cached fetch for key, if any.
@@ -511,6 +541,29 @@ func (r *SatelliteEphemerisReconciler) reportEphemerisEpochStale(eph *ntnv1alpha
 	ntnmetrics.EphemerisEpochStaleCount.With(prometheus.Labels{"namespace": eph.Namespace, "ephemeris": eph.Name}).Set(float64(stale))
 }
 
+// propagationInputHash is a stable digest of the SatelliteEphemeris spec fields that
+// determine WHICH orbital data is fetched and WHICH satellites are propagated — the
+// source (type + url) and the NORAD selector. It deliberately EXCLUDES every field that
+// does not change the propagated ECEF (pass-prediction params, refreshInterval,
+// credentials, the deprecated constellation), so a pass-prediction-only edit does NOT
+// falsely invalidate valid propagated states and break last-good continuity during an
+// upstream outage (#221 review, finding 2). The producer stamps it on every successful
+// (re)propagation; the runtime-push consumer recomputes it from the live spec and blocks
+// only when the propagation-relevant inputs have actually changed.
+func propagationInputHash(spec ntnv1alpha1.SatelliteEphemerisSpec) string {
+	var norad []int
+	if spec.Satellites != nil {
+		norad = append(norad, spec.Satellites.NoradIDs...)
+	}
+	sort.Ints(norad)
+	h := sha256.New()
+	// Quote the user-controlled strings (%q) so a crafted source.url can't embed the field
+	// delimiters and collide with a different spec's serialization. hash.Hash.Write never
+	// returns an error (documented); ignore it explicitly.
+	_, _ = fmt.Fprintf(h, "type=%q\nurl=%q\nnorad=%v\n", spec.Source.Type, spec.Source.URL, norad)
+	return hex.EncodeToString(h.Sum(nil))
+}
+
 // propagateStates propagates the tracked satellites' orbits (SGP4) to the given
 // future epoch and records the ECEF state vectors in status.propagatedStates for
 // downstream runtime ephemeris push (#176). The set is filtered by
@@ -552,6 +605,22 @@ func (r *SatelliteEphemerisReconciler) propagateStates(
 				"hint", "set spec.satellites.noradIDs to the satellites pushed at runtime")
 			break
 		}
+		// Parse the SOURCE element-set epoch BEFORE propagating (0 if unparseable →
+		// unknown, not stale). An implausibly FUTURE-dated epoch (corrupt or spoofed feed)
+		// must be rejected HERE, not only at the consumer: SGP4 would otherwise be driven
+		// backward from the bogus epoch down to the target, writing a wildly wrong ECEF
+		// into status. Refusing it at the push only stops delivery — it does not stop the
+		// propagation — so the guard belongs on the producer too (#221 review finding 3).
+		srcEpochMs := int64(0)
+		if t, ok := parseOMMEpoch(omms[i].EpochStr); ok {
+			if t.After(epoch.Add(maxSourceEpochFutureSkew)) {
+				logf.FromContext(ctx).Info("skipping satellite: source element epoch is implausibly future-dated",
+					"norad", omms[i].NoradCatID, "sourceEpoch", t.UTC(), "targetEpoch", epoch.UTC(),
+					"allowedSkew", maxSourceEpochFutureSkew.String())
+				continue
+			}
+			srcEpochMs = t.UnixMilli()
+		}
 		ecef, err := ephemeris.PropagateToECEF(omms[i], epoch)
 		if err != nil {
 			continue // skip satellites whose SGP4 propagation fails / goes out of range
@@ -563,10 +632,11 @@ func (r *SatelliteEphemerisReconciler) propagateStates(
 			name = name[:maxSatelliteNameLen]
 		}
 		states = append(states, ntnv1alpha1.PropagatedState{
-			Satellite:   name,
-			NoradID:     omms[i].NoradCatID,
-			EpochUnixMs: epochMs,
-			ECEF:        *ecef,
+			Satellite:         name,
+			NoradID:           omms[i].NoradCatID,
+			EpochUnixMs:       epochMs,
+			SourceEpochUnixMs: srcEpochMs,
+			ECEF:              *ecef,
 		})
 	}
 	eph.Status.PropagatedStates = states
@@ -946,8 +1016,9 @@ func (r *SatelliteEphemerisReconciler) obtainOMMs(
 	fetcher ephemeris.GPFetcher, effectiveInterval time.Duration, now time.Time,
 ) (ommFetchOutcome, *ctrl.Result, error) {
 	log := logf.FromContext(ctx)
+	fetchKey := fetchInputKey(eph.Spec)
 	if c, ok := r.cachedOMMResult(req.NamespacedName); ok &&
-		c.generation == eph.Generation && c.uid == eph.UID &&
+		c.fetchKey == fetchKey && c.uid == eph.UID &&
 		now.Sub(c.result.FetchedAt) < effectiveInterval {
 		log.V(1).Info("re-propagating from cached OMMs; GP source not contacted",
 			"cacheAge", now.Sub(c.result.FetchedAt).String(), "refreshInterval", effectiveInterval.String())
@@ -969,8 +1040,11 @@ func (r *SatelliteEphemerisReconciler) obtainOMMs(
 	ntnmetrics.GPFetchDuration.With(prometheus.Labels{"source_type": eph.Spec.Source.Type, "status": fetchStatus}).Observe(time.Since(fetchStart).Seconds())
 
 	if fetchErr != nil {
+		// Fall back to the last-good OMMs for THIS source (fetchKey), not this spec
+		// revision: a passPrediction/refreshInterval edit must not strand the fallback
+		// and break re-propagation during an upstream outage (#221 review finding 2).
 		if c, ok := r.cachedOMMResult(req.NamespacedName); ok &&
-			c.generation == eph.Generation && c.uid == eph.UID {
+			c.fetchKey == fetchKey && c.uid == eph.UID {
 			log.Info("GP fetch failed; serving last cached OMMs for SIB19 continuity",
 				"err", fetchErr.Error(), "cacheAge", now.Sub(c.result.FetchedAt).String())
 			return ommFetchOutcome{result: c.result, servedCacheOnError: true, cacheServeErr: fetchErr}, nil, nil
@@ -979,7 +1053,7 @@ func (r *SatelliteEphemerisReconciler) obtainOMMs(
 		return ommFetchOutcome{}, &res, err
 	}
 
-	r.ommCache.Store(req.NamespacedName, cachedFetch{result: result, generation: eph.Generation, uid: eph.UID})
+	r.ommCache.Store(req.NamespacedName, cachedFetch{result: result, fetchKey: fetchKey, uid: eph.UID})
 	return ommFetchOutcome{result: result}, nil, nil
 }
 

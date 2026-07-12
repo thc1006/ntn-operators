@@ -53,16 +53,23 @@ func TestSelectPropagatedState(t *testing.T) {
 }
 
 func ephWithPropagatedState(futureMs int64) *ntnv1alpha1.SatelliteEphemeris {
-	return &ntnv1alpha1.SatelliteEphemeris{
+	eph := &ntnv1alpha1.SatelliteEphemeris{
 		ObjectMeta: metav1.ObjectMeta{Name: "eph1", Namespace: "ns", Generation: 1},
 		Status: ntnv1alpha1.SatelliteEphemerisStatus{
 			LastUpdated: &metav1.Time{Time: time.Now()},
 			PropagatedStates: []ntnv1alpha1.PropagatedState{{
 				Satellite: "SAT-A", NoradID: 25544, EpochUnixMs: futureMs,
-				ECEF: ntnv1alpha1.EphemerisECEF{PosX: 5000000, PosY: 4000000, PosZ: 3000000},
+				// Fresh source element epoch so the per-satellite C4 freshness gate passes.
+				SourceEpochUnixMs: time.Now().Add(-time.Hour).UnixMilli(),
+				ECEF:              ntnv1alpha1.EphemerisECEF{PosX: 5000000, PosY: 4000000, PosZ: 3000000},
 			}},
 		},
 	}
+	// A reconciled ephemeris stamps the propagation-input hash of its current spec; the
+	// runtime-push gate requires status.propagatedStatesInputHash == hash(spec) to treat
+	// the propagatedStates as current, so the fixture stamps it.
+	eph.Status.PropagatedStatesInputHash = propagationInputHash(eph.Spec)
+	return eph
 }
 
 // ccWithRemoteControl builds an NTNCellConfig on the runtime-push path: remote
