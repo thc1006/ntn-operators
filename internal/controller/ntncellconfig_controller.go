@@ -71,6 +71,14 @@ const (
 	ephemerisReasonProviderPushRejected = "ProviderPushRejected"
 	ephemerisReasonEphemerisStale       = "EphemerisStale"
 	ephemerisReasonRemoteControlConfig  = "RemoteControlConfigInvalid"
+	// ephemerisReasonInputsStale marks a push HELD because the referenced
+	// SatelliteEphemeris's propagatedStates were computed under DIFFERENT propagation
+	// inputs than the live spec (status.propagatedStatesInputHash != hash(spec)) — a
+	// source/selector edit whose re-propagate has not yet succeeded (#204-G1). It does NOT
+	// fire on a pass-prediction-only edit. It clears when the producer re-propagates (its
+	// Status().Update re-triggers this reconcile via the ephemeris watch), so it is
+	// non-requeuing like the other await-external-change reasons.
+	ephemerisReasonInputsStale = "EphemerisInputsStale"
 )
 
 // epochSkewMargin is how far in the future a propagated epoch must be to be worth
@@ -79,6 +87,19 @@ const (
 // margin of now is treated as stale and skipped (awaiting the SatelliteEphemeris
 // producer's refresh) rather than pushed and rejected in a tight loop.
 const epochSkewMargin = 10 * time.Second
+
+// maxSourceEpochFutureSkew bounds how far into the future a SOURCE element-set epoch may
+// be before it is treated as implausible (a corrupt or spoofed feed). Real OMM/TLE epochs
+// are at or before "now"; a far-future epoch would otherwise sail past the "older than
+// maxEpochAge" check, which only catches the PAST direction.
+//
+// It is enforced in TWO places, deliberately: the producer refuses to PROPAGATE from such
+// an element set (propagateStates — SGP4 would be driven backward from the bogus epoch,
+// writing a wildly wrong ECEF into status), and the consumer refuses to PUSH one if it
+// ever reaches status anyway (defense in depth). The consumer check alone cannot prevent
+// the backward propagation, only its delivery. Generous, so legitimate near-present epochs
+// are never rejected.
+const maxSourceEpochFutureSkew = 24 * time.Hour
 
 type ephemerisPushError struct {
 	reason string
@@ -119,6 +140,7 @@ func ephemerisPushShouldRequeue(reason string) bool {
 	case ephemerisReasonRefNotFound,
 		ephemerisReasonPayloadMissing,
 		ephemerisReasonEphemerisStale,
+		ephemerisReasonInputsStale,
 		ephemerisReasonRemoteControlConfig,
 		ephemerisReasonProviderPushRejected:
 		// These clear only on an external change — a spec edit (generation bump)
@@ -563,6 +585,25 @@ func (r *NTNCellConfigReconciler) pushRuntimeEphemeris(
 	eph *ntnv1alpha1.SatelliteEphemeris,
 	prov provider.NTNProvider,
 ) (bool, string, error) {
+	// Gate — stale propagation inputs (#204-G1): the propagatedStates must reflect the
+	// CURRENT propagation-relevant spec (source type/url + NORAD selector). The producer
+	// stamps status.propagatedStatesInputHash whenever it (re)propagates; if the live
+	// spec hashes differently, a source/selector edit's re-propagate has not yet
+	// succeeded and the persisted states are stale for the current inputs — pushing them
+	// would send orbital data computed under superseded inputs. This deliberately does
+	// NOT fire on a pass-prediction-only / refreshInterval edit (those do not change the
+	// propagated ECEF), preserving last-good continuity during an upstream outage
+	// (#221 review finding 2). An empty stored hash — states predating this field on
+	// upgrade, or no successful reconcile yet — also blocks until the first
+	// re-propagation stamps it (fail-closed; see CHANGELOG upgrade note). Wait for the
+	// producer to re-propagate; its Status().Update re-triggers this reconcile via the
+	// ephemeris watch.
+	if eph.Status.PropagatedStatesInputHash != propagationInputHash(eph.Spec) {
+		return false, ephemerisPushMarker(eph), newEphemerisPushError(
+			ephemerisReasonInputsStale,
+			fmt.Errorf("SatelliteEphemeris %q propagatedStates were computed under different propagation inputs than the current spec; awaiting re-propagation", eph.Name),
+		)
+	}
 	state := selectPropagatedState(eph.Status.PropagatedStates, spec.EphemerisNoradID)
 	if state == nil {
 		// A referenced satellite that the SatelliteEphemeris rejected as deep-space
@@ -580,16 +621,17 @@ func (r *NTNCellConfigReconciler) pushRuntimeEphemeris(
 		)
 	}
 
-	// Dedup on the propagated epoch (I-12): re-push whenever the SatelliteEphemeris
-	// re-propagated to a fresh epoch — the watch fans that out to this reconcile, so
-	// keying on the epoch (not the 2h-stable LastUpdated) keeps the gNB fresh between
-	// GP fetches and recovers it after a gNB restart. Same epoch ⇒ same marker ⇒ no
-	// redundant push; spec changes (koffset/TA/satSwitch) still re-push via the
-	// ObservedGeneration check in isEphemerisPushUpToDate.
 	marker := runtimeEphemerisPushMarker(eph, state)
-	if isEphemerisPushUpToDate(cc, marker) {
-		return false, marker, nil
-	}
+
+	// ---- Currency gates: these MUST run BEFORE the dedup early-return below. ----
+	// A stalled producer (controller down, fetcher-setup failure, upstream outage) stops
+	// re-propagating, so the marker STOPS CHANGING while the already-delivered epoch
+	// expires on the gNB. If dedup returned first, these gates would never run again and
+	// the caller would keep reporting EphemerisPushReady=1 — falsely healthy in exactly
+	// the producer-stall case the hard gate exists for. Re-validating currency on EVERY
+	// reconcile (not only when a new push is imminent) makes the push fail CLOSED
+	// (EphemerisPushed=False + push_ready=0) once the delivered data goes stale, so
+	// `push_ready == 0 for 15m` alerts (issue #216). #221 review finding 1.
 
 	// Skip a stale (past / about-to-expire) epoch rather than push a value OCUDU
 	// will reject. The state is only valid for its own epoch, so re-labeling it
@@ -603,6 +645,43 @@ func (r *NTNCellConfigReconciler) pushRuntimeEphemeris(
 				eph.Name, state.EpochUnixMs),
 		)
 	}
+	// Hard-stale, per-satellite (#200-C4; #221 review finding 1): refuse to push the
+	// SELECTED satellite when its OWN source element-set epoch is beyond the freshness
+	// bound (drifting) or implausibly future-dated. Per-satellite, so a stale, cap-omitted,
+	// or unselected sibling in the same SatelliteEphemeris does NOT block this cell. A 0
+	// source epoch means the producer could not parse it (unknown, not stale) — allowed,
+	// matching the producer's stale-count which also skips unparseable epochs.
+	if state.SourceEpochUnixMs != 0 {
+		src := time.UnixMilli(state.SourceEpochUnixMs)
+		nowT := time.Now()
+		if nowT.Sub(src) > maxEpochAge {
+			return false, marker, newEphemerisPushError(
+				ephemerisReasonEphemerisStale,
+				fmt.Errorf("selected satellite %d source element epoch is older than %s (drifting); awaiting SatelliteEphemeris refresh",
+					state.NoradID, maxEpochAge),
+			)
+		}
+		if src.After(nowT.Add(maxSourceEpochFutureSkew)) {
+			return false, marker, newEphemerisPushError(
+				ephemerisReasonEphemerisStale,
+				fmt.Errorf("selected satellite %d source element epoch %s is implausibly future-dated; refusing",
+					state.NoradID, src.UTC()),
+			)
+		}
+	}
+
+	// Dedup on the propagated epoch (I-12): re-push whenever the SatelliteEphemeris
+	// re-propagated to a fresh epoch — the watch fans that out to this reconcile, so
+	// keying on the epoch (not the 2h-stable LastUpdated) keeps the gNB fresh between
+	// GP fetches and recovers it after a gNB restart. Same epoch ⇒ same marker ⇒ no
+	// redundant push; spec changes (koffset/TA/satSwitch) still re-push via the
+	// ObservedGeneration check in isEphemerisPushUpToDate. Deliberately placed AFTER the
+	// currency gates above, so a same-marker reconcile still re-validates freshness
+	// instead of short-circuiting past it (#221 review finding 1).
+	if isEphemerisPushUpToDate(cc, marker) {
+		return false, marker, nil
+	}
+
 	ulSync := 5
 	if spec.NTN.NTNUlSyncValidityDur != nil {
 		ulSync = *spec.NTN.NTNUlSyncValidityDur

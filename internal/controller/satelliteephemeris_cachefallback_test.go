@@ -83,8 +83,8 @@ func TestReconcile_FetchError_ServesCache(t *testing.T) {
 		result: ephemeris.GPFetchResult{
 			OMMs: []sgp4.OMM{testISSOMM()}, SatelliteCount: 1, FetchedAt: time.Now().Add(-5 * time.Hour),
 		},
-		generation: got.Generation,
-		uid:        got.UID,
+		fetchKey: fetchInputKey(got.Spec),
+		uid:      got.UID,
 	})
 
 	_, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: key})
