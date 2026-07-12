@@ -18,6 +18,7 @@ package ephemeris
 
 import (
 	"fmt"
+	"math"
 	"sort"
 	"strconv"
 	"sync"
@@ -51,7 +52,9 @@ type PassResult struct {
 }
 
 // PredictPasses computes satellite pass windows for the given OMMs over ground stations.
-// It filters by minElevation, limits results to MaxPassWindows, and uses concurrent workers.
+// minElevation must be a finite value in [0, 90] degrees; otherwise PredictPasses returns an
+// error (it does not silently degrade). It filters by minElevation, limits results to
+// MaxPassWindows, and uses concurrent workers.
 // The startTime parameter sets the prediction window start; pass time.Time{} to use time.Now().
 func PredictPasses(
 	omms []sgp4.OMM,
@@ -61,6 +64,14 @@ func PredictPasses(
 	noradFilter []int,
 	startTime time.Time,
 ) ([]PassResult, error) {
+	// Enforce the [0,90] finite mask invariant at the exported entry point (defense in
+	// depth): the operator path pre-validates via ParseElevation, but a direct caller could
+	// otherwise pass NaN/Inf/out-of-range — and because every mask comparison against NaN is
+	// false, an unchecked NaN would silently degrade to emitting 0°-horizon passes instead of
+	// rejecting the bad mask (#223 review finding 2).
+	if math.IsNaN(minElevation) || math.IsInf(minElevation, 0) || minElevation < 0 || minElevation > 90 {
+		return nil, fmt.Errorf("minElevation must be a finite value in [0,90], got %v", minElevation)
+	}
 	if len(omms) == 0 || len(stations) == 0 {
 		return nil, nil
 	}
@@ -231,9 +242,22 @@ func predictSingle(
 		// elevation >= minElevation (I-22) so availability consumers (e.g. NTNSlice
 		// failover) never treat a below-mask, unusable link as available.
 		aos, los := trimPassToMask(elevFn, p, minElevation)
-		if !los.After(aos) {
-			// Grazing pass whose usable window collapsed to (near) zero once the
-			// mask is applied — the satellite only brushes the mask, so drop it.
+		// Conservative whole-second window (#201-P2-1): ceil AOS up and floor LOS down.
+		// The bisection resolves the crossing to ~200ms, and metav1.Time serializes at
+		// second granularity WITHOUT the fractional second — which would push the stored
+		// AOS EARLIER than the computed acquisition (an over-claim). Rounding keeps the
+		// persisted window within the window trimPassToMask returned. NOTE that is the
+		// usable (>= minElevation) interval only WHEN the mask-boundary evaluation
+		// succeeded; on the fail-open elevation-error path trimPassToMask leaves the wider
+		// 0°-horizon window (see its doc + the deferred narrow fail-closed), and the
+		// rounding only keeps the window within THAT. Round BEFORE the collapse check so a
+		// window that shrinks below one second is dropped, not stored with AOS >= LOS.
+		aos, los, valid := conservativePassWindow(aos, los)
+		if !valid {
+			// Grazing pass whose usable window collapsed to (near) zero once the mask and
+			// whole-second rounding are applied — the satellite only brushes the mask, so
+			// drop it. (The collapse decision is made inside conservativePassWindow so it is
+			// locked by that helper's unit test, not just this branch.)
 			continue
 		}
 		results = append(results, PassResult{
@@ -367,7 +391,45 @@ func FilterOMMs(omms []sgp4.OMM, noradFilter []int) []sgp4.OMM {
 	return filtered
 }
 
-// ParseElevation parses a string elevation value (e.g., "10") to float64.
+// ceilToSecond rounds t UP to the next whole second (a no-op when t is already on a
+// second boundary). Applied to AOS so the acquisition time is never claimed earlier than
+// the sub-second computed value, even after metav1.Time truncates on serialization.
+func ceilToSecond(t time.Time) time.Time {
+	trunc := t.Truncate(time.Second)
+	if trunc.Before(t) {
+		return trunc.Add(time.Second)
+	}
+	return trunc
+}
+
+// floorToSecond rounds t DOWN to the previous whole second. Applied to LOS so the loss
+// time is never claimed later than the computed value.
+func floorToSecond(t time.Time) time.Time {
+	return t.Truncate(time.Second)
+}
+
+// conservativePassWindow rounds a pass window to whole seconds CONSERVATIVELY: AOS up
+// (ceil) and LOS down (floor), so the persisted window never extends past the computed
+// edges once metav1.Time drops the fractional second. It ALSO returns whether the rounded
+// window is still valid (LOS strictly after AOS): a sub-second window straddling a second
+// boundary collapses to zero length and the caller must drop it. Both the rounding
+// DIRECTION and the collapse decision live here so a single unit test locks them — swapping
+// a side, or weakening `After` to `!Before` (which would keep a zero-length window), fails
+// that test (#201-P2-1; #223 review finding 1).
+func conservativePassWindow(aos, los time.Time) (roundedAOS, roundedLOS time.Time, valid bool) {
+	roundedAOS = ceilToSecond(aos)
+	roundedLOS = floorToSecond(los)
+	return roundedAOS, roundedLOS, roundedLOS.After(roundedAOS)
+}
+
+// ParseElevation parses a string elevation value (e.g., "10") to a float64 in [0, 90].
+// 0 is the geometric horizon and 90 the zenith; a negative or >90 mask is physically
+// meaningless (it would make every / no pass "usable"), so it is rejected. The bound is on
+// the parsed float64 VALUE, not the exact decimal literal: the whole pass pipeline is
+// float64, so a literal within ~half a ULP above 90 (e.g. "90.000000000000001", which
+// rounds to exactly 90.0) is accepted as 90 — while "90.0000000000001" rounds above 90 and
+// is rejected. This matches the CEL admission rule, which converts via the same
+// strconv.ParseFloat; this is the runtime backstop for that bound.
 func ParseElevation(s string) (float64, error) {
 	if s == "" {
 		return 10.0, nil // default
@@ -375,6 +437,12 @@ func ParseElevation(s string) (float64, error) {
 	v, err := strconv.ParseFloat(s, 64)
 	if err != nil {
 		return 0, fmt.Errorf("invalid elevation %q: %w", s, err)
+	}
+	// strconv.ParseFloat accepts "NaN"/"Inf" without error, and NaN fails EVERY ordered
+	// comparison so `v < 0 || v > 90` would let it through — reject non-finite explicitly
+	// so this backstop truly guarantees a finite value in [0,90].
+	if math.IsNaN(v) || math.IsInf(v, 0) || v < 0 || v > 90 {
+		return 0, fmt.Errorf("elevation %q must be a finite value in [0,90]", s)
 	}
 	return v, nil
 }

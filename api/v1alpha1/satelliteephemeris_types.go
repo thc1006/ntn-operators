@@ -97,10 +97,18 @@ type PassPredictionSpec struct {
 	// +kubebuilder:validation:items:MaxLength=253
 	GroundStations []string `json:"groundStations"`
 
-	// minElevation is the minimum elevation angle in degrees (string, e.g., "10").
+	// minElevation is the minimum elevation angle in degrees (string, e.g., "10"), in the
+	// range [0, 90]: 0 is the geometric horizon and 90 the zenith. A negative or >90 mask
+	// is physically meaningless (it would make every / no pass "usable"), so the pattern
+	// rejects negatives and the CEL rule rejects values above 90. The pattern keeps the
+	// pre-existing grammar otherwise (a trailing "." such as "10." stays valid — only the
+	// leading "-" was removed) to avoid an unrelated API-grammar break. The bound is on the
+	// parsed float64 value (the pipeline is float64), so a literal within ~half a ULP above
+	// 90 rounds to 90 and is accepted; the controller uses the float64 value.
 	// +kubebuilder:default="10"
-	// +kubebuilder:validation:Pattern=`^-?[0-9]+\.?[0-9]*$`
+	// +kubebuilder:validation:Pattern=`^[0-9]+\.?[0-9]*$`
 	// +kubebuilder:validation:MaxLength=32
+	// +kubebuilder:validation:XValidation:rule="double(self) <= 90.0",message="minElevation must be between 0 and 90 degrees"
 	MinElevation string `json:"minElevation,omitempty"`
 
 	// horizon is how far into the future to predict passes.

@@ -184,12 +184,39 @@ var _ = Describe("CRD string-length admission (MaxLength boundaries)", func() {
 		func(mLen int, ok bool) {
 			eph := mkEph(func(e *ntnv1alpha1.SatelliteEphemeris) {
 				e.Spec.PassPrediction = &ntnv1alpha1.PassPredictionSpec{
-					GroundStations: []string{"gs-1"}, MinElevation: rep("1", mLen),
+					GroundStations: []string{"gs-1"}, MinElevation: "1." + rep("0", mLen-2),
 				}
 			})
 			assertAdmit(k8sClient.Create(ctx, eph), ok, eph, fmt.Sprintf("minElevation len %d", mLen))
 		},
 		Entry("at 32", 32, true),
 		Entry("over at 33", 33, false),
+	)
+
+	// Value bound [0,90] via pattern (negatives) + CEL (>90). Also pins that the
+	// grammar-preserving "10." (trailing dot) is still admitted through both the pattern
+	// AND the CEL double() conversion (#201-P3, review finding 2).
+	DescribeTable("SatelliteEphemeris minElevation value bound [0,90]",
+		func(val string, ok bool) {
+			eph := mkEph(func(e *ntnv1alpha1.SatelliteEphemeris) {
+				e.Spec.PassPrediction = &ntnv1alpha1.PassPredictionSpec{
+					GroundStations: []string{"gs-1"}, MinElevation: val,
+				}
+			})
+			assertAdmit(k8sClient.Create(ctx, eph), ok, eph, fmt.Sprintf("minElevation %q", val))
+		},
+		Entry("zero", "0", true),
+		Entry("ten", "10", true),
+		Entry("trailing dot stays valid", "10.", true),
+		Entry("fractional", "72.5", true),
+		Entry("zenith inclusive", "90", true),
+		// float64 contract: a literal within ~half a ULP above 90 rounds to 90.0 and is
+		// accepted (CEL double() converts via strconv.ParseFloat), while one that rounds
+		// strictly above 90 is rejected. Pins the intended float64 semantics.
+		Entry("sub-ULP above 90 accepted as float64 90", "90.000000000000001", true),
+		Entry("rounds strictly above 90 rejected", "90.0000000000001", false),
+		Entry("negative rejected", "-5", false),
+		Entry("just over 90 rejected", "90.5", false),
+		Entry("far over 90 rejected", "1000", false),
 	)
 })

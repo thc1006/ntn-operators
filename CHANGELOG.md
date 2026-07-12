@@ -134,6 +134,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   drive SGP4 *backward* from the bogus epoch and write a wildly wrong ECEF into status; the
   consumer check alone could only block its delivery, not the propagation.
 
+### Fixed
+
+- **Pass windows (`status.nextPassWindows`) are now conservative to the whole second.**
+  AOS is rounded up and LOS down before storage, so the persisted window stays within the
+  window the mask-trim computed — previously AOS/LOS carried ~200 ms of sub-second residual
+  and `metav1.Time` serializes at second granularity without the fractional second, which
+  pushed the stored AOS *earlier*, over-claiming availability by up to a second (#201-P2-1).
+  (When mask-boundary evaluation succeeds that computed window is the usable ≥ minElevation
+  interval; on the fail-open elevation-error path it is the wider 0°-horizon window — see
+  the deferred narrow fail-closed proposal.)
+
+### Changed
+
+- **`passPrediction.minElevation` is constrained to `[0, 90]` degrees.** 0 is the
+  geometric horizon and 90 the zenith; a negative or `>90` mask is physically meaningless.
+  Enforced by an admission CEL rule plus a finite-value runtime range check. The value
+  pattern otherwise preserves the prior grammar (a trailing dot such as `"10."` stays
+  valid — only the leading `-` was removed). The bound is on the parsed **float64** value
+  (the pass pipeline is float64), so a literal within ~half a ULP above 90 rounds to 90 and
+  is accepted; `NaN`/`Inf` are rejected (#201-P3).
+
 ### Upgrade notes
 
 - **`NewSafeHTTPClient` no longer honors `HTTP_PROXY`/`HTTPS_PROXY`.** The GP fetch, NTNSlice
@@ -157,6 +178,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rollout — a fetch outage coinciding with the upgrade (e.g. a CelesTrak per-update-window
   rate-limit) extends the window until the next successful fetch. This is intentional
   fail-closed behavior (never push data of unverified currency), not a data loss.
+- **`passPrediction.minElevation` must be within `[0, 90]`.** New objects, and any edit that
+  CHANGES `minElevation` itself, must be in range. Because of Kubernetes CRD validation
+  ratcheting (default from 1.30; the project's min is 1.31), an existing object with an
+  out-of-range value is NOT necessarily rejected on an unrelated edit — the illegal value can
+  persist in etcd until `minElevation` is next changed. In that state the controller's runtime
+  check refuses to use the value, clears `status.nextPassWindows`, and reports
+  `PassesPredicted=False`/`PredictionFailed`. Correct any out-of-range `minElevation` before
+  upgrading (the default "10" is unaffected).
 
 ## [0.7.0] - 2026-07-12
 

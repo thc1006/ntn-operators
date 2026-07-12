@@ -261,8 +261,18 @@ func TestParseElevation(t *testing.T) {
 		{"10", 10.0, false},
 		{"0", 0.0, false},
 		{"72.5", 72.5, false},
-		{"-5", -5.0, false},
-		{"", 10.0, false}, // default
+		{"90", 90.0, false},                 // zenith, inclusive
+		{"90.000000000000001", 90.0, false}, // within half a ULP of 90 → float64 90 (accepted; float64 contract)
+		{"10.", 10.0, false},                // trailing dot stays valid (grammar unchanged besides "-")
+		{"-5", 0, true},                     // negative rejected (below the horizon) — P3
+		{"90.0000000000001", 0, true},       // rounds strictly above float64 90 → rejected (exact reject-side boundary)
+		{"90.5", 0, true},                   // above the zenith rejected — P3
+		{"1000", 0, true},                   // far above 90 rejected — P3
+		{"NaN", 0, true},                    // non-finite rejected — P3 backstop
+		{"nan", 0, true},                    // non-finite rejected — P3 backstop
+		{"+Inf", 0, true},                   // non-finite rejected — P3 backstop
+		{"-Inf", 0, true},                   // non-finite rejected — P3 backstop
+		{"", 10.0, false},                   // default
 		{"abc", 0, true},
 	}
 	for _, tc := range tests {
