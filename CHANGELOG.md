@@ -35,9 +35,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `EphemerisPushed=False` condition/event now carries a uniform "credential unavailable or
   not authorized" message; the specific cause is logged for the operator only (closes a
   Secret existence/type oracle for a CR-writer without `secrets get`).
+- **SSRF-safe HTTP client hardened against proxy bypass and TLS downgrade.** `NewSafeHTTPClient`
+  (used for GP ephemeris fetch, the NTNSlice metrics reader, and the ground-station probe —
+  all of which dial CR-influenced hosts) now sets `Transport.Proxy = nil`, so an
+  `HTTP_PROXY`/`HTTPS_PROXY` in the environment can no longer make net/http dial the proxy and
+  carry the real target past the dial-time IP validation (an SSRF-guard bypass). Its
+  `CheckRedirect` also refuses an `https`→`http` downgrade redirect, so a source reached over
+  TLS (e.g. Space-Track, whose session cookie would leak) cannot be redirected to cleartext.
+  A `nil` client passed to `NewCelesTrakFetcher` now defaults to this safe client rather than a
+  bare `http.Client`, so the nil-client fallback no longer yields an unguarded fetcher (a caller
+  that passes its own bare `http.Client` still gets exactly what it passed). Mutation-tested.
+- **Space-Track credential-Secret failures no longer leak Secret existence/key shape to the CR.**
+  A missing Secret, missing password key, or missing username key now all surface the same
+  uniform "credentials unavailable or not authorized" message on the CR; the specific cause is
+  logged for the operator only. This closes a Secret existence/key oracle for a principal who
+  can write the `SatelliteEphemeris` but not read Secrets (mirrors the `remoteControl.tls`
+  hardening). A source URL rejected off the trusted origin is also now classified as a permanent
+  config error (`InvalidSourceURL`, slow requeue) rather than looping the transient backoff.
+- **The authenticated Space-Track response body is never reflected into a CR Condition/Event.**
+  The Space-Track fetch is authenticated with the credential Secret and its query URL is
+  CR-controlled, so surfacing the response body into a public CR object was an information-flow
+  risk; the rate-limit paths now emit a fixed classified message. The query URL is pinned to the
+  same origin (scheme + host) as the operator-trusted Space-Track base, and — importantly — that
+  exact-origin check is now enforced on **every redirect hop** (a dedicated `CheckRedirect`), not
+  only the initial URL: a 307/308 re-POSTs the login credential body and the session cookie
+  rides redirects, so a cross-origin redirect that would carry credentials/session off the
+  trusted host is refused. The cookie jar also uses the public-suffix list so a server cannot set
+  an overly broad domain cookie. Mutation-tested.
 
 ### Fixed
 
+- **Pass windows are computed from the current time, not the last fetch time.** On a cached
+  re-propagation the fetch timestamp could be up to 24h in the past, which started AOS/LOS
+  windows stale; they now start at reconcile time (#200-C3).
+- **CelesTrak rate-limit errors surface the upstream 403 reason.** CelesTrak (unauthenticated)
+  returns an explanatory 403 body (e.g. "GP data has not updated since your last successful
+  download"); it is captured into the error/condition, sanitized to a single line and bounded
+  by ENCODED bytes (invalid UTF-8 and format/bidi/zero-width chars are stripped, not
+  re-encoded) (#200-C6). **The authenticated Space-Track path never reflects its response body**
+  — it uses a fixed "Space-Track query rate limit exceeded" message (see Security).
+- **`Retry-After` delay-seconds of any length saturate to the 24h cap.** A value exceeding
+  `int`/`int64` range is still a valid RFC 9110 integer; it is now parsed as an unsigned value
+  and saturated to the cap rather than falling through to the date branch and returning 0
+  (#200-C7).
 - **SIB19 now survives a sustained upstream outage, not just the first reconcile of one.**
   Serving cached OMMs on a failed GP fetch (I-18) used to re-propagate ONCE (to
   `now + 5 min`) and then set `RequeueAfter` to the **fetch** backoff — 2–24h for
@@ -95,6 +135,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   consumer check alone could only block its delivery, not the propagation.
 
 ### Upgrade notes
+
+- **`NewSafeHTTPClient` no longer honors `HTTP_PROXY`/`HTTPS_PROXY`.** The GP fetch, NTNSlice
+  metrics reader, and ground-station probe reach in-cluster or public endpoints directly; a
+  deployment that previously relied on an egress proxy for those must expose the endpoints
+  without a proxy (the proxy fundamentally bypasses the SSRF dial guard, so it is disabled by
+  design). An opt-in proxy that re-validates the CONNECT target is a possible future enhancement.
 
 - **Breaking (`remoteControl.tls`):** an existing remote-control credential Secret must
   gain the label `ntn.operators.dev/remote-control-credential: "true"` (set by the

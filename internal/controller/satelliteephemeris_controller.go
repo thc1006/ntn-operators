@@ -334,7 +334,7 @@ func (r *SatelliteEphemerisReconciler) Reconcile(ctx context.Context, req ctrl.R
 	ntnmetrics.GPDeepSpaceRejectedCount.With(prometheus.Labels{"namespace": eph.Namespace, "ephemeris": eph.Name}).Set(float64(len(trackedDeepSpace)))
 
 	// Step 7: Compute pass predictions if configured; clear stale data if disabled.
-	passNote, passFailNote := r.handlePassPrediction(ctx, eph, result)
+	passNote, passFailNote := r.handlePassPrediction(ctx, eph, result, now)
 
 	// Step 7b: Propagate tracked satellites to a NEAR-now epoch for the runtime
 	// ephemeris push (#176). The epoch is only a small lead ahead of now — enough
@@ -986,7 +986,7 @@ func (r *SatelliteEphemerisReconciler) reportOrbitRegime(
 // failure), each non-empty only on a real PassesPredicted-condition transition, so
 // the caller emits them at most once per change after the status write persists.
 func (r *SatelliteEphemerisReconciler) handlePassPrediction(
-	ctx context.Context, eph *ntnv1alpha1.SatelliteEphemeris, result ephemeris.GPFetchResult,
+	ctx context.Context, eph *ntnv1alpha1.SatelliteEphemeris, result ephemeris.GPFetchResult, now time.Time,
 ) (passNote, passFailNote string) {
 	if eph.Spec.PassPrediction == nil || len(eph.Spec.PassPrediction.GroundStations) == 0 {
 		// Pass prediction not configured; clear stale pass windows and condition.
@@ -994,7 +994,7 @@ func (r *SatelliteEphemerisReconciler) handlePassPrediction(
 		meta.RemoveStatusCondition(&eph.Status.Conditions, ntnv1alpha1.ConditionPassesPredicted)
 		return "", ""
 	}
-	note, err := r.predictPasses(ctx, eph, result)
+	note, err := r.predictPasses(ctx, eph, result, now)
 	if err != nil {
 		logf.FromContext(ctx).Error(err, "pass prediction failed")
 		eph.Status.NextPassWindows = nil // clear stale pass data
@@ -1029,6 +1029,7 @@ func (r *SatelliteEphemerisReconciler) predictPasses(
 	ctx context.Context,
 	eph *ntnv1alpha1.SatelliteEphemeris,
 	fetchResult ephemeris.GPFetchResult,
+	now time.Time,
 ) (string, error) {
 	log := logf.FromContext(ctx)
 	pp := eph.Spec.PassPrediction
@@ -1081,8 +1082,10 @@ func (r *SatelliteEphemerisReconciler) predictPasses(
 		noradFilter = eph.Spec.Satellites.NoradIDs
 	}
 
-	// Run pass prediction.
-	passes, err := ephemeris.PredictPasses(fetchResult.OMMs, stations, minEl, horizon, noradFilter, fetchResult.FetchedAt)
+	// Run pass prediction from the CURRENT time, not fetchResult.FetchedAt: pass windows
+	// are "upcoming contact opportunities", and on a cached serve FetchedAt can be up to
+	// effectiveInterval (2–24h) in the past, which would start the window stale (#200-C3).
+	passes, err := ephemeris.PredictPasses(fetchResult.OMMs, stations, minEl, horizon, noradFilter, now)
 	if err != nil {
 		return "", fmt.Errorf("computing passes: %w", err)
 	}
@@ -1344,10 +1347,22 @@ func classifyFetchError(fetchErr error, effectiveInterval time.Duration) (reason
 		return "RateLimited", max(effectiveInterval, retryAfterFrom(fetchErr)), false
 	case errors.Is(fetchErr, ephemeris.ErrAuthFailed):
 		return "AuthFailed", effectiveInterval, false
+	case errors.Is(fetchErr, ephemeris.ErrInvalidSourceURL):
+		// Permanent config error (e.g. a source URL off the trusted origin): retrying cannot
+		// fix it, so requeue slowly (recovers on the spec edit that also bumps generation)
+		// instead of hammering the workqueue's exponential backoff. #222 review.
+		return "InvalidSourceURL", effectiveInterval, false
 	default:
 		return "FetchFailed", 0, true
 	}
 }
+
+// errSpaceTrackCredentialUnavailable is the UNIFORM, CR-facing error for any Space-Track
+// credential-Secret resolution failure (Secret missing / password key missing / username key
+// missing). The specific cause is logged for the operator but never surfaced on the CR, so a
+// principal who can write the SatelliteEphemeris but not read Secrets cannot probe Secret
+// existence or key shape. #222 review blocker 3.
+var errSpaceTrackCredentialUnavailable = errors.New("Space-Track credentials unavailable or not authorized")
 
 // fetcherForSource returns the appropriate GPFetcher for the source type.
 // For SpaceTrack, it also loads credentials from the referenced Secret.
@@ -1381,8 +1396,15 @@ func (r *SatelliteEphemerisReconciler) fetcherForSource(
 		if reader == nil {
 			reader = r.Client
 		}
+		// The three failures below (Secret missing / password key missing / username key
+		// missing) all return the SAME uniform, CR-facing error; the specific cause is logged
+		// for the operator. This closes a Secret existence/key oracle for a principal who can
+		// write the SatelliteEphemeris but not read Secrets (the reconcile error is surfaced on
+		// the CR condition/event) — mirroring the remoteControl.tls hardening. #222 review B3.
 		if err := reader.Get(ctx, secretKey, secret); err != nil {
-			return nil, fmt.Errorf("reading credentials Secret %q: %w", creds.Name, err)
+			logf.FromContext(ctx).Error(err, "reading Space-Track credentials Secret",
+				"secret", creds.Name, "namespace", eph.Namespace)
+			return nil, errSpaceTrackCredentialUnavailable
 		}
 		key := creds.Key
 		if key == "" {
@@ -1390,11 +1412,15 @@ func (r *SatelliteEphemerisReconciler) fetcherForSource(
 		}
 		password, ok := secret.Data[key]
 		if !ok {
-			return nil, fmt.Errorf("secret %q does not contain key %q", creds.Name, key)
+			logf.FromContext(ctx).Info("Space-Track credentials Secret missing required key",
+				"secret", creds.Name, "key", key)
+			return nil, errSpaceTrackCredentialUnavailable
 		}
 		username, ok := secret.Data["username"]
 		if !ok {
-			return nil, fmt.Errorf("secret %q does not contain key %q", creds.Name, "username")
+			logf.FromContext(ctx).Info("Space-Track credentials Secret missing required key",
+				"secret", creds.Name, "key", "username")
+			return nil, errSpaceTrackCredentialUnavailable
 		}
 		// Return a credentials-bound fetcher to prevent interleaving
 		// when multiple CRs share the SpaceTrackFetcher instance.

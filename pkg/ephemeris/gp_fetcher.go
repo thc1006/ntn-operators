@@ -26,15 +26,24 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/akhenakh/sgp4"
 	"github.com/go-logr/logr"
+
+	"github.com/thc1006/ntn-operators/pkg/netutil"
 )
 
 // Sentinel errors returned by GPFetcher implementations.
 var (
 	ErrRateLimited = errors.New("rate limited by upstream (HTTP 403)")
 	ErrBadResponse = errors.New("unexpected HTTP response")
+	// ErrInvalidSourceURL marks a spec.source.url that a fetcher rejects up front (e.g. a
+	// Space-Track query URL off the trusted origin). It is a PERMANENT configuration error —
+	// retrying cannot fix it — so the caller must classify it non-requeuing/slow, not loop it
+	// through the transient workqueue backoff. #222 review.
+	ErrInvalidSourceURL = errors.New("invalid source URL")
 	// ErrAuthFailed marks a credential/authentication failure (e.g. Space-Track
 	// returns HTTP 200 with a {"Login":"Failed"} body on bad credentials). It is a
 	// persistent error — retrying with the same credentials cannot succeed — so the
@@ -60,10 +69,57 @@ const maxRetryAfter = 24 * time.Hour
 type RateLimitError struct {
 	RetryAfter time.Duration
 	StatusCode int
+	// Snippet is a short, sanitized one-line prefix of the response body. CelesTrak
+	// returns an explanatory reason in the 403 body (e.g. "GP data has not updated since
+	// your last successful download"); surfacing it turns an opaque "HTTP 403" into an
+	// actionable diagnosis. Empty when the source sent no body. findings.md I-19b/#200-C6.
+	Snippet string
 }
 
 func (e *RateLimitError) Error() string {
+	if e.Snippet != "" {
+		return fmt.Sprintf("rate limited by upstream (HTTP %d): %s", e.StatusCode, e.Snippet)
+	}
 	return fmt.Sprintf("rate limited by upstream (HTTP %d)", e.StatusCode)
+}
+
+// maxSnippetBytes bounds how much of an (untrusted) error response body we read for
+// diagnostics.
+const maxSnippetBytes = 512
+
+// readBodySnippet reads a short, sanitized one-line prefix of an untrusted response body
+// for inclusion in an error/condition/log message: bounded to maxSnippetBytes, control
+// characters (incl. newlines) collapsed to spaces and whitespace runs squeezed, so the
+// snippet stays single-line and log-safe.
+func readBodySnippet(r io.Reader) string {
+	b, _ := io.ReadAll(io.LimitReader(r, maxSnippetBytes))
+	return sanitizeSnippet(b)
+}
+
+// sanitizeSnippet turns an already-read untrusted body into a single-line, log-safe string
+// whose ENCODED length never exceeds maxSnippetBytes. It keeps only printable runes
+// (unicode.IsPrint — which excludes control AND format/bidi/zero-width characters that
+// unicode.IsControl misses) and collapses everything else, including invalid UTF-8 bytes, to
+// a space. The bound is on the OUTPUT bytes, not the input: an invalid byte re-encodes to a
+// 3-byte U+FFFD and a multibyte rune to up to 4 bytes, so truncating the input alone could
+// still overflow maxSnippetBytes (#222 review, sanitizer hardening).
+func sanitizeSnippet(b []byte) string {
+	out := make([]byte, 0, maxSnippetBytes)
+	for i := 0; i < len(b); {
+		r, size := utf8.DecodeRune(b[i:])
+		i += size
+		ch := ' '
+		// Keep only printable runes; an invalid UTF-8 byte decodes to (RuneError, size 1).
+		validRune := r != utf8.RuneError || size != 1
+		if validRune && unicode.IsPrint(r) {
+			ch = r
+		}
+		if len(out)+utf8.RuneLen(ch) > maxSnippetBytes {
+			break
+		}
+		out = utf8.AppendRune(out, ch)
+	}
+	return strings.Join(strings.Fields(string(out)), " ")
 }
 
 // Is lets errors.Is(err, ErrRateLimited) match a *RateLimitError.
@@ -79,13 +135,37 @@ func parseRetryAfter(h http.Header) time.Duration {
 	if v == "" {
 		return 0
 	}
-	if secs, err := strconv.Atoi(v); err == nil { // delay-seconds
-		return clampRetryAfter(time.Duration(secs) * time.Second)
+	// delay-seconds: RFC 9110 allows an arbitrary-length non-negative integer, which may
+	// exceed int64. Treat any all-ASCII-digit value as delay-seconds and SATURATE to the cap
+	// on overflow — do NOT let strconv's range error fall through to the HTTP-date branch and
+	// return 0 (which would wrongly drop a huge but valid Retry-After) (#222 review).
+	if isAllASCIIDigits(v) {
+		secs, err := strconv.ParseUint(v, 10, 64)
+		if errors.Is(err, strconv.ErrRange) || (err == nil && secs >= uint64(maxRetryAfter/time.Second)) {
+			return maxRetryAfter
+		}
+		if err != nil {
+			return 0
+		}
+		return time.Duration(secs) * time.Second
 	}
 	if t, err := http.ParseTime(v); err == nil { // HTTP-date
 		return clampRetryAfter(time.Until(t))
 	}
 	return 0
+}
+
+// isAllASCIIDigits reports whether s is a non-empty run of ASCII digits 0-9.
+func isAllASCIIDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func clampRetryAfter(d time.Duration) time.Duration {
@@ -132,7 +212,10 @@ type CelesTrakFetcher struct {
 // NewCelesTrakFetcher creates a new fetcher with the given HTTP client.
 func NewCelesTrakFetcher(httpClient *http.Client) *CelesTrakFetcher {
 	if httpClient == nil {
-		httpClient = &http.Client{Timeout: 30 * time.Second}
+		// Default to the SSRF-safe client, NOT a bare http.Client: the source URL is
+		// CR-controlled, so a nil client must never silently yield an unguarded fetcher
+		// (default ProxyFromEnvironment, no dial-time IP validation). #199-C2.
+		httpClient = netutil.NewSafeHTTPClient(30 * time.Second)
 	}
 	return &CelesTrakFetcher{
 		httpClient: httpClient,
@@ -212,7 +295,11 @@ func (f *CelesTrakFetcher) Fetch(ctx context.Context, url string) (GPFetchResult
 		// (429 handled defensively for a fronting proxy). Retrying does not change
 		// the response and risks a firewall block, so this is a rate-limit signal,
 		// not a transient error — the caller requeues at the slow refresh cadence.
-		return GPFetchResult{}, &RateLimitError{RetryAfter: parseRetryAfter(resp.Header), StatusCode: resp.StatusCode}
+		return GPFetchResult{}, &RateLimitError{
+			RetryAfter: parseRetryAfter(resp.Header),
+			StatusCode: resp.StatusCode,
+			Snippet:    readBodySnippet(resp.Body),
+		}
 
 	default:
 		return GPFetchResult{}, fmt.Errorf("%w: HTTP %d from %s", ErrBadResponse, resp.StatusCode, url)
