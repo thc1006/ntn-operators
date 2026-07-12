@@ -174,8 +174,9 @@ type SatelliteEphemerisStatus struct {
 	// propagatedStatesInputHash is a digest of the spec fields that determine WHICH
 	// orbital data is fetched and WHICH satellites are propagated (source type/url and the
 	// NORAD selector) — NOT the whole spec. It is stamped whenever the current
-	// propagatedStates are (re)computed, from a fresh fetch or a valid same-generation
-	// cache. The NTNCellConfig runtime-push consumer recomputes the hash from the live
+	// propagatedStates are (re)computed, from a fresh fetch or a valid cache entry for the
+	// same upstream fetch identity (the OMM cache is keyed on source type+url, NOT on
+	// .metadata.generation). The NTNCellConfig runtime-push consumer recomputes the hash from the live
 	// spec and refuses to push when it differs — i.e. the persisted states were computed
 	// under different propagation inputs (a source/selector edit whose re-propagate has
 	// not yet succeeded), WITHOUT falsely invalidating on a pass-prediction-only edit
@@ -241,6 +242,15 @@ const (
 	// derived from stale elements and drifting (SGP4 in-track error grows with
 	// age from the element epoch). False means all propagated epochs are fresh.
 	ConditionEphemerisEpochStale = "EphemerisEpochStale"
+	// ConditionSourceEpochRejected is True when one or more tracked element sets were
+	// REFUSED BEFORE propagation because their OMM EPOCH is unparseable or implausibly
+	// future-dated (a corrupt or spoofed feed — SGP4 would otherwise be driven backward from
+	// the bogus epoch). Such a satellite produces NO propagated state, so a cell selecting it
+	// reports a bare EphemerisPayloadMissing; this condition is what tells the operator the
+	// cause is bad source data rather than a NORAD typo or a deep-space rejection. False
+	// means every tracked element set has a parseable, plausibly-dated epoch. Distinct from
+	// EphemerisEpochStale, which covers merely OLD (but still propagated) element sets.
+	ConditionSourceEpochRejected = "SourceEpochRejected"
 	// ConditionRefreshIntervalClamped is True when spec.source.refreshInterval was
 	// outside [2h, 24h] and the controller clamped it (Reason BelowMinimum /
 	// AboveMaximum). False (Reason WithinBounds) means the controller evaluated the

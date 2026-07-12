@@ -384,8 +384,9 @@ spec:
                   propagatedStatesInputHash is a digest of the spec fields that determine WHICH
                   orbital data is fetched and WHICH satellites are propagated (source type/url and the
                   NORAD selector) — NOT the whole spec. It is stamped whenever the current
-                  propagatedStates are (re)computed, from a fresh fetch or a valid same-generation
-                  cache. The NTNCellConfig runtime-push consumer recomputes the hash from the live
+                  propagatedStates are (re)computed, from a fresh fetch or a valid cache entry for the
+                  same upstream fetch identity (the OMM cache is keyed on source type+url, NOT on
+                  .metadata.generation). The NTNCellConfig runtime-push consumer recomputes the hash from the live
                   spec and refuses to push when it differs — i.e. the persisted states were computed
                   under different propagation inputs (a source/selector edit whose re-propagate has
                   not yet succeeded), WITHOUT falsely invalidating on a pass-prediction-only edit

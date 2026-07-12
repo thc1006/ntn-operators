@@ -87,10 +87,19 @@ func TestReconcile_FetchError_ServesCache(t *testing.T) {
 		uid:      got.UID,
 	})
 
-	_, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: key})
-	// Generic transient error → returned so the workqueue applies exponential backoff.
-	if err == nil {
-		t.Fatal("a generic fetch error must be returned for workqueue backoff, got nil")
+	res, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: key})
+	// The serve-cache cycle must NOT return an error: returning one makes controller-runtime
+	// IGNORE RequeueAfter and fall back to the workqueue's exponential backoff, which ramps
+	// to ~1000s — far beyond the 5-minute propagationEpochLead, so the pushed epoch would
+	// expire between reconciles and SIB19 would go stale mid-outage. The fetch is instead
+	// held back internally (cachedFetch.nextFetchAttempt) while the reconcile keeps running
+	// on the propagation cadence.
+	if err != nil {
+		t.Fatalf("a serve-cache cycle must not return an error (it would override RequeueAfter with workqueue backoff): %v", err)
+	}
+	if res.RequeueAfter != propagationRefreshInterval {
+		t.Fatalf("a serve-cache cycle must requeue on the PROPAGATION cadence (%s) so the pushed epoch stays alive, got %s",
+			propagationRefreshInterval, res.RequeueAfter)
 	}
 
 	updated := &ntnv1alpha1.SatelliteEphemeris{}
