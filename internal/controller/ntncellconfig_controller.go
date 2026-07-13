@@ -875,8 +875,11 @@ func ephemerisPushMarker(eph *ntnv1alpha1.SatelliteEphemeris) string {
 // epoch is a monotonic 1:1 proxy for the propagated ECEF — each re-propagation
 // yields a new epoch and a new state — so a same-epoch reconcile dedups without
 // hashing the payload. Refreshing epoch/ephemeris/TA is SI-change-free per TS
-// 38.331, and the re-push cadence is bounded by the SatelliteEphemeris
-// re-propagation interval, well under ntn-UlSyncValidityDuration (NR max 240 s).
+// 38.331. The re-push cadence is bounded by the SatelliteEphemeris re-propagation
+// interval (a few minutes) and is NOT guaranteed shorter than ntn-UlSyncValidityDur:
+// that field's enum spans 5..900 s (an earlier "NR max 240 s" note was wrong), so at
+// the low end the UE-side UL-sync validity can lapse between re-pushes — pairing the
+// two is a deployment-sizing concern this cadence does not enforce.
 func runtimeEphemerisPushMarker(eph *ntnv1alpha1.SatelliteEphemeris, state *ntnv1alpha1.PropagatedState) string {
 	return fmt.Sprintf("ephemerisRef=%s ephGeneration=%d norad=%d epoch=%d",
 		eph.Name, eph.Generation, state.NoradID, state.EpochUnixMs)
