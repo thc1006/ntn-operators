@@ -16,6 +16,7 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	ntnv1alpha1 "github.com/thc1006/ntn-operators/api/v1alpha1"
@@ -59,6 +60,12 @@ var _ = Describe("NTNSlice failoverPolicy.triggers admission (CEL)", func() {
 				DeferCleanup(func() { _ = k8sClient.Delete(ctx, s) })
 			} else {
 				Expect(err).To(HaveOccurred(), "trigger %q must be rejected by CEL admission", trigger)
+				// Assert it is an admission (Invalid) rejection that names failoverPolicy — so a
+				// reject cannot false-green on some unrelated validation error.
+				Expect(apierrors.IsInvalid(err)).To(BeTrue(),
+					"trigger %q must fail with an Invalid admission error, got %v", trigger, err)
+				Expect(err.Error()).To(ContainSubstring("failoverPolicy"),
+					"the rejection must reference failoverPolicy, got %v", err)
 			}
 		},
 		Entry("normal negative rsrp", "rsrp < -120", true),

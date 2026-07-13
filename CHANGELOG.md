@@ -85,14 +85,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   handoff reset it to "dwell satisfied" and a re-degradation within the dwell window could fail
   over earlier than intended. It is now mirrored to a new `NTNSlice.status.lastSwitchbackTime`
   and **monotonically merged** with the in-memory clock: status is adopted when it is newer (a
-  cold cache after restart), and repaired when it is behind (self-healing a prior status write
-  that failed). A status value dated in the future (node clock skew / rollback) is ignored so it
-  cannot lock a degraded terrestrial. The other two flap clocks stay in-memory (their loss only
-  delays a switch, never advances one). This matters more now that rolling updates hand
-  leadership over routinely. **Scope:** durability holds once this version has recorded at least
-  one quality-driven switchback; a switchback recorded only by an older (pre-field) version is
-  not recoverable, and min-dwell accuracy across a handoff assumes the controller nodes have
-  synchronised clocks (#220 H1).
+  cold cache after restart), and repaired when it is behind. The in-memory clock is committed only
+  **after** the durable status write succeeds (the same "commit side-effects once status is
+  durable" discipline as the failover counter/event), so a switchback whose write fails cannot
+  leave a speculative timestamp that a later pass-ended forced switchback could launder into a
+  bogus dwell. A future-dated status value (node clock skew / rollback) is ignored by the reload
+  and healed by the next real switchback, so it cannot lock a degraded terrestrial. The other two
+  flap clocks stay in-memory (their loss only delays a switch, never advances one). This matters
+  more now that rolling updates hand leadership over routinely. **Scope:** durability holds once
+  this version has recorded at least one quality-driven switchback; a switchback recorded only by
+  an older (pre-field) version is not recoverable, and min-dwell accuracy across a handoff assumes
+  the controller nodes have synchronised clocks (#220 H1).
 
 ### Fixed
 
@@ -261,6 +264,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `switchbackDelay` — while edits outside `failoverPolicy` are ratcheted through. The runtime
   already fail-closes the value regardless. Correct any such trigger before editing
   `failoverPolicy`.
+- **`NTNSlice.status.lastSwitchbackTime` may be dropped on a downgrade.** A controller version
+  that predates this field does a full `/status` PUT with a Go struct that does not know the
+  field, so rolling the controller back can remove it. min-dwell durability is therefore not
+  guaranteed across a downgrade — the next quality-driven switchback on the (re-upgraded) new
+  version re-establishes it. Forward upgrades are unaffected.
 
 ## [0.7.0] - 2026-07-12
 

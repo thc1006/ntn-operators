@@ -145,18 +145,19 @@ func (r *NTNSliceReconciler) seedLastSwitchbackFromStatus(
 	af.LastSwitchback = p.Time
 }
 
-// persistLastSwitchbackToStatus mirrors the in-memory min-dwell clock into status whenever the
-// durable value is BEHIND memory (nil, or an older second). It compares monotonically at second
-// granularity — metav1.Time serialises whole seconds while memory keeps sub-second precision, so
-// a raw After() would rewrite the same second every reconcile. Because it self-heals from the
-// durable value (not from "did memory change this cycle"), a Status().Update() that failed on an
-// earlier switchback is repaired on any later reconcile; the write rides the reconcile's existing
-// (unconditional) status update, so it adds no extra API request.
-func (r *NTNSliceReconciler) persistLastSwitchbackToStatus(ns *ntnv1alpha1.NTNSlice, latest time.Time) {
+// persistLastSwitchbackToStatus mirrors the in-memory min-dwell clock into status when the durable
+// value is BEHIND memory (nil, or an older second) OR is implausibly dated in the FUTURE. It
+// compares at second granularity — metav1.Time serialises whole seconds while memory keeps
+// sub-second precision, so a raw After() would rewrite the same second every reconcile. The
+// future case is HEALED here (overwritten by the current value): the seed ignores a future
+// timestamp, so without this a real switchback could never displace a poisoned future value and
+// durability would stay broken until wall-clock caught up. The write rides the reconcile's
+// existing (unconditional) status update, so it adds no extra API request.
+func (r *NTNSliceReconciler) persistLastSwitchbackToStatus(ns *ntnv1alpha1.NTNSlice, latest, now time.Time) {
 	if latest.IsZero() {
 		return
 	}
-	if p := ns.Status.LastSwitchbackTime; p == nil || latest.Truncate(time.Second).After(p.Time) {
+	if p := ns.Status.LastSwitchbackTime; p == nil || latest.Truncate(time.Second).After(p.Time) || p.After(now) {
 		ns.Status.LastSwitchbackTime = &metav1.Time{Time: latest}
 	}
 }
@@ -232,6 +233,11 @@ func (r *NTNSliceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 			// lazy default provider still holds the cache/series, so guarding on
 			// the raw field leaked the stale series (#183). No-op if no entry.
 			r.readerProvider().Evict(req.NamespacedName)
+			// Also drop the in-memory anti-flap state. The finalizer normally does this,
+			// but a force-deletion (finalizer bypassed) or namespace purge reaches NotFound
+			// without it — otherwise a same-name NTNSlice recreated (new UID) before a
+			// controller restart could inherit the deleted object's LastSwitchback.
+			r.dropFlapState(req.NamespacedName)
 		}
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
@@ -312,6 +318,14 @@ func (r *NTNSliceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	}
 
 	var result slice.FailoverResult
+	// pendingFlap/pendingFlapKey defer the in-memory anti-flap commit until AFTER the Step-8
+	// status write succeeds — the same "commit side-effects only once the status is durable"
+	// discipline as the FailoverTotal counter and decision event below. Committing memory before
+	// the durable write would leave a SPECULATIVE LastSwitchback (from a switchback whose status
+	// write failed) that a later pass-ended forced switchback could launder into durable status
+	// as a dwell clock for a hand-back that never actually happened.
+	var pendingFlap *slice.AntiFlapState
+	var pendingFlapKey types.NamespacedName
 	switch {
 	case !satelliteKnown:
 		// I-13: satellite availability is unknown (transient ephemeris read error).
@@ -371,8 +385,8 @@ func (r *NTNSliceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 			afCfg,
 			af,
 		)
-		r.storeFlapState(flapKey, newFlap)
-		r.persistLastSwitchbackToStatus(ns, newFlap.LastSwitchback)
+		pendingFlap, pendingFlapKey = &newFlap, flapKey
+		r.persistLastSwitchbackToStatus(ns, newFlap.LastSwitchback, now)
 	default:
 		// Metrics unreliable but satellite availability known: fail static —
 		// EvaluateSafeHold holds the current path yet still honors the orbital
@@ -455,6 +469,15 @@ func (r *NTNSliceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	// Step 8: Update status.
 	if err := r.Status().Update(ctx, ns); err != nil {
 		return ctrl.Result{}, err
+	}
+
+	// Commit the anti-flap state to shared memory ONLY now that the transition is durable. A
+	// failed/stale status write therefore never leaves a speculative LastSwitchback in memory,
+	// so a subsequent forced switchback cannot persist a dwell clock for a hand-back that was
+	// never durably recorded. Under-counting a confirmation/recovery sample on a dropped write
+	// only DELAYS the next transition (fail-safe), matching the anti-flap design.
+	if pendingFlap != nil {
+		r.storeFlapState(pendingFlapKey, *pendingFlap)
 	}
 
 	// Emit the failover counter only after the status write persisted, so a
