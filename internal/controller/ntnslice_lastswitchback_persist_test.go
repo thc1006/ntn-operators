@@ -130,19 +130,23 @@ func TestReconcile_Switchback_PersistsLastSwitchbackTime(t *testing.T) {
 	}
 }
 
-// TestReconcile_SteadyReconcile_DoesNotChurnLastSwitchbackTime proves the mirror only
-// fires when LastSwitchback CHANGES: an in-memory clock with no switchback this cycle must
-// NOT write status. Mutation: gating on !IsZero() instead of a change would write it here.
-func TestReconcile_SteadyReconcile_DoesNotChurnLastSwitchbackTime(t *testing.T) {
+// TestReconcile_SelfHealsDurableLastSwitchback pins the monotonic-merge robustness (review
+// Finding 1): when the in-memory min-dwell clock is AHEAD of the durable status (e.g. a prior
+// switchback's Status().Update() failed and left status behind memory), any later reconcile
+// must REPAIR status from memory — it must not treat "memory has a value, status is nil" as an
+// acceptable steady state. Mutation: the prior "write only when memory changed this cycle"
+// gate leaves status nil here (no switchback this cycle), so this fails.
+func TestReconcile_SelfHealsDurableLastSwitchback(t *testing.T) {
 	fixedNow := time.Date(2026, 4, 17, 12, 0, 0, 0, time.UTC)
-	// On terrestrial, healthy; status.lastSwitchbackTime deliberately nil while the
-	// in-memory clock is set — a steady reconcile must not backfill/churn it.
+	// On terrestrial; in-memory clock set 30s ago (within the 60s dwell), status nil.
 	r, key := baseSliceForDwell(t, fixedNow, ntnv1alpha1.NTNSliceStatus{
 		ActivePathType: string(slice.PathTerrestrial),
 	})
-	r.storeFlapState(key, slice.AntiFlapState{LastSwitchback: fixedNow.Add(-120 * time.Second)})
+	memClock := fixedNow.Add(-30 * time.Second)
+	r.storeFlapState(key, slice.AntiFlapState{LastSwitchback: memClock})
+	// Terrestrial DEGRADED (would fail over if dwell were satisfied), satellite available.
 	r.ReaderProvider = fakeReaderProvider{reader: fakeReader{res: slicemetrics.Result{
-		Metrics: slice.Metrics{RSRP: -80, LatencyMs: 10, PacketLossPercent: 0},
+		Metrics: slice.Metrics{RSRP: -110, LatencyMs: 10, PacketLossPercent: 0},
 		Stale:   false, LastFreshAt: fixedNow,
 	}}}
 
@@ -153,8 +157,77 @@ func TestReconcile_SteadyReconcile_DoesNotChurnLastSwitchbackTime(t *testing.T) 
 	if err := r.Get(context.Background(), key, updated); err != nil {
 		t.Fatalf("re-get: %v", err)
 	}
-	if updated.Status.LastSwitchbackTime != nil {
-		t.Fatalf("a steady reconcile (no switchback this cycle) must not write "+
-			"status.lastSwitchbackTime; got %v (churn)", updated.Status.LastSwitchbackTime)
+	if updated.Status.LastSwitchbackTime == nil || !updated.Status.LastSwitchbackTime.Time.Equal(memClock) {
+		t.Fatalf("durable status must be REPAIRED from the ahead-of-status in-memory clock (%v), got %v",
+			memClock, updated.Status.LastSwitchbackTime)
+	}
+	if updated.Status.ActivePathType != string(slice.PathTerrestrial) {
+		t.Fatalf("in-memory min-dwell must still block the re-failover, got %q", updated.Status.ActivePathType)
+	}
+}
+
+// TestReconcile_MonotonicSeed_IgnoresFutureAndOlder pins two monotonicity properties (Findings
+// 1 & 3): the seed adopts status only when it is NEWER than memory (never downgrades), and it
+// ignores a FUTURE-dated status (clock skew / rollback) so a bad timestamp cannot lock
+// terrestrial. Here status is OLDER than memory AND memory is within dwell → the slice must
+// stay terrestrial and status must advance to the memory value.
+func TestReconcile_MonotonicSeed_KeepsNewerMemory(t *testing.T) {
+	fixedNow := time.Date(2026, 4, 17, 12, 0, 0, 0, time.UTC)
+	memClock := fixedNow.Add(-10 * time.Second)  // within 60s dwell
+	oldStatus := fixedNow.Add(-90 * time.Second) // outside dwell (would fail over if adopted)
+	r, key := baseSliceForDwell(t, fixedNow, ntnv1alpha1.NTNSliceStatus{
+		ActivePathType:     string(slice.PathTerrestrial),
+		LastSwitchbackTime: &metav1.Time{Time: oldStatus},
+	})
+	r.storeFlapState(key, slice.AntiFlapState{LastSwitchback: memClock})
+	r.ReaderProvider = fakeReaderProvider{reader: fakeReader{res: slicemetrics.Result{
+		Metrics: slice.Metrics{RSRP: -110, LatencyMs: 10, PacketLossPercent: 0},
+		Stale:   false, LastFreshAt: fixedNow,
+	}}}
+
+	if _, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: key}); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	updated := &ntnv1alpha1.NTNSlice{}
+	if err := r.Get(context.Background(), key, updated); err != nil {
+		t.Fatalf("re-get: %v", err)
+	}
+	if updated.Status.ActivePathType != string(slice.PathTerrestrial) {
+		t.Fatalf("seed must NOT downgrade to the older status clock (would satisfy dwell and fail over); got %q",
+			updated.Status.ActivePathType)
+	}
+	if updated.Status.LastSwitchbackTime == nil || !updated.Status.LastSwitchbackTime.Time.Equal(memClock) {
+		t.Fatalf("status must advance to the newer in-memory clock (%v), got %v",
+			memClock, updated.Status.LastSwitchbackTime)
+	}
+}
+
+// TestReconcile_FutureStatusTimestampIgnored pins the future-timestamp guard (Finding 3): a
+// status.lastSwitchbackTime dated in the future (clock skew / rollback) must be IGNORED by the
+// seed, so it cannot indefinitely lock a degraded terrestrial. Here memory is empty and status
+// is 1h in the future → min-dwell must NOT apply → the slice fails over. Mutation: seeding the
+// future value makes now.Sub(future) negative < dwell, wrongly holding terrestrial.
+func TestReconcile_FutureStatusTimestampIgnored(t *testing.T) {
+	fixedNow := time.Date(2026, 4, 17, 12, 0, 0, 0, time.UTC)
+	r, key := baseSliceForDwell(t, fixedNow, ntnv1alpha1.NTNSliceStatus{
+		ActivePathType:     string(slice.PathTerrestrial),
+		LastSwitchbackTime: &metav1.Time{Time: fixedNow.Add(1 * time.Hour)}, // implausible future
+	})
+	// no in-memory entry (cold cache); terrestrial DEGRADED; satellite available.
+	r.ReaderProvider = fakeReaderProvider{reader: fakeReader{res: slicemetrics.Result{
+		Metrics: slice.Metrics{RSRP: -110, LatencyMs: 10, PacketLossPercent: 0},
+		Stale:   false, LastFreshAt: fixedNow,
+	}}}
+
+	if _, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: key}); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	updated := &ntnv1alpha1.NTNSlice{}
+	if err := r.Get(context.Background(), key, updated); err != nil {
+		t.Fatalf("re-get: %v", err)
+	}
+	if updated.Status.ActivePathType != string(slice.PathSatellite) {
+		t.Fatalf("a future-dated lastSwitchbackTime must NOT lock terrestrial; expected failover to satellite, got %q",
+			updated.Status.ActivePathType)
 	}
 }

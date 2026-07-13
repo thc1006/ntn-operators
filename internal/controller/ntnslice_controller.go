@@ -101,10 +101,12 @@ type NTNSliceReconciler struct {
 	// the recovery clock are intentionally NOT persisted: losing them on a restart or
 	// leader-election handoff only re-requires confirmation before the next switch — a
 	// DELAY (safe), never a spurious switch. The min-dwell clock (LastSwitchback) IS the
-	// exception — its loss ADVANCES a switch — so it is mirrored to
-	// .status.lastSwitchbackTime and reloaded here when the in-memory entry is absent
-	// (a cold cache after restart), so min-dwell survives a handoff. Guarded by flapMu;
-	// entries are released in handleSliceFinalizer on CR deletion so the map cannot leak.
+	// exception — its loss ADVANCES a switch — so it is mirrored to .status.lastSwitchbackTime
+	// and monotonically merged with it (adopt status when it is newer; repair status when it is
+	// behind). min-dwell therefore survives a restart/handoff ONCE this version has durably
+	// recorded at least one quality-driven switchback; a switchback recorded only by a pre-field
+	// (older) version is not recoverable. Guarded by flapMu; entries are released in
+	// handleSliceFinalizer on CR deletion so the map cannot leak.
 	flapMu    sync.Mutex
 	flapState map[types.NamespacedName]slice.AntiFlapState
 }
@@ -126,23 +128,36 @@ func (r *NTNSliceReconciler) storeFlapState(key types.NamespacedName, st slice.A
 	r.flapState[key] = st
 }
 
-// seedLastSwitchbackFromStatus reloads the min-dwell clock from status when the in-memory
-// entry is absent (a cold cache after a restart or leader-election handoff). Without it, a
-// lost LastSwitchback reads as "dwell already satisfied" and a re-degradation within the
-// dwell window could fail over earlier than min-dwell intended. Only this clock is durable;
-// the other two are safe to lose (their loss only DELAYS a switch).
-func (r *NTNSliceReconciler) seedLastSwitchbackFromStatus(af *slice.AntiFlapState, ns *ntnv1alpha1.NTNSlice) {
-	if af.LastSwitchback.IsZero() && ns.Status.LastSwitchbackTime != nil {
-		af.LastSwitchback = ns.Status.LastSwitchbackTime.Time
+// seedLastSwitchbackFromStatus does a monotonic merge of the durable min-dwell clock into the
+// in-memory one: it adopts status.lastSwitchbackTime whenever that is NEWER than the in-memory
+// value — a cold cache after a restart/leader handoff (memory zero), or memory that lagged a
+// durable write. It never moves the clock backwards, and it ignores a status value dated in the
+// FUTURE (clock skew across nodes, or a rollback) so a bad timestamp cannot lock terrestrial
+// indefinitely. Only this clock is durable; the other two are safe to lose (their loss only
+// DELAYS a switch).
+func (r *NTNSliceReconciler) seedLastSwitchbackFromStatus(
+	af *slice.AntiFlapState, ns *ntnv1alpha1.NTNSlice, now time.Time,
+) {
+	p := ns.Status.LastSwitchbackTime
+	if p == nil || !p.After(af.LastSwitchback) || p.After(now) {
+		return
 	}
+	af.LastSwitchback = p.Time
 }
 
-// persistLastSwitchbackToStatus mirrors the min-dwell clock to status ONLY when it changes
-// (a new quality-driven switchback this reconcile), so it adds no status-write churn — a
-// switchback already writes status this cycle, and a steady reconcile leaves it untouched.
-func (r *NTNSliceReconciler) persistLastSwitchbackToStatus(ns *ntnv1alpha1.NTNSlice, prev, next time.Time) {
-	if !next.Equal(prev) {
-		ns.Status.LastSwitchbackTime = &metav1.Time{Time: next}
+// persistLastSwitchbackToStatus mirrors the in-memory min-dwell clock into status whenever the
+// durable value is BEHIND memory (nil, or an older second). It compares monotonically at second
+// granularity — metav1.Time serialises whole seconds while memory keeps sub-second precision, so
+// a raw After() would rewrite the same second every reconcile. Because it self-heals from the
+// durable value (not from "did memory change this cycle"), a Status().Update() that failed on an
+// earlier switchback is repaired on any later reconcile; the write rides the reconcile's existing
+// (unconditional) status update, so it adds no extra API request.
+func (r *NTNSliceReconciler) persistLastSwitchbackToStatus(ns *ntnv1alpha1.NTNSlice, latest time.Time) {
+	if latest.IsZero() {
+		return
+	}
+	if p := ns.Status.LastSwitchbackTime; p == nil || latest.Truncate(time.Second).After(p.Time) {
+		ns.Status.LastSwitchbackTime = &metav1.Time{Time: latest}
 	}
 }
 
@@ -342,7 +357,7 @@ func (r *NTNSliceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 
 		flapKey := client.ObjectKeyFromObject(ns)
 		af := r.loadFlapState(flapKey)
-		r.seedLastSwitchbackFromStatus(&af, ns)
+		r.seedLastSwitchbackFromStatus(&af, ns, now)
 		var newFlap slice.AntiFlapState
 		result, newFlap = slice.EvaluateFailoverWithAntiFlap(
 			ctx,
@@ -357,7 +372,7 @@ func (r *NTNSliceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 			af,
 		)
 		r.storeFlapState(flapKey, newFlap)
-		r.persistLastSwitchbackToStatus(ns, af.LastSwitchback, newFlap.LastSwitchback)
+		r.persistLastSwitchbackToStatus(ns, newFlap.LastSwitchback)
 	default:
 		// Metrics unreliable but satellite availability known: fail static —
 		// EvaluateSafeHold holds the current path yet still honors the orbital
