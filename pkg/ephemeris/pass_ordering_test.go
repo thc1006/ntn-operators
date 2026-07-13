@@ -17,6 +17,7 @@ limitations under the License.
 package ephemeris
 
 import (
+	"context"
 	"reflect"
 	"testing"
 	"time"
@@ -41,7 +42,7 @@ func TestPredictPasses_DeterministicOrdering(t *testing.T) {
 	stations := []GroundStation{{Latitude: 25.0330, Longitude: 121.5654, Altitude: 15}}
 	start := time.Date(2026, 4, 17, 0, 0, 0, 0, time.UTC)
 
-	first, err := PredictPasses(omms, stations, 10.0, 24*time.Hour, nil, start)
+	first, err := PredictPasses(context.Background(), omms, stations, 10.0, 24*time.Hour, nil, start)
 	if err != nil {
 		t.Fatalf("predict: %v", err)
 	}
@@ -51,7 +52,7 @@ func TestPredictPasses_DeterministicOrdering(t *testing.T) {
 
 	// 1. Byte-identical across repeated runs (determinism).
 	for i := range 8 {
-		again, err := PredictPasses(omms, stations, 10.0, 24*time.Hour, nil, start)
+		again, err := PredictPasses(context.Background(), omms, stations, 10.0, 24*time.Hour, nil, start)
 		if err != nil {
 			t.Fatalf("predict run %d: %v", i, err)
 		}

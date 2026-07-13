@@ -17,6 +17,7 @@ limitations under the License.
 package ephemeris
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"sort"
@@ -56,7 +57,12 @@ type PassResult struct {
 // error (it does not silently degrade). It filters by minElevation, limits results to
 // MaxPassWindows, and uses concurrent workers.
 // The startTime parameter sets the prediction window start; pass time.Time{} to use time.Now().
+// ctx cancellation is honoured between work items (each item is one satellite × ground station
+// over the whole horizon), so a cancelled/timed-out caller aborts promptly and PredictPasses
+// returns ctx.Err(); the caller (the reconcile) should also bound the horizon to keep any single
+// work item small.
 func PredictPasses(
+	ctx context.Context,
 	omms []sgp4.OMM,
 	stations []GroundStation,
 	minElevation float64,
@@ -117,6 +123,9 @@ func PredictPasses(
 	for range numWorkers {
 		wg.Go(func() {
 			for item := range workCh {
+				if ctx.Err() != nil {
+					return // cancelled/timed-out: stop pulling new work items
+				}
 				passes, err := predictSingle(item.omm, item.station, start, stop, minElevation)
 				mu.Lock()
 				if err != nil && firstErr == nil {
@@ -128,6 +137,12 @@ func PredictPasses(
 		})
 	}
 	wg.Wait()
+
+	// A cancelled/timed-out context takes precedence over partial results: the caller
+	// (reconcile) will requeue, and partial pass windows would falsely converge status.
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 
 	if firstErr != nil && len(allPasses) == 0 {
 		return nil, firstErr

@@ -435,6 +435,26 @@ const maxPropagatedStates = 128
 // propagation, so the epoch is fresh at push time.
 const propagationEpochLead = 5 * time.Minute
 
+// maxPassHorizon bounds passPrediction.horizon (clamped, not rejected). Pass prediction sweeps
+// the whole horizon per satellite × ground station, so an unbounded horizon can stall the
+// reconcile; 7 days is generous for contact-opportunity planning (LEO passes recur ~every 90 min
+// and MaxPassWindows caps the stored output at 500 regardless).
+const maxPassHorizon = 7 * 24 * time.Hour
+
+// effectivePassHorizon resolves the pass-prediction horizon: the 24h default when unset, else
+// the spec value clamped to maxPassHorizon. clamped reports whether the ceiling was applied (so
+// the caller can log it once).
+func effectivePassHorizon(raw time.Duration) (horizon time.Duration, clamped bool) {
+	switch {
+	case raw <= 0:
+		return 24 * time.Hour, false
+	case raw > maxPassHorizon:
+		return maxPassHorizon, true
+	default:
+		return raw, false
+	}
+}
+
 // propagationRefreshInterval is how often the orbit is re-propagated (from cached
 // OMMs, WITHOUT a GP fetch) to keep the runtime-push epoch fresh between GP
 // refreshes (#179). It must be shorter than propagationEpochLead minus the
@@ -1070,10 +1090,14 @@ func (r *SatelliteEphemerisReconciler) predictPasses(
 		return "", fmt.Errorf("invalid minElevation: %w", err)
 	}
 
-	// Parse horizon.
-	horizon := pp.Horizon.Duration
-	if horizon == 0 {
-		horizon = 24 * time.Hour
+	// Resolve the effective horizon (default when unset, clamped to maxPassHorizon otherwise):
+	// an unbounded horizon makes the O(horizon × satellites × ground stations) sweep — and thus
+	// the reconcile — arbitrarily long. Clamp rather than reject so it stays non-breaking and
+	// ratcheting-safe; MaxPassWindows already caps the stored output.
+	horizon, clamped := effectivePassHorizon(pp.Horizon.Duration)
+	if clamped {
+		log.Info("passPrediction.horizon exceeds maximum; clamping",
+			"horizon", pp.Horizon.Duration.String(), "max", maxPassHorizon.String())
 	}
 
 	// Build NORAD filter from SatelliteSelector.
@@ -1085,7 +1109,7 @@ func (r *SatelliteEphemerisReconciler) predictPasses(
 	// Run pass prediction from the CURRENT time, not fetchResult.FetchedAt: pass windows
 	// are "upcoming contact opportunities", and on a cached serve FetchedAt can be up to
 	// effectiveInterval (2–24h) in the past, which would start the window stale (#200-C3).
-	passes, err := ephemeris.PredictPasses(fetchResult.OMMs, stations, minEl, horizon, noradFilter, now)
+	passes, err := ephemeris.PredictPasses(ctx, fetchResult.OMMs, stations, minEl, horizon, noradFilter, now)
 	if err != nil {
 		return "", fmt.Errorf("computing passes: %w", err)
 	}

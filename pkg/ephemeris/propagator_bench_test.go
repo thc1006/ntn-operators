@@ -17,6 +17,7 @@ limitations under the License.
 package ephemeris
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -68,7 +69,7 @@ func BenchmarkPredictPasses_SingleSatSingleStation(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_, err := PredictPasses(
+		_, err := PredictPasses(context.Background(),
 			[]sgp4.OMM{omm}, stations, 10.0, horizon, nil, start,
 		)
 		if err != nil {
@@ -93,7 +94,7 @@ func BenchmarkPredictPasses_10Sats2Stations(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_, err := PredictPasses(
+		_, err := PredictPasses(context.Background(),
 			omms, stations, 10.0, 24*time.Hour, nil, start,
 		)
 		if err != nil {

@@ -65,6 +65,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`passPrediction.horizon` is bounded and pass prediction is cancellable.** Pass prediction
+  sweeps the whole horizon for every satellite × ground station, so an unbounded `horizon` could
+  stall the reconcile (and, transitively, delay the runtime-push epoch). The horizon is now
+  clamped to a 7-day maximum at reconcile time (clamp, not reject — non-breaking; `MaxPassWindows`
+  already caps the stored output). That clamp bounds the per-reconcile compute. Separately,
+  `PredictPasses` now honours context cancellation between work items, so a long pass prediction
+  aborts promptly when the manager's context is cancelled (controller shutdown / leader loss)
+  rather than blocking graceful shutdown — the operator wires no per-reconcile timeout, so this is
+  a shutdown-responsiveness win, not a per-reconcile deadline (#233, part of #232).
 - **`/readyz` now gates on informer cache-sync (still leadership-agnostic).** It was
   `healthz.Ping`, which reports Ready as soon as the process serves — but controller-runtime
   starts the health server *before* the caches sync, so a broken new replica (RBAC, CRD
@@ -203,6 +212,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrade notes
 
+- **`passPrediction.horizon` is clamped to 7 days.** A larger value is silently clamped (logged,
+  not rejected), so a spec relying on pass windows beyond 7 days will see them truncated. Realistic
+  contact-planning horizons are unaffected (`MaxPassWindows` already capped the output at 500).
 - **`NewSafeHTTPClient` no longer honors `HTTP_PROXY`/`HTTPS_PROXY`.** The GP fetch, NTNSlice
   metrics reader, and ground-station probe reach in-cluster or public endpoints directly; a
   deployment that previously relied on an egress proxy for those must expose the endpoints
