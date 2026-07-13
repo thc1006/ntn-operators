@@ -83,6 +83,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The propagated ephemeris epoch is stamped at propagation time, not reconcile-start.** The
+  epoch was derived from the clock sampled at the top of the reconcile, but the fetch and pass
+  prediction run before propagation, so the delivered epoch was already aged by that compute —
+  eating into the `propagationEpochLead`. The clock is now re-sampled immediately before
+  propagation, so the epoch reflects the true propagation instant (the fetch/pass-prediction paths
+  keep the reconcile-start `now`, which is correct for their reconcile-relative windows) (#235,
+  part of #232).
 - **Pass windows are computed from the current time, not the last fetch time.** On a cached
   re-propagation the fetch timestamp could be up to 24h in the past, which started AOS/LOS
   windows stale; they now start at reconcile time (#200-C3).

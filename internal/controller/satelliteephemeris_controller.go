@@ -76,12 +76,24 @@ type SatelliteEphemerisReconciler struct {
 	Fetcher                 ephemeris.GPFetcher          // CelesTrak fetcher
 	SpaceTrackFetcher       *ephemeris.SpaceTrackFetcher // SpaceTrack fetcher (nil = disabled)
 
+	// Now returns the current time; nil defaults to time.Now(). Injected in tests to make the
+	// propagation epoch — which is sampled at PROPAGATION time, not reconcile-start — deterministic.
+	Now func() time.Time
+
 	// ommCache holds the last real GP-fetch result per SatelliteEphemeris so the
 	// orbit can be re-propagated on a short cadence WITHOUT re-contacting the GP
 	// source (rate-limit etiquette; #179). Keyed by client.ObjectKey, evicted on
 	// CR deletion. In-memory only — a cold cache (e.g. after a restart) just forces
 	// one fetch on the next reconcile.
 	ommCache sync.Map
+}
+
+// now returns the injectable clock (r.Now) or time.Now() when unset.
+func (r *SatelliteEphemerisReconciler) now() time.Time {
+	if r.Now != nil {
+		return r.Now()
+	}
+	return time.Now()
 }
 
 // +kubebuilder:rbac:groups=ntn.operators.dev,resources=satelliteephemeris,verbs=get;list;watch;create;update;patch;delete
@@ -187,7 +199,7 @@ func (r *SatelliteEphemerisReconciler) Reconcile(ctx context.Context, req ctrl.R
 	// ~1–3 km/day from the element epoch (findings.md I-17). metav1.Duration
 	// serialises as a string, so both bounds are enforced here rather than via CEL.
 	effectiveInterval := r.clampRefreshInterval(ctx, eph)
-	now := time.Now()
+	now := r.now()
 
 	// Step 3: Can this reconcile be answered from cache WITHOUT contacting the source?
 	//   (a) inside the GP-refresh window — normal (#179), or
@@ -346,7 +358,11 @@ func (r *SatelliteEphemerisReconciler) Reconcile(ctx context.Context, req ctrl.R
 	// an earlier version did) made OCUDU back-propagate hours from a position that
 	// was itself SGP4-propagated hours forward, compounding LEO error; a near-now
 	// epoch keeps OCUDU's internal propagation short and forward.
-	truncEvent := r.propagateStates(ctx, eph, result, now.Add(propagationEpochLead))
+	// #235: sample the epoch base at the ACTUAL propagation instant, not reconcile-start `now`.
+	// The fetch and pass prediction ran in between; a stale `now` would deliver an epoch already
+	// aged by that compute, eating into propagationEpochLead. (acquireOMMs and pass prediction
+	// keep the reconcile-start `now` — their windows are reconcile-relative, not epoch-critical.)
+	truncEvent := r.propagateStates(ctx, eph, result, r.now().Add(propagationEpochLead))
 
 	// Stamp the propagation-input digest these propagatedStates were computed under.
 	// Reaching here means the current spec's inputs were (re)propagated — from a fresh
