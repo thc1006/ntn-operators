@@ -28,7 +28,7 @@ import (
 // test is the single behavioral source of truth: it proves the admission regex
 // agrees with the runtime ParseTrigger, so a trigger accepted at admission always
 // parses at runtime (no silent skip) and vice-versa — closing findings.md I-11.
-const triggerCELRegex = `^ *(rsrp|latency|packetLoss|terrestrialRSRP|terrestrialLatency|terrestrialPacketLoss) *(<=|>=|<|>) *[-+]?([0-9]+([.][0-9]+)?|[.][0-9]+)([eE][-+]?[0-9]+)? *$` //nolint:lll // one line to stay byte-identical to the CRD CEL rule
+const triggerCELRegex = `^ *(rsrp|latency|packetLoss|terrestrialRSRP|terrestrialLatency|terrestrialPacketLoss) *(<=|>=|<|>) *[-+]?([0-9]{1,10}([.][0-9]{1,10})?|[.][0-9]{1,10})([eE][-+]?[0-9]{1,2})? *$` //nolint:lll // one line to stay byte-identical to the CRD CEL rule
 
 func TestTriggerCELRegexAgreesWithParseTrigger(t *testing.T) {
 	re := regexp.MustCompile(triggerCELRegex)
@@ -37,11 +37,13 @@ func TestTriggerCELRegexAgreesWithParseTrigger(t *testing.T) {
 		"rsrp < -120", "latency > 200", "packetLoss > 5", "rsrp <= -100",
 		"terrestrialRSRP >= -90", "terrestrialLatency < 50", "terrestrialPacketLoss > 0.5",
 		"rsrp<-120", "  latency  >  200  ", "packetLoss > 5.25", "rsrp > +3",
-		"latency >= 1e2", "packetLoss < .5",
-		// invalid — both must reject
+		"latency >= 1e2", "packetLoss < .5", "latency > 1e99",
+		// invalid — both must reject. `1e9999` is the C4 case: the prior regex accepted it
+		// while ParseTrigger rejects it as +Inf (a latent disagreement); the bounded
+		// exponent now rejects it at admission too, so both agree.
 		"", "rsrp", "rsrp < ", "< 5", "rsrp ! 5", "rsrp == 5", "rsrp <> 5",
 		"unknownMetric < 5", "RSRP < -120", "rsrp < abc", "rsrp < -120 extra",
-		"rsrp < 5 < 3", "latency > 200ms", "rsrp < NaN", "rsrp < Inf",
+		"rsrp < 5 < 3", "latency > 200ms", "rsrp < NaN", "rsrp < Inf", "latency > 1e9999",
 	}
 	for _, s := range corpus {
 		reMatch := re.MatchString(s)
@@ -66,10 +68,12 @@ func TestTriggerCELRegexKnownDivergences(t *testing.T) {
 	// Each is accepted by strconv.ParseFloat / strings.TrimSpace (so ParseTrigger
 	// accepts) but rejected by the ASCII-only, plain-decimal admission regex.
 	divergent := []string{
-		"rsrp < 0x1p4",     // 1. hex float
-		"rsrp < 5.",        // 2. trailing-dot float
-		"latency > 1_000",  // 3. underscore digit grouping
-		"rsrp <\u00a0-120", // 4. non-ASCII whitespace (NBSP) where a space is expected
+		"rsrp < 0x1p4",       // 1. hex float
+		"rsrp < 5.",          // 2. trailing-dot float
+		"latency > 1_000",    // 3. underscore digit grouping
+		"rsrp <\u00a0-120",   // 4. non-ASCII whitespace (NBSP) where a space is expected
+		"latency > 1e100",    // 5. finite but exponent > 2 digits \u2014 bounded to keep the value finite
+		"rsrp < 12345678901", // 6. finite but > 10 integer digits \u2014 bounded to keep the value finite
 	}
 	for _, s := range divergent {
 		if re.MatchString(s) {
