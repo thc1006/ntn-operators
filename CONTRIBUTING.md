@@ -5,7 +5,7 @@ Thank you for your interest in contributing!
 ## Development Setup
 
 ```bash
-# Prerequisites: Go 1.25+, kubebuilder v4.13+, kubectl, Kind
+# Prerequisites: Go 1.26.5+, kubebuilder v4.13+, kubectl, Kind
 
 # Build & Test
 make generate    # Generate DeepCopy methods

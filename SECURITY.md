@@ -24,7 +24,8 @@ Include:
 
 | Version | Supported |
 |---------|-----------|
-| 0.1.x   | Yes       |
+| 0.7.x   | Yes       |
+| < 0.7.0 | No        |
 
 ## Security Measures
 
@@ -33,7 +34,7 @@ This project implements the following security practices:
 - **SSRF prevention**: All outbound HTTP clients validate resolved IPs against private ranges at the TCP dial level, including redirect targets (see `pkg/netutil/safeclient.go`)
 - **Namespace isolation**: Controllers enforce that provider operations stay within the CR's own namespace
 - **CEL CRD validation**: Server-side validation rules (URL scheme, lat/lon range, credential requirements) without webhook infrastructure
-- **Secret management**: SpaceTrack credentials read from K8s Secrets with scoped RBAC (`secrets:get;list;watch`)
+- **Secret management**: SpaceTrack credentials read from K8s Secrets with a minimal RBAC of `secrets:get` only — an uncached, per-request read. The operator holds no `list` or `watch` on Secrets.
 - **Read-only filesystem**: Container runs with `readOnlyRootFilesystem: true`
 - **Non-root execution**: Container runs as UID 65532 (distroless nonroot)
 - **Minimal capabilities**: All Linux capabilities are dropped
