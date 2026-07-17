@@ -3583,8 +3583,10 @@ this state was propagated FROM, in Unix milliseconds. Unlike epochUnixMs (the
 future propagation target), this is the element-set age used by the runtime-push
 consumer to refuse pushing THIS satellite's drifting elements — a per-satellite
 freshness bound, so a stale sibling in the same SatelliteEphemeris does not block
-this one. 0 means the source epoch could not be parsed (treated as unknown, not
-stale).<br/>
+this one. The producer no longer emits a state whose source epoch it could not parse
+(those satellites are skipped and surfaced via the SourceEpochRejected condition), so a 0
+here is the zero value of an omitted field; the consumer treats a 0 epoch as the 1970
+instant subject to the normal staleness bound, not as "unknown" or fresh.<br/>
           <br/>
             <i>Format</i>: int64<br/>
         </td>
