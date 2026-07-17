@@ -528,6 +528,56 @@ func fetchRetryDelay(fetchErr error, effectiveInterval time.Duration, failures i
 	}
 }
 
+// fetchErrClass buckets a failed fetch by its retry STRATEGY (mirrors fetchRetryDelay's switch).
+// It exists so applyFetchBackoff can tell when the retry EPISODE crossed a class boundary: only
+// the transient branch of fetchRetryDelay consumes the consecutive-failure count, so a run of one
+// class must not carry its count into the next.
+type fetchErrClass int
+
+const (
+	fetchErrTransient   fetchErrClass = iota // network/DNS/5xx/timeout/parse: the 1m,2m,4m… ramp
+	fetchErrRateLimited                      // HTTP 403 / Retry-After: honor the source's cadence
+	fetchErrAuth                             // bad credentials: bounded re-probe (maxAuthRetryBackoff)
+)
+
+// classifyFetchErrClass buckets err; a nil err classifies as transient (the zero value), which is
+// harmless because applyFetchBackoff is only ever called with a non-nil fetch error.
+func classifyFetchErrClass(err error) fetchErrClass {
+	switch {
+	case errors.Is(err, ephemeris.ErrRateLimited):
+		return fetchErrRateLimited
+	case errors.Is(err, ephemeris.ErrAuthFailed):
+		return fetchErrAuth
+	default:
+		return fetchErrTransient
+	}
+}
+
+// applyFetchBackoff advances the cache entry's consecutive-failure ramp after a failed fetch and
+// arms nextFetchAttempt. It RESTARTS the ramp (fetchFailures→0 before the ++) when the retry
+// EPISODE changes, so an accumulated count never leaks into a delay that was never meant to see it:
+//
+//   - New error class. Only fetchRetryDelay's transient branch reads fetchFailures; the auth and
+//     rate-limit branches return a fixed/interval-derived delay and IGNORE it. So without this a
+//     run of auth failures (each incrementing the count) would slam the FIRST following transient
+//     failure straight to 1m<<N — up to the whole refresh interval (24h) — instead of the 1-minute
+//     ramp base, stranding fetch recovery long after the transient blip cleared (#236).
+//   - New retryKey. A spec/interval edit is a fresh episode; cacheServe already bypasses the old
+//     backoff on a retryKey change, and the count must reset with it so the new episode's first
+//     transient failure also starts at the ramp base rather than inheriting the old episode's N.
+//
+// now is a parameter (production passes time.Now(), sampled AFTER the fetch returned so a 30s
+// client timeout does not eat the first 1-minute window) so the ramp is deterministically testable.
+func applyFetchBackoff(c *cachedFetch, fetchErr error, newRetryKey string, effectiveInterval time.Duration, now time.Time) {
+	if newRetryKey != c.retryKey || classifyFetchErrClass(fetchErr) != classifyFetchErrClass(c.lastFetchErr) {
+		c.fetchFailures = 0
+	}
+	c.fetchFailures++
+	c.nextFetchAttempt = now.Add(fetchRetryDelay(fetchErr, effectiveInterval, c.fetchFailures))
+	c.lastFetchErr = fetchErr
+	c.retryKey = newRetryKey
+}
+
 // cacheServeReason says WHY a reconcile is being served from cache without contacting the source.
 type cacheServeReason int
 
@@ -782,20 +832,34 @@ func (r *SatelliteEphemerisReconciler) propagateStates(
 	omms := ephemeris.FilterOMMs(result.OMMs, norad)
 	epochMs := epoch.UnixMilli()
 
-	// I-17: count tracked element sets whose OWN epoch is stale — a data property
-	// independent of whether SGP4 propagation then succeeds.
+	// Count element-set epoch health across the ENTIRE tracked set — independent of SGP4 success
+	// AND of the maxPropagatedStates cap in the propagation loop below. The cap-bounded loop reaches
+	// only the first `cap` propagatable satellites, yet these counts are reported against the full
+	// len(omms) denominator; counting here keeps numerator and denominator consistent so a >cap
+	// constellation does not silently drop the epoch-health accounting for its tail (#236, I-17):
+	//   - staleEpochs: parseable + plausible but older than maxEpochAge — a drifting feed, still
+	//     propagated and merely surfaced (EphemerisEpochStale); the consumer owns the delivery gate.
+	//   - unparseable / futureEpochs: refused BEFORE SGP4 (reportSourceEpochRejected). The
+	//     propagation loop below repeats these two checks only to SKIP such satellites, not to count.
 	now := epoch.Add(-propagationEpochLead) // epoch is now+lead; recover ~now
-	staleEpochs := 0
+	staleEpochs, unparseableEpochs, futureEpochs := 0, 0, 0
 	for i := range omms {
-		if t, ok := parseOMMEpoch(omms[i].EpochStr); ok && now.Sub(t) > maxEpochAge {
+		t, ok := parseOMMEpoch(omms[i].EpochStr)
+		if !ok {
+			unparseableEpochs++
+			continue
+		}
+		if err := sourceEpochPlausible(now, t); err != nil {
+			futureEpochs++
+			continue
+		}
+		if now.Sub(t) > maxEpochAge {
 			staleEpochs++
 		}
 	}
 
 	states := make([]ntnv1alpha1.PropagatedState, 0, min(len(omms), maxPropagatedStates))
 	skippedByCap := 0
-	unparseableEpochs := 0 // refused BEFORE SGP4: OMM EPOCH could not be parsed
-	futureEpochs := 0      // refused BEFORE SGP4: OMM EPOCH implausibly far in the future
 	for i := range omms {
 		if len(states) >= maxPropagatedStates {
 			// The cap is reached; the remaining OMMs are NOT attempted. This is the
@@ -822,7 +886,7 @@ func (r *SatelliteEphemerisReconciler) propagateStates(
 		// same epoch, so an element set we cannot parse fails PropagateToECEF below anyway.
 		t, ok := parseOMMEpoch(omms[i].EpochStr)
 		if !ok {
-			unparseableEpochs++
+			// Already counted in the full-set pre-pass above; here we only SKIP it from propagation.
 			logf.FromContext(ctx).Info("skipping satellite: source element epoch is unparseable",
 				"norad", omms[i].NoradCatID, "epochStr", omms[i].EpochStr)
 			continue
@@ -832,7 +896,7 @@ func (r *SatelliteEphemerisReconciler) propagateStates(
 		// observable; the consumer owns the delivery gate (#200-C4). Rejecting staleness here
 		// would collapse a precise "EphemerisStale" diagnosis into a bare "PayloadMissing".
 		if err := sourceEpochPlausible(now, t); err != nil {
-			futureEpochs++
+			// Already counted in the full-set pre-pass above; here we only SKIP it from propagation.
 			logf.FromContext(ctx).Info("skipping satellite: implausible source element epoch",
 				"norad", omms[i].NoradCatID, "sourceEpoch", t.UTC(), "err", err.Error())
 			continue
@@ -1323,13 +1387,11 @@ func (r *SatelliteEphemerisReconciler) obtainOMMs(
 			// 3-minute propagation cadence and keep the pushed epoch alive for the whole
 			// outage. (Before this, the serve-cache cycle requeued at the 2–24h fetch backoff,
 			// so the epoch expired ~5 minutes in and SIB19 went stale for the rest of it.)
-			c.fetchFailures++
-			// Measure the backoff from when the failure ACTUALLY happened, not from the `now`
-			// captured before the fetch: a 30s HTTP timeout (the client's timeout is exactly
-			// 30s) would otherwise eat 30s of the first 1-minute transient backoff.
-			c.nextFetchAttempt = time.Now().Add(fetchRetryDelay(fetchErr, effectiveInterval, c.fetchFailures))
-			c.lastFetchErr = fetchErr
-			c.retryKey = retryInputKey(eph.Spec, effectiveInterval)
+			// Advance the fetch-retry ramp and arm nextFetchAttempt. applyFetchBackoff restarts
+			// the ramp when the retry episode changed (new error class or new retryKey), and takes
+			// now = time.Now() sampled HERE — after the fetch returned — so a 30s client timeout
+			// does not eat the first 1-minute transient window (#236, extends #221 review finding 2).
+			applyFetchBackoff(&c, fetchErr, retryInputKey(eph.Spec, effectiveInterval), effectiveInterval, time.Now())
 			r.ommCache.Store(req.NamespacedName, c)
 			log.Info("GP fetch failed; serving last cached OMMs for SIB19 continuity",
 				"err", fetchErr.Error(), "cacheAge", now.Sub(c.result.FetchedAt).String(),

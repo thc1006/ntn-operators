@@ -90,6 +90,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   propagation, so the epoch reflects the true propagation instant (the fetch/pass-prediction paths
   keep the reconcile-start `now`, which is correct for their reconcile-relative windows) (#235,
   part of #232).
+- **GP-fetch retry ramp restarts on an episode change instead of leaking its count across error
+  classes.** The consecutive-failure counter is shared, but only the transient backoff branch
+  consumes it — a run of auth (or rate-limit) failures used to leave the count high and slam the
+  first following *transient* failure straight past the 1-minute ramp base (up to the whole refresh
+  interval), stranding fetch recovery long after the blip cleared. The ramp now restarts whenever
+  the retry episode changes — a new error class, or a new `retryKey` (a spec/interval edit) — while
+  a genuine same-episode transient run still ramps 1m, 2m, 4m … (#236, part of #232).
+- **Element-set epoch health is counted across the whole tracked set, not just the pre-cap subset.**
+  Unparseable / implausibly-future OMM EPOCHs were counted only inside the `maxPropagatedStates`
+  (128) propagation loop, yet the `SourceEpochRejected` condition reports them against the full
+  tracked count — so a larger-than-cap constellation under-reported rejections sitting beyond the
+  cap. The counting now runs in a full-set pre-pass, keeping numerator and denominator consistent
+  (#236, part of #232).
 - **Pass windows are computed from the current time, not the last fetch time.** On a cached
   re-propagation the fetch timestamp could be up to 24h in the past, which started AOS/LOS
   windows stale; they now start at reconcile time (#200-C3).
