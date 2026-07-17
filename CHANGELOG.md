@@ -94,6 +94,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   valid — only the leading `-` was removed). The bound is on the parsed **float64** value
   (the pass pipeline is float64), so a literal within ~half a ULP above 90 rounds to 90 and
   is accepted; `NaN`/`Inf` are rejected (#201-P3).
+- **NTNSlice anti-flap minimum-dwell survives a controller restart or leader-election handoff.**
+  The post-switchback min-terrestrial-dwell clock (`LastSwitchback`) was in-memory only, so a
+  handoff reset it to "dwell satisfied" and a re-degradation within the dwell window could fail
+  over earlier than intended. It is now mirrored to a new `NTNSlice.status.lastSwitchbackTime`
+  and **monotonically merged** with the in-memory clock: status is adopted when it is newer (a
+  cold cache after restart), and repaired when it is behind. The in-memory clock is committed only
+  **after** the durable status write succeeds (the same "commit side-effects once status is
+  durable" discipline as the failover counter/event), so a switchback whose write fails cannot
+  leave a speculative timestamp that a later pass-ended forced switchback could launder into a
+  bogus dwell. A future-dated status value (a backward node-clock step or an external edit; the
+  controller only ever writes values `<= now`) is **cleared durably** when the reload observes it,
+  not merely ignored, so it cannot silently become valid history once the wall clock passes it and
+  block a legitimate failover with a ghost dwell. The in-memory anti-flap cache is also keyed by
+  object **UID** as well as name, so a same-name NTNSlice recreated with a new UID (a delete+create
+  the workqueue coalesced into one reconcile, hiding the intervening NotFound) does not inherit the
+  deleted object's counters or dwell clock. The other two
+  flap clocks stay in-memory (their loss only delays a switch, never advances one). This matters
+  more now that rolling updates hand leadership over routinely. **Scope:** durability holds once
+  this version has recorded at least one quality-driven switchback; a switchback recorded only by
+  an older (pre-field) version is not recoverable, and min-dwell accuracy across a handoff assumes
+  the controller nodes have synchronised clocks (#220 H1).
 
 ### Fixed
 
@@ -234,6 +255,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   field validation rejects them). The `runtimeEphemerisPushMarker` comment no
   longer claims "NR max 240 s" (the `ntnUlSyncValidityDur` enum caps at 900 s)
   or that the re-push cadence is always under `ntn-UlSyncValidityDur`.
+- **The `failoverPolicy.triggers` admission rule rejects non-finite / overflowing values.** The
+  value regex now bounds the digit counts (≤10 integer, ≤10 fraction, optional ≤2-digit
+  exponent), so a form like `latency > 1e9999` — which parses to `+Inf` — is rejected at
+  admission instead of only at runtime (`ParseTrigger` already fail-closes `NaN`/`Inf`). The
+  admission rule now truly enforces the "finite number" its message promises and stays in
+  lockstep with the runtime parse (the `trigger_cel_test` agreement corpus now covers `1e9999`)
+  (#220 C4).
 
 ### Upgrade notes
 
@@ -272,6 +300,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   check refuses to use the value, clears `status.nextPassWindows`, and reports
   `PassesPredicted=False`/`PredictionFailed`. Correct any out-of-range `minElevation` before
   upgrading (the default "10" is unaffected).
+- **`failoverPolicy.triggers` validation is tightened to bounded-magnitude numbers.** The trigger
+  value now admits at most 10 integer + 10 fraction digits and an optional 2-digit exponent, so
+  overflowing forms like `1e9999` are rejected at admission. Realistic RSRP/latency/packet-loss
+  thresholds are unaffected. The CEL rule is scoped to the whole `failoverPolicy` object, so with
+  CRD ratcheting (min K8s 1.31) an existing NTNSlice carrying such an exotic value is re-validated
+  (and rejected) as soon as **any** part of `failoverPolicy` is edited — including
+  `switchbackDelay` — while edits outside `failoverPolicy` are ratcheted through. The runtime
+  already fail-closes the value regardless. Correct any such trigger before editing
+  `failoverPolicy`.
+- **`NTNSlice.status.lastSwitchbackTime` may be dropped on a downgrade.** A controller version
+  that predates this field does a full `/status` PUT with a Go struct that does not know the
+  field, so rolling the controller back can remove it. min-dwell durability is therefore not
+  guaranteed across a downgrade — the next quality-driven switchback on the (re-upgraded) new
+  version re-establishes it. Forward upgrades are unaffected.
 
 ## [0.7.0] - 2026-07-12
 

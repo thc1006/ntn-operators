@@ -157,10 +157,12 @@ spec:
                 x-kubernetes-validations:
                 - message: each failoverPolicy.trigger must be 'metric op value' where
                     metric is one of rsrp/latency/packetLoss/terrestrialRSRP/terrestrialLatency/terrestrialPacketLoss,
-                    op is one of < <= > >=, and value is a finite number (e.g. 'rsrp
-                    < -120')
+                    op is one of < <= > >=, and value is a finite decimal (up to 10
+                    integer and 10 fraction digits with an optional 2-digit exponent,
+                    e.g. 'rsrp < -120'); overflowing forms like '1e9999' are rejected
+                    here and, defensively, at runtime
                   rule: self.triggers.all(t, t.matches('^ *(rsrp|latency|packetLoss|terrestrialRSRP|terrestrialLatency|terrestrialPacketLoss)
-                    *(<=|>=|<|>) *[-+]?([0-9]+([.][0-9]+)?|[.][0-9]+)([eE][-+]?[0-9]+)?
+                    *(<=|>=|<|>) *[-+]?([0-9]{1,10}([.][0-9]{1,10})?|[.][0-9]{1,10})([eE][-+]?[0-9]{1,2})?
                     *$'))
               metricsSource:
                 description: |-
@@ -433,6 +435,16 @@ spec:
                 type: integer
               lastFailover:
                 description: lastFailover is the timestamp of the last failover event.
+                format: date-time
+                type: string
+              lastSwitchbackTime:
+                description: |-
+                  lastSwitchbackTime is when the slice last switched back to terrestrial from an
+                  available satellite (a quality-driven hand-back). It is persisted so the anti-flap
+                  minimum-terrestrial-dwell survives a controller restart or leader-election handoff:
+                  the in-memory flap clock resets on handoff, and without this a re-degradation within
+                  the dwell window could switch to satellite earlier than the dwell intended. The other
+                  flap clocks stay in-memory (losing them only delays a switch, never advances one).
                 format: date-time
                 type: string
               sessionCount:

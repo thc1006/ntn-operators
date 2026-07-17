@@ -768,6 +768,10 @@ func (in *NTNSliceStatus) DeepCopyInto(out *NTNSliceStatus) {
 		in, out := &in.LastFailover, &out.LastFailover
 		*out = (*in).DeepCopy()
 	}
+	if in.LastSwitchbackTime != nil {
+		in, out := &in.LastSwitchbackTime, &out.LastSwitchbackTime
+		*out = (*in).DeepCopy()
+	}
 	if in.Conditions != nil {
 		in, out := &in.Conditions, &out.Conditions
 		*out = make([]v1.Condition, len(*in))

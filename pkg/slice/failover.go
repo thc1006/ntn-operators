@@ -613,15 +613,17 @@ type AntiFlapConfig struct {
 	MinTerrestrialDwell time.Duration
 }
 
-// AntiFlapState is the per-slice, in-memory flap-suppression state. Losing it (a
-// controller restart or leader-election handoff) is MOSTLY safe: a reset re-requires N
-// consecutive confirmations and restarts the recovery clock, both of which only DELAY a
-// switch. The ONE exception is LastSwitchback: losing it drops the post-switchback
-// min-dwell, so a failover that dwell would have delayed can happen immediately — a reset
-// can ADVANCE (never fabricate) a failover on that single axis. This is an accepted
-// trade-off: a restart is rare and one early re-failover is bounded; making dwell durable
-// would require persisting LastSwitchback to status (tracked, deferred). The other two
-// clocks bias a restart toward holding, never toward a spurious flap.
+// AntiFlapState is the per-slice flap-suppression state. Two of its clocks are held only
+// in memory; losing them on a controller restart or leader-election handoff is safe because
+// a reset re-requires N consecutive confirmations (ConsecutiveDegraded) and restarts the
+// recovery clock (RecoveryObservedAt) — both of which only DELAY a switch, never advance one.
+// The ONE clock whose loss ADVANCES a switch is LastSwitchback: losing it drops the
+// post-switchback min-dwell, so a re-degradation within the dwell window could fail over
+// earlier than the dwell intended. That axis is therefore made durable — LastSwitchback is
+// mirrored to NTNSlice.status.lastSwitchbackTime by the controller and reloaded when the
+// in-memory clock is absent (a cold cache after restart), so min-dwell survives a handoff.
+// This matters more now that rolling updates hand leadership over routinely; the other two
+// clocks are intentionally NOT persisted (their loss only biases toward holding).
 type AntiFlapState struct {
 	// ConsecutiveDegraded counts consecutive reliable samples on which the
 	// terrestrial triggers fired. Reset to 0 by any healthy/unreliable sample.

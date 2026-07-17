@@ -176,7 +176,7 @@ type SatellitePathSpec struct {
 // floats, trailing-dot/underscore numbers, non-ASCII spaces) never used for
 // thresholds — the divergence test in pkg/slice enumerates them. maxItems=10
 // + maxLength keep the CEL cost within budget.
-// +kubebuilder:validation:XValidation:rule="self.triggers.all(t, t.matches('^ *(rsrp|latency|packetLoss|terrestrialRSRP|terrestrialLatency|terrestrialPacketLoss) *(<=|>=|<|>) *[-+]?([0-9]+([.][0-9]+)?|[.][0-9]+)([eE][-+]?[0-9]+)? *$'))",message="each failoverPolicy.trigger must be 'metric op value' where metric is one of rsrp/latency/packetLoss/terrestrialRSRP/terrestrialLatency/terrestrialPacketLoss, op is one of < <= > >=, and value is a finite number (e.g. 'rsrp < -120')"
+// +kubebuilder:validation:XValidation:rule="self.triggers.all(t, t.matches('^ *(rsrp|latency|packetLoss|terrestrialRSRP|terrestrialLatency|terrestrialPacketLoss) *(<=|>=|<|>) *[-+]?([0-9]{1,10}([.][0-9]{1,10})?|[.][0-9]{1,10})([eE][-+]?[0-9]{1,2})? *$'))",message="each failoverPolicy.trigger must be 'metric op value' where metric is one of rsrp/latency/packetLoss/terrestrialRSRP/terrestrialLatency/terrestrialPacketLoss, op is one of < <= > >=, and value is a finite decimal (up to 10 integer and 10 fraction digits with an optional 2-digit exponent, e.g. 'rsrp < -120'); overflowing forms like '1e9999' are rejected here and, defensively, at runtime"
 type FailoverPolicy struct {
 	// triggers defines conditions that initiate failover (OR logic).
 	// Format: "metric operator value" (e.g., "rsrp < -120").
@@ -289,6 +289,15 @@ type NTNSliceStatus struct {
 	// lastFailover is the timestamp of the last failover event.
 	// +optional
 	LastFailover *metav1.Time `json:"lastFailover,omitempty"`
+
+	// lastSwitchbackTime is when the slice last switched back to terrestrial from an
+	// available satellite (a quality-driven hand-back). It is persisted so the anti-flap
+	// minimum-terrestrial-dwell survives a controller restart or leader-election handoff:
+	// the in-memory flap clock resets on handoff, and without this a re-degradation within
+	// the dwell window could switch to satellite earlier than the dwell intended. The other
+	// flap clocks stay in-memory (losing them only delays a switch, never advances one).
+	// +optional
+	LastSwitchbackTime *metav1.Time `json:"lastSwitchbackTime,omitempty"`
 
 	// failoverCount is the total number of failover events since creation.
 	// +optional

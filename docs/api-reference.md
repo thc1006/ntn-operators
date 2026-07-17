@@ -2315,7 +2315,7 @@ with terrestrial-satellite failover policy.
         <td>
           failoverPolicy defines when and how to switch between paths.<br/>
           <br/>
-            <i>Validations</i>:<li>self.triggers.all(t, t.matches('^ *(rsrp|latency|packetLoss|terrestrialRSRP|terrestrialLatency|terrestrialPacketLoss) *(<=|>=|<|>) *[-+]?([0-9]+([.][0-9]+)?|[.][0-9]+)([eE][-+]?[0-9]+)? *$')): each failoverPolicy.trigger must be 'metric op value' where metric is one of rsrp/latency/packetLoss/terrestrialRSRP/terrestrialLatency/terrestrialPacketLoss, op is one of < <= > >=, and value is a finite number (e.g. 'rsrp < -120')</li>
+            <i>Validations</i>:<li>self.triggers.all(t, t.matches('^ *(rsrp|latency|packetLoss|terrestrialRSRP|terrestrialLatency|terrestrialPacketLoss) *(<=|>=|<|>) *[-+]?([0-9]{1,10}([.][0-9]{1,10})?|[.][0-9]{1,10})([eE][-+]?[0-9]{1,2})? *$')): each failoverPolicy.trigger must be 'metric op value' where metric is one of rsrp/latency/packetLoss/terrestrialRSRP/terrestrialLatency/terrestrialPacketLoss, op is one of < <= > >=, and value is a finite decimal (up to 10 integer and 10 fraction digits with an optional 2-digit exponent, e.g. 'rsrp < -120'); overflowing forms like '1e9999' are rejected here and, defensively, at runtime</li>
         </td>
         <td>true</td>
       </tr><tr>
@@ -2892,6 +2892,20 @@ NTNSliceStatus defines the observed state of NTNSlice.
         <td>string</td>
         <td>
           lastFailover is the timestamp of the last failover event.<br/>
+          <br/>
+            <i>Format</i>: date-time<br/>
+        </td>
+        <td>false</td>
+      </tr><tr>
+        <td><b>lastSwitchbackTime</b></td>
+        <td>string</td>
+        <td>
+          lastSwitchbackTime is when the slice last switched back to terrestrial from an
+available satellite (a quality-driven hand-back). It is persisted so the anti-flap
+minimum-terrestrial-dwell survives a controller restart or leader-election handoff:
+the in-memory flap clock resets on handoff, and without this a re-degradation within
+the dwell window could switch to satellite earlier than the dwell intended. The other
+flap clocks stay in-memory (losing them only delays a switch, never advances one).<br/>
           <br/>
             <i>Format</i>: date-time<br/>
         </td>
