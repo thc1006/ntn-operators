@@ -68,12 +68,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`passPrediction.horizon` is bounded and pass prediction is cancellable.** Pass prediction
   sweeps the whole horizon for every satellite × ground station, so an unbounded `horizon` could
   stall the reconcile (and, transitively, delay the runtime-push epoch). The horizon is now
-  clamped to a 7-day maximum at reconcile time (clamp, not reject — non-breaking; `MaxPassWindows`
-  already caps the stored output). That clamp bounds the per-reconcile compute. Separately,
-  `PredictPasses` now honours context cancellation between work items, so a long pass prediction
-  aborts promptly when the manager's context is cancelled (controller shutdown / leader loss)
-  rather than blocking graceful shutdown — the operator wires no per-reconcile timeout, so this is
-  a shutdown-responsiveness win, not a per-reconcile deadline (#233, part of #232).
+  clamped to a 7-day maximum at reconcile time; the clamp bounds the horizon dimension of one work
+  item's cost (total reconcile cost still scales with the selected satellites × ground stations,
+  whose stored output `MaxPassWindows` caps). A NEGATIVE horizon is now rejected as a config error
+  rather than silently defaulting to 24h. `PredictPasses` also takes a `context.Context` and honours
+  cancellation BETWEEN work items: a cancelled or timed-out call stops dispatching new items and
+  returns `ctx.Err()`, though an item already running finishes because the upstream
+  `sgp4.GeneratePasses` sweep takes no context — at the 7-day clamp a single item is ~20ms
+  (`BenchmarkPredictPasses_7d_*`), so a cancelled call returns within roughly that bound. The
+  reconcile treats such a cancellation as control flow (requeue), not a `PredictionFailed` error.
+  ⚠ `ephemeris.PredictPasses` now takes `ctx` as its first argument (source-breaking for any
+  external Go caller) (#233, part of #232).
 - **`/readyz` now gates on informer cache-sync (still leadership-agnostic).** It was
   `healthz.Ping`, which reports Ready as soon as the process serves — but controller-runtime
   starts the health server *before* the caches sync, so a broken new replica (RBAC, CRD
@@ -212,9 +217,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrade notes
 
-- **`passPrediction.horizon` is clamped to 7 days.** A larger value is silently clamped (logged,
-  not rejected), so a spec relying on pass windows beyond 7 days will see them truncated. Realistic
-  contact-planning horizons are unaffected (`MaxPassWindows` already capped the output at 500).
+- **`passPrediction.horizon`: negative is rejected, over-7-days is clamped.** A horizon > 7 days is
+  clamped to 7 days (surfaced on the `PassesPredicted` condition message, not silently), so a spec
+  relying on windows beyond 7 days will see them truncated (`MaxPassWindows` already capped the
+  output at 500). A NEGATIVE horizon is now rejected with a config error instead of silently
+  defaulting to 24 hours. `ephemeris.PredictPasses` also gains a leading `context.Context` argument
+  (source-breaking for external Go callers).
 - **`NewSafeHTTPClient` no longer honors `HTTP_PROXY`/`HTTPS_PROXY`.** The GP fetch, NTNSlice
   metrics reader, and ground-station probe reach in-cluster or public endpoints directly; a
   deployment that previously relied on an egress proxy for those must expose the endpoints
