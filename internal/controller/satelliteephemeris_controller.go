@@ -346,7 +346,13 @@ func (r *SatelliteEphemerisReconciler) Reconcile(ctx context.Context, req ctrl.R
 	ntnmetrics.GPDeepSpaceRejectedCount.With(prometheus.Labels{"namespace": eph.Namespace, "ephemeris": eph.Name}).Set(float64(len(trackedDeepSpace)))
 
 	// Step 7: Compute pass predictions if configured; clear stale data if disabled.
-	passNote, passFailNote := r.handlePassPrediction(ctx, eph, result, now)
+	passNote, passFailNote, passErr := r.handlePassPrediction(ctx, eph, result, now)
+	if passErr != nil {
+		// Context cancellation (shutdown / leader loss / per-reconcile timeout) from pass
+		// prediction: stop here and let controller-runtime requeue, rather than clearing status
+		// or running the remaining propagation and status write on a cancelled context.
+		return ctrl.Result{}, passErr
+	}
 
 	// Step 7b: Propagate tracked satellites to a NEAR-now epoch for the runtime
 	// ephemeris push (#176). The epoch is only a small lead ahead of now — enough
@@ -450,6 +456,30 @@ const maxPropagatedStates = 128
 // LEO). The push happens on the watch-triggered reconcile right after this
 // propagation, so the epoch is fresh at push time.
 const propagationEpochLead = 5 * time.Minute
+
+// maxPassHorizon bounds passPrediction.horizon (clamped, not rejected). Pass prediction sweeps
+// the whole horizon per satellite × ground station, so an unbounded horizon can stall the
+// reconcile; 7 days is generous for contact-opportunity planning (LEO passes recur ~every 90 min
+// and MaxPassWindows caps the stored output at 500 regardless).
+const maxPassHorizon = 7 * 24 * time.Hour
+
+// effectivePassHorizon resolves the pass-prediction horizon: the 24h default when unset (0), a
+// rejection for a negative value (a config error, not "unset"), else the spec value clamped to
+// maxPassHorizon. clamped reports whether the ceiling was applied so the caller can surface it.
+func effectivePassHorizon(raw time.Duration) (horizon time.Duration, clamped bool, err error) {
+	switch {
+	case raw == 0:
+		return 24 * time.Hour, false, nil
+	case raw < 0:
+		// A negative horizon is a configuration error, not "unset". Reject it rather than silently
+		// defaulting to 24h, which would hide the misconfiguration and fail open.
+		return 0, false, fmt.Errorf("passPrediction.horizon must be positive, got %s", raw)
+	case raw > maxPassHorizon:
+		return maxPassHorizon, true, nil
+	default:
+		return raw, false, nil
+	}
+}
 
 // propagationRefreshInterval is how often the orbit is re-propagated (from cached
 // OMMs, WITHOUT a GP fetch) to keep the runtime-push epoch fresh between GP
@@ -1067,15 +1097,23 @@ func (r *SatelliteEphemerisReconciler) reportOrbitRegime(
 // the caller emits them at most once per change after the status write persists.
 func (r *SatelliteEphemerisReconciler) handlePassPrediction(
 	ctx context.Context, eph *ntnv1alpha1.SatelliteEphemeris, result ephemeris.GPFetchResult, now time.Time,
-) (passNote, passFailNote string) {
+) (passNote, passFailNote string, err error) {
 	if eph.Spec.PassPrediction == nil || len(eph.Spec.PassPrediction.GroundStations) == 0 {
 		// Pass prediction not configured; clear stale pass windows and condition.
 		eph.Status.NextPassWindows = nil
 		meta.RemoveStatusCondition(&eph.Status.Conditions, ntnv1alpha1.ConditionPassesPredicted)
-		return "", ""
+		return "", "", nil
 	}
-	note, err := r.predictPasses(ctx, eph, result, now)
+	var note string
+	note, err = r.predictPasses(ctx, eph, result, now)
 	if err != nil {
+		// Context cancellation is control flow (controller shutdown, leader loss, or a per-reconcile
+		// timeout), NOT a pass-prediction failure. Propagate it to Reconcile — which requeues —
+		// without clearing pass windows, recording a PredictionFailed condition/event, or doing any
+		// further work.
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return "", "", err
+		}
 		logf.FromContext(ctx).Error(err, "pass prediction failed")
 		eph.Status.NextPassWindows = nil // clear stale pass data
 		// Gate on the failure EPISODE (Status/Reason/Generation, ignoring the varying
@@ -1093,11 +1131,11 @@ func (r *SatelliteEphemerisReconciler) handlePassPrediction(
 			ObservedGeneration: eph.Generation,
 		})
 		if failEpisode {
-			return "", err.Error()
+			return "", err.Error(), nil
 		}
-		return "", ""
+		return "", "", nil
 	}
-	return note, ""
+	return note, "", nil
 }
 
 // predictPasses resolves ground stations and computes pass windows. It sets the
@@ -1150,10 +1188,13 @@ func (r *SatelliteEphemerisReconciler) predictPasses(
 		return "", fmt.Errorf("invalid minElevation: %w", err)
 	}
 
-	// Parse horizon.
-	horizon := pp.Horizon.Duration
-	if horizon == 0 {
-		horizon = 24 * time.Hour
+	// Resolve the effective horizon (default when unset, clamped to maxPassHorizon otherwise):
+	// an unbounded horizon makes the O(horizon × satellites × ground stations) sweep — and thus
+	// the reconcile — arbitrarily long. Clamp rather than reject so it stays non-breaking and
+	// ratcheting-safe; MaxPassWindows already caps the stored output.
+	horizon, clamped, err := effectivePassHorizon(pp.Horizon.Duration)
+	if err != nil {
+		return "", err
 	}
 
 	// Build NORAD filter from SatelliteSelector.
@@ -1165,7 +1206,7 @@ func (r *SatelliteEphemerisReconciler) predictPasses(
 	// Run pass prediction from the CURRENT time, not fetchResult.FetchedAt: pass windows
 	// are "upcoming contact opportunities", and on a cached serve FetchedAt can be up to
 	// effectiveInterval (2–24h) in the past, which would start the window stale (#200-C3).
-	passes, err := ephemeris.PredictPasses(fetchResult.OMMs, stations, minEl, horizon, noradFilter, now)
+	passes, err := ephemeris.PredictPasses(ctx, fetchResult.OMMs, stations, minEl, horizon, noradFilter, now)
 	if err != nil {
 		return "", fmt.Errorf("computing passes: %w", err)
 	}
@@ -1186,6 +1227,14 @@ func (r *SatelliteEphemerisReconciler) predictPasses(
 	log.Info("Pass prediction completed", "passCount", len(windows), "stationCount", len(stations))
 
 	msg := fmt.Sprintf("Computed %d passes over %d ground stations", len(windows), len(stations))
+	if clamped {
+		// Surface the horizon clamp on the durable PassesPredicted condition message (visible in
+		// status) instead of a per-reconcile log line, so an over-long horizon does not re-log on
+		// every ~3-minute re-propagation. The message still tracks the pass count, so it (and its
+		// event) can change when the count does — but the clamp suffix itself is stable and adds no
+		// extra churn.
+		msg += fmt.Sprintf("; passPrediction.horizon clamped to %s", maxPassHorizon)
+	}
 	changed := meta.SetStatusCondition(&eph.Status.Conditions, metav1.Condition{
 		Type:               ntnv1alpha1.ConditionPassesPredicted,
 		Status:             metav1.ConditionTrue,

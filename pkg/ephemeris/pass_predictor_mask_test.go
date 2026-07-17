@@ -17,6 +17,7 @@ limitations under the License.
 package ephemeris
 
 import (
+	"context"
 	"errors"
 	"testing"
 	"time"
@@ -151,7 +152,7 @@ func TestPredictPasses_MaskConformance(t *testing.T) {
 	start := time.Now().UTC()
 	horizon := 72 * time.Hour
 
-	masked, err := PredictPasses([]sgp4.OMM{omm}, []GroundStation{gs}, mask, horizon, nil, start)
+	masked, err := PredictPasses(context.Background(), []sgp4.OMM{omm}, []GroundStation{gs}, mask, horizon, nil, start)
 	if err != nil {
 		t.Fatalf("PredictPasses(mask=%.0f): %v", mask, err)
 	}
@@ -196,11 +197,11 @@ func TestPredictPasses_MaskWindowSubset(t *testing.T) {
 	start := time.Now().UTC()
 	horizon := 72 * time.Hour
 
-	full, err := PredictPasses([]sgp4.OMM{omm}, []GroundStation{gs}, 0, horizon, nil, start)
+	full, err := PredictPasses(context.Background(), []sgp4.OMM{omm}, []GroundStation{gs}, 0, horizon, nil, start)
 	if err != nil {
 		t.Fatalf("full: %v", err)
 	}
-	masked, err := PredictPasses([]sgp4.OMM{omm}, []GroundStation{gs}, mask, horizon, nil, start)
+	masked, err := PredictPasses(context.Background(), []sgp4.OMM{omm}, []GroundStation{gs}, mask, horizon, nil, start)
 	if err != nil {
 		t.Fatalf("masked: %v", err)
 	}

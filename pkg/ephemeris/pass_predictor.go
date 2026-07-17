@@ -17,6 +17,7 @@ limitations under the License.
 package ephemeris
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"sort"
@@ -56,7 +57,16 @@ type PassResult struct {
 // error (it does not silently degrade). It filters by minElevation, limits results to
 // MaxPassWindows, and uses concurrent workers.
 // The startTime parameter sets the prediction window start; pass time.Time{} to use time.Now().
+//
+// ctx cancellation is honoured BETWEEN work items (each item is one satellite × ground station over
+// the whole horizon): a cancelled or timed-out call stops dispatching new items and returns
+// ctx.Err(), but an item already running finishes, because the upstream sgp4.GeneratePasses sweep
+// takes no context. The caller MUST bound the horizon (see the reconcile's 7-day clamp) so a single
+// item stays small — at the 7-day clamp one item is ~20ms (BenchmarkPredictPasses_7d_*), so a
+// cancelled call returns within roughly that bound. This is coarse-grained, between-item, not
+// mid-sweep cancellation; finer granularity would need a context-aware GeneratePasses upstream.
 func PredictPasses(
+	ctx context.Context,
 	omms []sgp4.OMM,
 	stations []GroundStation,
 	minElevation float64,
@@ -117,7 +127,10 @@ func PredictPasses(
 	for range numWorkers {
 		wg.Go(func() {
 			for item := range workCh {
-				passes, err := predictSingle(item.omm, item.station, start, stop, minElevation)
+				if ctx.Err() != nil {
+					return // cancelled/timed-out: stop pulling new work items
+				}
+				passes, err := predictSingleFn(item.omm, item.station, start, stop, minElevation)
 				mu.Lock()
 				if err != nil && firstErr == nil {
 					firstErr = err
@@ -128,6 +141,12 @@ func PredictPasses(
 		})
 	}
 	wg.Wait()
+
+	// A cancelled/timed-out context takes precedence over partial results: the caller
+	// (reconcile) will requeue, and partial pass windows would falsely converge status.
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 
 	if firstErr != nil && len(allPasses) == 0 {
 		return nil, firstErr
@@ -206,6 +225,11 @@ func lessPass(a, b PassResult) bool {
 	}
 	return a.LOS.Before(b.LOS)
 }
+
+// predictSingleFn is the per-work-item predictor the worker pool calls. It is a package var (not a
+// direct call) so tests can substitute a counting/blocking implementation and prove that a cancelled
+// context stops the pool from dispatching further work items.
+var predictSingleFn = predictSingle
 
 // predictSingle computes pass windows for a single satellite over a single ground station.
 func predictSingle(

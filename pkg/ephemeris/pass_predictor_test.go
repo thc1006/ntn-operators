@@ -17,6 +17,7 @@ limitations under the License.
 package ephemeris
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -84,7 +85,7 @@ var montrealStation = GroundStation{
 }
 
 func TestPredictPasses_SingleSatellite(t *testing.T) {
-	passes, err := PredictPasses(
+	passes, err := PredictPasses(context.Background(),
 		[]sgp4.OMM{issOMM()},
 		[]GroundStation{montrealStation},
 		0, // all passes above horizon
@@ -115,7 +116,7 @@ func TestPredictPasses_SingleSatellite(t *testing.T) {
 }
 
 func TestPredictPasses_MinElevationFilter(t *testing.T) {
-	allPasses, err := PredictPasses(
+	allPasses, err := PredictPasses(context.Background(),
 		[]sgp4.OMM{issOMM()},
 		[]GroundStation{montrealStation},
 		0, // no filter
@@ -127,7 +128,7 @@ func TestPredictPasses_MinElevationFilter(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	filteredPasses, err := PredictPasses(
+	filteredPasses, err := PredictPasses(context.Background(),
 		[]sgp4.OMM{issOMM()},
 		[]GroundStation{montrealStation},
 		30, // high threshold
@@ -154,7 +155,7 @@ func TestPredictPasses_NoradFilter(t *testing.T) {
 	omms := []sgp4.OMM{issOMM(), onewebOMM()}
 
 	// Filter to ISS only.
-	passes, err := PredictPasses(
+	passes, err := PredictPasses(context.Background(),
 		omms,
 		[]GroundStation{montrealStation},
 		0,
@@ -174,7 +175,7 @@ func TestPredictPasses_NoradFilter(t *testing.T) {
 }
 
 func TestPredictPasses_MultipleStations(t *testing.T) {
-	passes, err := PredictPasses(
+	passes, err := PredictPasses(context.Background(),
 		[]sgp4.OMM{issOMM()},
 		[]GroundStation{montrealStation, taipeiStation},
 		0,
@@ -197,7 +198,8 @@ func TestPredictPasses_MultipleStations(t *testing.T) {
 
 func TestPredictPasses_EmptyInputs(t *testing.T) {
 	// No OMMs.
-	passes, err := PredictPasses(nil, []GroundStation{montrealStation}, 0, 24*time.Hour, nil, time.Time{})
+	passes, err := PredictPasses(context.Background(),
+		nil, []GroundStation{montrealStation}, 0, 24*time.Hour, nil, time.Time{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -206,7 +208,7 @@ func TestPredictPasses_EmptyInputs(t *testing.T) {
 	}
 
 	// No stations.
-	passes, err = PredictPasses([]sgp4.OMM{issOMM()}, nil, 0, 24*time.Hour, nil, time.Time{})
+	passes, err = PredictPasses(context.Background(), []sgp4.OMM{issOMM()}, nil, 0, 24*time.Hour, nil, time.Time{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -216,7 +218,7 @@ func TestPredictPasses_EmptyInputs(t *testing.T) {
 }
 
 func TestPredictPasses_NoradFilterMatchesNone(t *testing.T) {
-	passes, err := PredictPasses(
+	passes, err := PredictPasses(context.Background(),
 		[]sgp4.OMM{issOMM()},
 		[]GroundStation{montrealStation},
 		0,
@@ -233,7 +235,7 @@ func TestPredictPasses_NoradFilterMatchesNone(t *testing.T) {
 }
 
 func TestPredictPasses_SortedByAOS(t *testing.T) {
-	passes, err := PredictPasses(
+	passes, err := PredictPasses(context.Background(),
 		[]sgp4.OMM{issOMM()},
 		[]GroundStation{montrealStation},
 		0,

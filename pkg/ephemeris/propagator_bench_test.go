@@ -17,6 +17,7 @@ limitations under the License.
 package ephemeris
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -68,7 +69,7 @@ func BenchmarkPredictPasses_SingleSatSingleStation(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_, err := PredictPasses(
+		_, err := PredictPasses(context.Background(),
 			[]sgp4.OMM{omm}, stations, 10.0, horizon, nil, start,
 		)
 		if err != nil {
@@ -93,10 +94,48 @@ func BenchmarkPredictPasses_10Sats2Stations(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_, err := PredictPasses(
+		_, err := PredictPasses(context.Background(),
 			omms, stations, 10.0, 24*time.Hour, nil, start,
 		)
 		if err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+// BenchmarkPredictPasses_7d_1Sat1Station and _7d_10Sats2Stations measure the WORST-CASE horizon
+// (the 7-day maxPassHorizon clamp). Because ctx cancellation is honoured only BETWEEN work items,
+// a single item's wall-clock cost is the upper bound on how long a cancelled PredictPasses can
+// take to return, so these numbers justify the coarse-grained cancellation design.
+func BenchmarkPredictPasses_7d_1Sat1Station(b *testing.B) {
+	omm := benchOMM()
+	stations := []GroundStation{{Name: "taipei", Latitude: 25.033, Longitude: 121.565, Altitude: 15}}
+	start := time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, err := PredictPasses(context.Background(), []sgp4.OMM{omm}, stations, 10.0, 7*24*time.Hour, nil, start)
+		if err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkPredictPasses_7d_10Sats2Stations(b *testing.B) {
+	omms := make([]sgp4.OMM, 10)
+	for i := range omms {
+		omm := benchOMM()
+		omm.NoradCatID = 56700 + i
+		omm.MeanAnomaly = float64(i * 36)
+		omms[i] = omm
+	}
+	stations := []GroundStation{
+		{Name: "taipei", Latitude: 25.033, Longitude: 121.565, Altitude: 15},
+		{Name: "hsinchu", Latitude: 24.796, Longitude: 120.997, Altitude: 50},
+	}
+	start := time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := PredictPasses(context.Background(), omms, stations, 10.0, 7*24*time.Hour, nil, start); err != nil {
 			b.Fatal(err)
 		}
 	}

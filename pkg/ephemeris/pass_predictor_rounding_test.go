@@ -11,6 +11,7 @@ You may obtain a copy of the License at
 package ephemeris
 
 import (
+	"context"
 	"math"
 	"testing"
 	"time"
@@ -23,13 +24,15 @@ import (
 // not a silent degradation to 0°-horizon passes (NaN mask comparisons are all false).
 func TestPredictPasses_RejectsInvalidMask(t *testing.T) {
 	for _, mask := range []float64{math.NaN(), math.Inf(1), math.Inf(-1), -1, 90.1, 1000} {
-		_, err := PredictPasses([]sgp4.OMM{issOMM()}, []GroundStation{montrealStation}, mask, 24*time.Hour, nil, time.Time{})
+		_, err := PredictPasses(context.Background(),
+			[]sgp4.OMM{issOMM()}, []GroundStation{montrealStation}, mask, 24*time.Hour, nil, time.Time{})
 		if err == nil {
 			t.Errorf("PredictPasses(minElevation=%v) must error (invalid mask), got nil", mask)
 		}
 	}
 	// A valid mask still works.
-	_, err := PredictPasses([]sgp4.OMM{issOMM()}, []GroundStation{montrealStation}, 10, 24*time.Hour, nil, time.Time{})
+	_, err := PredictPasses(context.Background(),
+		[]sgp4.OMM{issOMM()}, []GroundStation{montrealStation}, 10, 24*time.Hour, nil, time.Time{})
 	if err != nil {
 		t.Fatalf("a valid mask must not error: %v", err)
 	}
@@ -122,7 +125,7 @@ func TestConservativePassWindow_CollapsesSubSecondWindow(t *testing.T) {
 // sub-second bisection (refineMaskCrossing, ~200ms tol) that the rounding then cleans up.
 // Mutation: remove the ceil/floor in predictSingle → AOS/LOS carry sub-second nanos.
 func TestPredictPasses_WholeSecondWindow_P2_1(t *testing.T) {
-	passes, err := PredictPasses(
+	passes, err := PredictPasses(context.Background(),
 		[]sgp4.OMM{issOMM()},
 		[]GroundStation{montrealStation, taipeiStation},
 		10, // above the horizon, so the mask trim + bisection actually run
