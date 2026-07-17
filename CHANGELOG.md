@@ -83,6 +83,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The propagated ephemeris epoch is stamped at propagation time, not reconcile-start.** The
+  epoch was derived from the clock sampled at the top of the reconcile, but the fetch and pass
+  prediction run before propagation, so the delivered epoch was already aged by that compute —
+  eating into the `propagationEpochLead`. The clock is now re-sampled immediately before
+  propagation, so the epoch reflects the true propagation instant (the fetch/pass-prediction paths
+  keep the reconcile-start `now`, which is correct for their reconcile-relative windows) (#235,
+  part of #232).
 - **GP-fetch retry ramp restarts on an episode change instead of leaking its count across error
   classes.** The consecutive-failure counter is shared, but only the transient backoff branch
   consumes it — a run of auth (or rate-limit) failures used to leave the count high and slam the
