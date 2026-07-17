@@ -108,24 +108,42 @@ type NTNSliceReconciler struct {
 	// (older) version is not recoverable. Guarded by flapMu; entries are released in
 	// handleSliceFinalizer on CR deletion so the map cannot leak.
 	flapMu    sync.Mutex
-	flapState map[types.NamespacedName]slice.AntiFlapState
+	flapState map[types.NamespacedName]flapStateEntry
 }
 
-// loadFlapState returns the anti-flap state for a slice (zero value if absent).
-func (r *NTNSliceReconciler) loadFlapState(key types.NamespacedName) slice.AntiFlapState {
+// flapStateEntry pairs a slice's anti-flap state with the UID of the object it belongs to. A
+// same-name NTNSlice recreated with a NEW UID must not inherit the deleted object's counters or
+// min-dwell clock. The NotFound and finalizer cleanups usually drop the old entry first, but a
+// force-deletion (finalizer bypassed) whose DELETE the workqueue coalesces with the recreate's
+// CREATE is delivered as a single reconcile of the new object — the controller never observes the
+// intervening NotFound. Keying on UID as well as name closes that gap regardless of the cleanups.
+type flapStateEntry struct {
+	uid   types.UID
+	state slice.AntiFlapState
+}
+
+// loadFlapState returns the anti-flap state for the object identified by (key, uid), or the zero
+// value when no entry exists OR the stored entry belongs to a different object identity (a stale
+// entry left by a same-name predecessor, which is evicted here).
+func (r *NTNSliceReconciler) loadFlapState(key types.NamespacedName, uid types.UID) slice.AntiFlapState {
 	r.flapMu.Lock()
 	defer r.flapMu.Unlock()
-	return r.flapState[key]
+	entry, ok := r.flapState[key]
+	if !ok || entry.uid != uid {
+		delete(r.flapState, key)
+		return slice.AntiFlapState{}
+	}
+	return entry.state
 }
 
-// storeFlapState persists the updated anti-flap state for a slice.
-func (r *NTNSliceReconciler) storeFlapState(key types.NamespacedName, st slice.AntiFlapState) {
+// storeFlapState persists the updated anti-flap state for the object identified by (key, uid).
+func (r *NTNSliceReconciler) storeFlapState(key types.NamespacedName, uid types.UID, st slice.AntiFlapState) {
 	r.flapMu.Lock()
 	defer r.flapMu.Unlock()
 	if r.flapState == nil {
-		r.flapState = make(map[types.NamespacedName]slice.AntiFlapState)
+		r.flapState = make(map[types.NamespacedName]flapStateEntry)
 	}
-	r.flapState[key] = st
+	r.flapState[key] = flapStateEntry{uid: uid, state: st}
 }
 
 // seedLastSwitchbackFromStatus does a monotonic merge of the durable min-dwell clock into the
@@ -139,7 +157,22 @@ func (r *NTNSliceReconciler) seedLastSwitchbackFromStatus(
 	af *slice.AntiFlapState, ns *ntnv1alpha1.NTNSlice, now time.Time,
 ) {
 	p := ns.Status.LastSwitchbackTime
-	if p == nil || !p.After(af.LastSwitchback) || p.After(now) {
+	if p == nil {
+		return
+	}
+	if p.After(now) {
+		// A future-dated durable value is untrustworthy: the controller only ever writes values
+		// <= now, so a future one means a backward clock step (NTP, VM migration) or an external
+		// status edit. Refuse to enforce it AND clear it durably. Merely ignoring it (the old
+		// behaviour) left it in status to become valid "history" once the wall clock passed it,
+		// where the next reconcile would seed it as a min-dwell clock and block a legitimate
+		// failover with a ghost dwell. Clearing is fail-open, consistent with the anti-flap design;
+		// the nil write rides the reconcile's existing status update, and a real switchback simply
+		// re-persists a fresh value.
+		ns.Status.LastSwitchbackTime = nil
+		return
+	}
+	if !p.After(af.LastSwitchback) {
 		return
 	}
 	af.LastSwitchback = p.Time
@@ -148,11 +181,11 @@ func (r *NTNSliceReconciler) seedLastSwitchbackFromStatus(
 // persistLastSwitchbackToStatus mirrors the in-memory min-dwell clock into status when the durable
 // value is BEHIND memory (nil, or an older second) OR is implausibly dated in the FUTURE. It
 // compares at second granularity — metav1.Time serialises whole seconds while memory keeps
-// sub-second precision, so a raw After() would rewrite the same second every reconcile. The
-// future case is HEALED here (overwritten by the current value): the seed ignores a future
-// timestamp, so without this a real switchback could never displace a poisoned future value and
-// durability would stay broken until wall-clock caught up. The write rides the reconcile's
-// existing (unconditional) status update, so it adds no extra API request.
+// sub-second precision, so a raw After() would rewrite the same second every reconcile. The future
+// case is a secondary guard: the seed already clears a future-dated value durably before this runs,
+// so p is normally not in the future here; if one ever were, it is overwritten by the current
+// in-memory value. The write rides the reconcile's existing (unconditional) status update, so it
+// adds no extra API request.
 func (r *NTNSliceReconciler) persistLastSwitchbackToStatus(ns *ntnv1alpha1.NTNSlice, latest, now time.Time) {
 	if latest.IsZero() {
 		return
@@ -172,13 +205,13 @@ func (r *NTNSliceReconciler) persistLastSwitchbackToStatus(ns *ntnv1alpha1.NTNSl
 func (r *NTNSliceReconciler) resetRecoveryStreak(key types.NamespacedName) {
 	r.flapMu.Lock()
 	defer r.flapMu.Unlock()
-	st, ok := r.flapState[key]
-	if !ok || (st.RecoveryObservedAt.IsZero() && st.ConsecutiveDegraded == 0) {
+	entry, ok := r.flapState[key]
+	if !ok || (entry.state.RecoveryObservedAt.IsZero() && entry.state.ConsecutiveDegraded == 0) {
 		return // nothing tracked, or already clear — do not create a spurious entry
 	}
-	st.RecoveryObservedAt = time.Time{}
-	st.ConsecutiveDegraded = 0
-	r.flapState[key] = st
+	entry.state.RecoveryObservedAt = time.Time{}
+	entry.state.ConsecutiveDegraded = 0
+	r.flapState[key] = entry // preserves the entry's UID
 }
 
 // dropFlapState releases a slice's anti-flap state (on deletion).
@@ -326,6 +359,7 @@ func (r *NTNSliceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	// as a dwell clock for a hand-back that never actually happened.
 	var pendingFlap *slice.AntiFlapState
 	var pendingFlapKey types.NamespacedName
+	var pendingFlapUID types.UID
 	switch {
 	case !satelliteKnown:
 		// I-13: satellite availability is unknown (transient ephemeris read error).
@@ -370,7 +404,7 @@ func (r *NTNSliceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		}
 
 		flapKey := client.ObjectKeyFromObject(ns)
-		af := r.loadFlapState(flapKey)
+		af := r.loadFlapState(flapKey, ns.UID)
 		r.seedLastSwitchbackFromStatus(&af, ns, now)
 		var newFlap slice.AntiFlapState
 		result, newFlap = slice.EvaluateFailoverWithAntiFlap(
@@ -385,7 +419,7 @@ func (r *NTNSliceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 			afCfg,
 			af,
 		)
-		pendingFlap, pendingFlapKey = &newFlap, flapKey
+		pendingFlap, pendingFlapKey, pendingFlapUID = &newFlap, flapKey, ns.UID
 		r.persistLastSwitchbackToStatus(ns, newFlap.LastSwitchback, now)
 	default:
 		// Metrics unreliable but satellite availability known: fail static —
@@ -477,7 +511,7 @@ func (r *NTNSliceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	// never durably recorded. Under-counting a confirmation/recovery sample on a dropped write
 	// only DELAYS the next transition (fail-safe), matching the anti-flap design.
 	if pendingFlap != nil {
-		r.storeFlapState(pendingFlapKey, *pendingFlap)
+		r.storeFlapState(pendingFlapKey, pendingFlapUID, *pendingFlap)
 	}
 
 	// Emit the failover counter only after the status write persisted, so a

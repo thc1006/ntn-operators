@@ -90,7 +90,7 @@ func TestReconcile_FailedSwitchbackThenPassEnded_NoGhostDwell(t *testing.T) {
 	r := &NTNSliceReconciler{Client: cli, Scheme: sch, Now: func() time.Time { return fixedNow }}
 	key := client.ObjectKeyFromObject(nsObj)
 	// Terrestrial healthy long enough to switch back; satellite pass currently ACTIVE.
-	r.storeFlapState(key, slice.AntiFlapState{RecoveryObservedAt: fixedNow.Add(-90 * time.Second)})
+	r.storeFlapState(key, "", slice.AntiFlapState{RecoveryObservedAt: fixedNow.Add(-90 * time.Second)})
 	r.ReaderProvider = fakeReaderProvider{reader: fakeReader{res: slicemetrics.Result{
 		Metrics: slice.Metrics{RSRP: -80, LatencyMs: 10, PacketLossPercent: 0}, Stale: false, LastFreshAt: fixedNow,
 	}}}
@@ -202,7 +202,7 @@ func TestReconcile_Switchback_PersistsLastSwitchbackTime(t *testing.T) {
 	r, key := baseSliceForDwell(t, fixedNow, ntnv1alpha1.NTNSliceStatus{
 		ActivePathType: string(slice.PathSatellite),
 	})
-	r.storeFlapState(key, slice.AntiFlapState{RecoveryObservedAt: fixedNow.Add(-90 * time.Second)})
+	r.storeFlapState(key, "", slice.AntiFlapState{RecoveryObservedAt: fixedNow.Add(-90 * time.Second)})
 	// Terrestrial HEALTHY (rsrp -80 does not fire), reliable; satellite available.
 	r.ReaderProvider = fakeReaderProvider{reader: fakeReader{res: slicemetrics.Result{
 		Metrics: slice.Metrics{RSRP: -80, LatencyMs: 10, PacketLossPercent: 0},
@@ -238,7 +238,7 @@ func TestReconcile_SelfHealsDurableLastSwitchback(t *testing.T) {
 		ActivePathType: string(slice.PathTerrestrial),
 	})
 	memClock := fixedNow.Add(-30 * time.Second)
-	r.storeFlapState(key, slice.AntiFlapState{LastSwitchback: memClock})
+	r.storeFlapState(key, "", slice.AntiFlapState{LastSwitchback: memClock})
 	// Terrestrial DEGRADED (would fail over if dwell were satisfied), satellite available.
 	r.ReaderProvider = fakeReaderProvider{reader: fakeReader{res: slicemetrics.Result{
 		Metrics: slice.Metrics{RSRP: -110, LatencyMs: 10, PacketLossPercent: 0},
@@ -274,7 +274,7 @@ func TestReconcile_MonotonicSeed_KeepsNewerMemory(t *testing.T) {
 		ActivePathType:     string(slice.PathTerrestrial),
 		LastSwitchbackTime: &metav1.Time{Time: oldStatus},
 	})
-	r.storeFlapState(key, slice.AntiFlapState{LastSwitchback: memClock})
+	r.storeFlapState(key, "", slice.AntiFlapState{LastSwitchback: memClock})
 	r.ReaderProvider = fakeReaderProvider{reader: fakeReader{res: slicemetrics.Result{
 		Metrics: slice.Metrics{RSRP: -110, LatencyMs: 10, PacketLossPercent: 0},
 		Stale:   false, LastFreshAt: fixedNow,
@@ -309,7 +309,7 @@ func TestReconcile_FutureDurableTimestampHealedBySwitchback(t *testing.T) {
 		ActivePathType:     string(slice.PathSatellite),
 		LastSwitchbackTime: &metav1.Time{Time: fixedNow.Add(1 * time.Hour)},
 	})
-	r.storeFlapState(key, slice.AntiFlapState{RecoveryObservedAt: fixedNow.Add(-90 * time.Second)})
+	r.storeFlapState(key, "", slice.AntiFlapState{RecoveryObservedAt: fixedNow.Add(-90 * time.Second)})
 	r.ReaderProvider = fakeReaderProvider{reader: fakeReader{res: slicemetrics.Result{
 		Metrics: slice.Metrics{RSRP: -80, LatencyMs: 10, PacketLossPercent: 0}, Stale: false, LastFreshAt: fixedNow,
 	}}}
@@ -354,5 +354,92 @@ func TestReconcile_FutureStatusTimestampIgnored(t *testing.T) {
 	if updated.Status.ActivePathType != string(slice.PathSatellite) {
 		t.Fatalf("a future-dated lastSwitchbackTime must NOT lock terrestrial; expected failover to satellite, got %q",
 			updated.Status.ActivePathType)
+	}
+}
+
+// TestReconcile_FutureDurableTimestampClearedNotRevived pins Finding 1 (round-4): a future-dated
+// lastSwitchbackTime must be CLEARED durably, not merely ignored, so it cannot silently become
+// valid history once the wall clock passes it and block a legitimate failover with a ghost dwell.
+// The seed observes the future value while terrestrial is healthy (no switchback) and clears it;
+// after the clock advances past it, a real degradation must still fail over. Mutation: leaving the
+// future value in status (the old ignore-only behaviour) revives it, and now.Sub(revived) < dwell
+// wrongly holds terrestrial.
+func TestReconcile_FutureDurableTimestampClearedNotRevived(t *testing.T) {
+	fixedNow := time.Date(2026, 4, 17, 12, 0, 0, 0, time.UTC)
+	r, key := baseSliceForDwell(t, fixedNow, ntnv1alpha1.NTNSliceStatus{
+		ActivePathType:     string(slice.PathTerrestrial),
+		LastSwitchbackTime: &metav1.Time{Time: fixedNow.Add(30 * time.Second)}, // future (skew / rollback)
+	})
+	now := fixedNow
+	r.Now = func() time.Time { return now }
+
+	// Reconcile 1: terrestrial HEALTHY (no switchback) while the timestamp is still in the future.
+	// The seed must clear it durably.
+	r.ReaderProvider = fakeReaderProvider{reader: fakeReader{res: slicemetrics.Result{
+		Metrics: slice.Metrics{RSRP: -80, LatencyMs: 10, PacketLossPercent: 0}, Stale: false, LastFreshAt: fixedNow,
+	}}}
+	if _, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: key}); err != nil {
+		t.Fatalf("reconcile 1: %v", err)
+	}
+	mid := &ntnv1alpha1.NTNSlice{}
+	if err := r.Get(context.Background(), key, mid); err != nil {
+		t.Fatalf("get after reconcile 1: %v", err)
+	}
+	if mid.Status.LastSwitchbackTime != nil {
+		t.Fatalf("a future-dated lastSwitchbackTime must be cleared, not left to revive; got %v",
+			mid.Status.LastSwitchbackTime)
+	}
+
+	// Advance past the former future timestamp but stay within the 60s min-dwell, then degrade
+	// terrestrial: the failover must NOT be blocked by a revived ghost dwell.
+	now = fixedNow.Add(35 * time.Second)
+	r.ReaderProvider = fakeReaderProvider{reader: fakeReader{res: slicemetrics.Result{
+		Metrics: slice.Metrics{RSRP: -110, LatencyMs: 10, PacketLossPercent: 0}, Stale: false, LastFreshAt: now,
+	}}}
+	if _, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: key}); err != nil {
+		t.Fatalf("reconcile 2: %v", err)
+	}
+	got := &ntnv1alpha1.NTNSlice{}
+	if err := r.Get(context.Background(), key, got); err != nil {
+		t.Fatalf("get after reconcile 2: %v", err)
+	}
+	if got.Status.ActivePathType != string(slice.PathSatellite) {
+		t.Fatalf("a cleared future timestamp must not revive after the clock passes it; "+
+			"expected failover to satellite, got %q", got.Status.ActivePathType)
+	}
+}
+
+// TestReconcile_StaleFlapStateForDifferentUID_IsNotInherited pins Finding 2 (round-4): the
+// anti-flap cache is keyed by (name, UID), so a same-name slice recreated with a new UID — a
+// delete+create the workqueue coalesced into one reconcile, so the intervening NotFound was never
+// observed — does NOT inherit the deleted object's min-dwell clock. The reconciled object's UID
+// differs from the UID the stale entry was stored under, so the entry is evicted and the slice
+// starts from zero state. Mutation: keying on name alone loads the stale recent-switchback clock
+// and wrongly holds terrestrial (15s < 60s dwell).
+func TestReconcile_StaleFlapStateForDifferentUID_IsNotInherited(t *testing.T) {
+	fixedNow := time.Date(2026, 4, 17, 12, 0, 0, 0, time.UTC)
+	r, key := baseSliceForDwell(t, fixedNow, ntnv1alpha1.NTNSliceStatus{
+		ActivePathType: string(slice.PathTerrestrial),
+	})
+	r.ReaderProvider = fakeReaderProvider{reader: fakeReader{res: slicemetrics.Result{
+		Metrics: slice.Metrics{RSRP: -110, LatencyMs: 10, PacketLossPercent: 0}, Stale: false, LastFreshAt: fixedNow,
+	}}}
+	// Leftover state stored under a DIFFERENT (deleted predecessor's) UID, with a recent switchback
+	// that would block failover (15s < 60s dwell) if it were wrongly inherited. The reconciled
+	// object built by baseSliceForDwell has a different UID (empty), so this must be evicted.
+	r.storeFlapState(key, "uid-of-deleted-predecessor", slice.AntiFlapState{
+		LastSwitchback: fixedNow.Add(-15 * time.Second),
+	})
+
+	if _, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: key}); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	got := &ntnv1alpha1.NTNSlice{}
+	if err := r.Get(context.Background(), key, got); err != nil {
+		t.Fatalf("re-get: %v", err)
+	}
+	if got.Status.ActivePathType != string(slice.PathSatellite) {
+		t.Fatalf("a recreated same-name slice must not inherit a deleted object's min-dwell clock; "+
+			"expected failover to satellite, got %q", got.Status.ActivePathType)
 	}
 }

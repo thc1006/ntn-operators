@@ -89,8 +89,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   **after** the durable status write succeeds (the same "commit side-effects once status is
   durable" discipline as the failover counter/event), so a switchback whose write fails cannot
   leave a speculative timestamp that a later pass-ended forced switchback could launder into a
-  bogus dwell. A future-dated status value (node clock skew / rollback) is ignored by the reload
-  and healed by the next real switchback, so it cannot lock a degraded terrestrial. The other two
+  bogus dwell. A future-dated status value (a backward node-clock step or an external edit; the
+  controller only ever writes values `<= now`) is **cleared durably** when the reload observes it,
+  not merely ignored, so it cannot silently become valid history once the wall clock passes it and
+  block a legitimate failover with a ghost dwell. The in-memory anti-flap cache is also keyed by
+  object **UID** as well as name, so a same-name NTNSlice recreated with a new UID (a delete+create
+  the workqueue coalesced into one reconcile, hiding the intervening NotFound) does not inherit the
+  deleted object's counters or dwell clock. The other two
   flap clocks stay in-memory (their loss only delays a switch, never advances one). This matters
   more now that rolling updates hand leadership over routinely. **Scope:** durability holds once
   this version has recorded at least one quality-driven switchback; a switchback recorded only by
