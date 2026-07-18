@@ -76,8 +76,11 @@ type SatelliteEphemerisReconciler struct {
 	Fetcher                 ephemeris.GPFetcher          // CelesTrak fetcher
 	SpaceTrackFetcher       *ephemeris.SpaceTrackFetcher // SpaceTrack fetcher (nil = disabled)
 
-	// Now returns the current time; nil defaults to time.Now(). Injected in tests to make the
-	// propagation epoch — which is sampled at PROPAGATION time, not reconcile-start — deterministic.
+	// Now returns the current time; nil defaults to time.Now(). Injected in tests to make two
+	// clock-dependent behaviours deterministic: the propagation epoch (sampled at PROPAGATION time,
+	// not reconcile-start) and the fetch-retry backoff window (cacheServe's suppression gate and the
+	// nextFetchAttempt it compares against are both driven by r.now(), so a test can step to and across
+	// a deadline to walk successive retry windows).
 	Now func() time.Time
 
 	// ommCache holds the last real GP-fetch result per SatelliteEphemeris so the
@@ -596,8 +599,9 @@ func classifyFetchErrClass(err error) fetchErrClass {
 //     backoff on a retryKey change, and the count must reset with it so the new episode's first
 //     transient failure also starts at the ramp base rather than inheriting the old episode's N.
 //
-// now is a parameter (production passes time.Now(), sampled AFTER the fetch returned so a 30s
-// client timeout does not eat the first 1-minute window) so the ramp is deterministically testable.
+// now is a parameter (production passes r.now(), i.e. time.Now(), sampled AFTER the fetch returned
+// so a 30s client timeout does not eat the first 1-minute window) so the ramp is deterministically
+// testable — an injected clock advancing to and across nextFetchAttempt lets a test walk the retry windows.
 func applyFetchBackoff(c *cachedFetch, fetchErr error, newRetryKey string, effectiveInterval time.Duration, now time.Time) {
 	if newRetryKey != c.retryKey || classifyFetchErrClass(fetchErr) != classifyFetchErrClass(c.lastFetchErr) {
 		c.fetchFailures = 0
@@ -1438,9 +1442,12 @@ func (r *SatelliteEphemerisReconciler) obtainOMMs(
 			// so the epoch expired ~5 minutes in and SIB19 went stale for the rest of it.)
 			// Advance the fetch-retry ramp and arm nextFetchAttempt. applyFetchBackoff restarts
 			// the ramp when the retry episode changed (new error class or new retryKey), and takes
-			// now = time.Now() sampled HERE — after the fetch returned — so a 30s client timeout
-			// does not eat the first 1-minute transient window (#236, extends #221 review finding 2).
-			applyFetchBackoff(&c, fetchErr, retryInputKey(eph.Spec, effectiveInterval), effectiveInterval, time.Now())
+			// now = r.now() sampled HERE — after the fetch returned — so a 30s client timeout does
+			// not eat the first 1-minute transient window (#236, extends #221 review finding 2).
+			// r.now() (time.Now() in production) rather than a bare time.Now() so cacheServe's
+			// gate and this arm share ONE injectable clock: a test can advance to and across nextFetchAttempt
+			// to walk successive retry windows deterministically (#237).
+			applyFetchBackoff(&c, fetchErr, retryInputKey(eph.Spec, effectiveInterval), effectiveInterval, r.now())
 			r.ommCache.Store(req.NamespacedName, c)
 			log.Info("GP fetch failed; serving last cached OMMs for SIB19 continuity",
 				"err", fetchErr.Error(), "cacheAge", now.Sub(c.result.FetchedAt).String(),
