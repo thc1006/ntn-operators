@@ -112,19 +112,74 @@ sum by (namespace, config, reason) (increase(ntn_operators_ephemeris_push_errors
 | `EphemerisStale` | the propagated state is stale/expired | see **NTNEphemerisEpochStale** |
 
 ```bash
-kubectl describe ntncellconfig <config> -n "$NS"
+# Run in a subshell with strict mode so a failed kubectl (RBAC, a missing/renamed object, an API outage)
+# STOPS the procedure instead of probing an empty target — bash -n cannot catch that, and the exit
+# status of a plain sequence would otherwise be the last command's. The subshell keeps set -e out of
+# your interactive session.
+(
+set -euo pipefail
+: "${NS:?set NS to the NTNCellConfig namespace}"
+: "${CONFIG:?set CONFIG to the NTNCellConfig name}"
+OPERATOR_NS="${OPERATOR_NS:-ntn-operators-system}"   # override if you installed elsewhere
+
+kubectl describe ntncellconfig "$CONFIG" -n "$NS"
 #   Condition EphemerisPushed (Status/Reason/Message) + Event "EphemerisPushFailed"
-# For ProviderPushFailed, test gNB reachability AS THE OPERATOR SEES IT: attach an
-# ephemeral debug container to the operator Pod. It shares the Pod's network namespace,
-# so it is governed by the operator's NetworkPolicy — a real test of the operator's egress.
-# (Do NOT `kubectl run` a pod carrying the operator's labels to mimic it: the operator
-#  ReplicaSet would adopt that pod by selector and delete it as an excess replica.)
-ENDPOINT=$(kubectl get ntncellconfig <config> -n "$NS" -o jsonpath='{.spec.provider.remoteControl.endpoint}')
+
+# For ProviderPushFailed, test gNB reachability AS THE ACTIVE OPERATOR SEES IT. The push runs on the
+# elected LEADER, so probe that pod — its node's CNI/routing/egress is what matters, not an arbitrary
+# replica's. The leader is in the leader-election Lease (holderIdentity is "<pod>_<uuid>").
+LEADER=$(kubectl get lease b1076767.operators.dev -n "$OPERATOR_NS" -o jsonpath='{.spec.holderIdentity}')
+# During a graceful handoff (LeaderElectionReleaseOnCancel) the Lease briefly has NO holder; fail fast
+# rather than probing an empty pod name — wait for the ~2s handoff and retry.
+: "${LEADER:?leader Lease currently has no holder — wait for the ~2s handoff and retry}"
+POD=${LEADER%%_*}
+kubectl get pod "$POD" -n "$OPERATOR_NS" -o wide   # confirm the pod/node you are about to probe
+
+ENDPOINT=$(kubectl get ntncellconfig "$CONFIG" -n "$NS" -o jsonpath='{.spec.provider.remoteControl.endpoint}')
+: "${ENDPOINT:?spec.provider.remoteControl.endpoint is empty for $CONFIG}"
 HOST=${ENDPOINT%:*}; HOST=${HOST#[}; HOST=${HOST%]}   # strip [ ] so [IPv6]:port works with nc
 PORT=${ENDPOINT##*:}
-POD=$(kubectl get pod -n ntn-operators-system -l control-plane=controller-manager \
-  -o jsonpath='{.items[0].metadata.name}')
-kubectl debug -n ntn-operators-system -it "$POD" --image=nicolaka/netshoot -- nc -vz "$HOST" "$PORT"
+
+# Re-read the leader just before probing: if it changed (a handoff between the two reads) we would be
+# probing a pod that is no longer the active operator, so abort and retry. Assign first, THEN compare:
+# `[ "$(kubectl ...)" = "$LEADER" ]` takes its exit status from `[`, not from kubectl, so a kubectl that
+# failed AFTER emitting the holder would slip past set -e; a plain assignment carries kubectl's non-zero
+# exit for set -e to act on.
+CURRENT_LEADER=$(kubectl get lease b1076767.operators.dev -n "$OPERATOR_NS" -o jsonpath='{.spec.holderIdentity}')
+[[ "$CURRENT_LEADER" == "$LEADER" ]] \
+  || { echo "leader changed while preparing the probe; retry the procedure" >&2; exit 1; }
+
+# Emit cleanup for THIS pod now, names baked in (%q-escaped), from INSIDE the subshell: $POD/$OPERATOR_NS
+# exist only here — a subshell is a copy of the parent, so its vars never propagate out; a cleanup line
+# placed after `)` would run in the parent with them UNSET, or worse with a stale $POD from the parent's
+# history → deleting an unrelated pod. Printed BEFORE the probe because a failing `nc` is a normal
+# diagnostic result that, under set -e, would skip anything after it. The ephemeral container stays listed
+# (Terminated) until the pod is recreated — harmless, normally left as-is; to clear it, on the default
+# 2-replica Helm install confirm BOTH replicas are Ready then delete the pod (deleting the leader triggers
+# a ~2s lease handoff — a handoff timing, NOT an end-to-end SLA); on a single-replica / raw-kustomize
+# install deleting the pod is a brief operator outage, so prefer leaving the terminated entry.
+printf '\n# Optional cleanup for THIS debug pod (uncomment a line to run):\n'
+printf '#   kubectl get pod -n %q -l control-plane=controller-manager -o wide   # both Ready first\n' "$OPERATOR_NS"
+printf '#   kubectl delete pod -n %q %q\n' "$OPERATOR_NS" "$POD"
+
+# Attach an ephemeral debug container to the leader pod: it shares the pod's network namespace, so it
+# is governed by the operator's NetworkPolicy — a real test of the operator's egress. (Do NOT
+# `kubectl run` a pod with the operator's labels: the ReplicaSet would adopt and delete it.) The image
+# is digest-pinned — never :latest, since it shares the operator pod's namespace.
+#
+# Use --profile=restricted for a deterministic, hardened debug container (drop ALL capabilities,
+# runAsNonRoot, RuntimeDefault seccomp). Without an explicit profile the kubectl default differs by
+# client version (legacy through v1.35; general from v1.36, which adds an unneeded SYS_PTRACE), so the
+# effective security context would otherwise depend on the operator's kubectl. The ephemeral container
+# INHERITS the pod's securityContext: on the default Helm install the pod sets runAsUser 65532, so it
+# runs as uid 65532 and `nc -vz` works under restricted (verified on Kind, node v1.32.2, kubectl v1.35.4).
+# On the raw kustomize install (config/manager: runAsNonRoot with NO numeric user) netshoot fails with
+# CreateContainerConfigError — its image declares no numeric non-root user (nicolaka/netshoot#163);
+# there, use a debug image that declares a numeric non-root USER (or --custom a runAsUser).
+kubectl debug -n "$OPERATOR_NS" -it "$POD" --profile=restricted \
+  --image=nicolaka/netshoot:v0.16@sha256:b09d9b21381f47a79b3cbcb30da25266dc17186ea00ae65e99fdc51396f48e70 \
+  -- nc -vz "$HOST" "$PORT"
+)
 ```
 
 **Mitigate.**

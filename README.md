@@ -97,11 +97,12 @@ helm install ntn-operators dist/chart \
 > ```
 >
 > Skipping this leaves a new operator running against last release's CRDs. Writes
-> carrying fields the old schema doesn't know are then either **rejected** (strict
-> server-side field validation — the default for `kubectl` 1.25+)
-> or **silently pruned** (lenient validation / older clients), so v0.6+ features
-> that depend on new spec fields (e.g. the runtime NTN push) either fail to apply
-> or go quietly inert.
+> carrying fields the old schema doesn't know then hit one of three server-side
+> field-validation modes: **rejected** (`--validate=strict`, the default for `kubectl`
+> 1.25+), accepted but **pruned with a warning** (`--validate=warn`), or **silently
+> pruned** (`--validate=ignore`, or clients explicitly configured to ignore unknown fields). In the two accepted cases the write
+> succeeds yet the unknown field is dropped, so v0.6+ features that depend on new spec
+> fields (e.g. the runtime NTN push) either fail to apply or go quietly inert.
 > To let Helm own the CRD lifecycle instead, install with `--set crd.enable=true`
 > (the default) and omit `make install` — then `helm upgrade` updates both
 > together.
