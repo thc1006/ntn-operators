@@ -1,4 +1,7 @@
-{{- if .Values.podDisruptionBudget.enable }}
+{{- /* Only render with replicas > 1: a minAvailable:1 PDB over a single replica blocks every
+       eviction-API disruption (node drain, descheduler, autoscaler) since the one pod can never
+       be evicted. PDBs do not gate Deployment rolling updates, which delete pods directly. */ -}}
+{{- if and .Values.podDisruptionBudget.enable (gt (int .Values.manager.replicas) 1) }}
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:

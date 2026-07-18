@@ -65,6 +65,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The chart's PodDisruptionBudget renders only when `replicas > 1`.** A `minAvailable: 1` PDB over
+  a single replica blocks every eviction-API disruption (node drain, descheduler, autoscaler) — the
+  one pod can never be evicted (it does not gate Deployment rolling updates, which delete pods
+  directly). The chart defaults to 2 replicas, but a `replicas: 1` override previously still emitted
+  the PDB and would deadlock drains; it is now gated on `replicas > 1`, so a single-replica install
+  stays drainable (the `config/manager` kustomize base ships 1 replica and no PDB, so it was never
+  affected) (#238, part of #232).
 - **`passPrediction.horizon` is bounded and pass prediction is cancellable.** Pass prediction
   sweeps the whole horizon for every satellite × ground station, so an unbounded `horizon` could
   stall the reconcile (and, transitively, delay the runtime-push epoch). The horizon is now
@@ -118,6 +125,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The manager waits indefinitely for runnables on shutdown, so the leader lease is never released
+  early.** `GracefulShutdownTimeout` was unset (controller-runtime default 30s). A *finite* timeout is
+  unsafe with `LeaderElectionReleaseOnCancel`: `runnableGroup.StopAndWait` returns on ctx-expiry
+  *without* the runnables draining, and the deferred lease release then hands the lease to a standby
+  while a hung reconcile is still doing lease-guarded work — a split-brain window (controller-runtime
+  #1132). `GracefulShutdownTimeout` is now negative (wait indefinitely): the lease is released only
+  after the runnables truly stop; a hung pod is SIGKILLed at `terminationGracePeriodSeconds` *without*
+  releasing, degrading safely to a `LeaseDuration` failover. `terminationGracePeriodSeconds` is raised
+  to 30s across all three deployment manifests (kustomize, Helm, OLM bundle) so it stays ≥ the
+  lease-release `RenewDeadline` — release *headroom* when runnables stop promptly, not a guarantee (a
+  too-short remainder falls back safely to lease-expiry failover). Unit tests pin the negative-timeout
+  wiring reaching the manager options and the grace-period floor against the parsed kustomize and
+  OLM-bundle PodSpecs (#238, part of #232).
 - **The propagated ephemeris epoch is stamped at propagation time, not reconcile-start.** The
   epoch was derived from the clock sampled at the top of the reconcile, but the fetch and pass
   prediction run before propagation, so the delivered epoch was already aged by that compute —

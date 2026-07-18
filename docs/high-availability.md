@@ -12,8 +12,9 @@ records the design and the deliberate choices behind it — several of which loo
 | Replicas | 2 (chart) · 1 (raw kustomize) | `manager.replicas` (chart); `config/manager/manager.yaml` ships 1 for dev/e2e |
 | Leader election | on | `--leader-elect` (default true), `cmd/main.go` |
 | `LeaderElectionReleaseOnCancel` | `true` | `cmd/main.go` |
-| Lease / renew / retry | 15s / 10s / 2s (controller-runtime defaults) | `cmd/main.go` |
-| PodDisruptionBudget | `minAvailable: 1` | **chart only** (`podDisruptionBudget`) |
+| Lease / renew / retry | 15s / 10s / 2s (explicitly pinned; same as the controller-runtime defaults) | `cmd/main.go` |
+| Graceful shutdown | wait indefinitely (`GracefulShutdownTimeout` negative); `terminationGracePeriodSeconds` 30s (≥ `RenewDeadline`) | `cmd/main.go` (`gracefulShutdownTimeout`) |
+| PodDisruptionBudget | `minAvailable: 1`, rendered only when `replicas > 1` | **chart only** (`podDisruptionBudget`) |
 | Pod anti-affinity | soft, `topologyKey: kubernetes.io/hostname` | **chart only** (`manager.affinity`) |
 | Readiness | cache-sync-gated, leadership-agnostic | `cmd/main.go` (`/readyz`) |
 
@@ -48,11 +49,23 @@ separate properties, both load-bearing:
   shutdown (`LeaderElectionReleaseOnCancel`), so the standby can acquire it within a retry
   period (~2s) instead of waiting out the full lease duration. This is safe only because
   `main()` exits promptly after `mgr.Start()` returns — nothing runs on the critical path after
-  the lease is released (controller-runtime issue #1132).
+  the lease is released (controller-runtime issue #1132). **The release must never happen while a
+  reconcile is still running**, or two leaders could act at once. controller-runtime releases the lease
+  in a defer that runs only *after* the runnable-stop wait returns — but a *finite* `GracefulShutdownTimeout`
+  lets that wait return on timeout (`runnableGroup.StopAndWait` returns on `ctx.Done()` without the
+  runnables draining), which would release the lease while a hung reconcile is still doing lease-guarded
+  work. So `GracefulShutdownTimeout` is set to **wait indefinitely** (a negative value): the lease is
+  released only once the runnables truly stop, and a hung pod is SIGKILLed at `terminationGracePeriodSeconds`
+  *without* the release defer running — degrading safely to a `LeaseDuration` failover rather than risking
+  split-brain. `terminationGracePeriodSeconds` (30s across all manifests) is kept **≥ `RenewDeadline`** to give
+  the release (a Get+Update bounded by `RenewDeadline`) *headroom* when the runnables stop promptly — not a
+  guarantee: if little grace remains, the SIGKILL falls back safely to lease-expiry failover.
+  `TestNewManagerOptionsAreSafe` pins the negative-timeout wiring and `TestManifestsGiveShutdownHeadroom`
+  the grace-period floor.
 - **Ungraceful (node crash, SIGKILL, network partition):** the lease is not released; the
   standby becomes *eligible* to take over after the lease expires — on the order of
   `LeaseDuration` (15s). Tightening the lease trades faster failover for more apiserver load and
-  more spurious failovers under transient latency; the kube-scheduler defaults (15/10/2s) are a
+  more spurious failovers under transient latency; the controller-runtime/client-go defaults (15/10/2s) are a
   good balance and are kept.
 
 Those `~2s` / `~15s` figures are **lease-handoff** timings, not an end-to-end recovery SLA:
@@ -75,8 +88,10 @@ same state — but the property callers must rely on is duplicate-tolerance, not
 for a node upgrade) to evict exactly one replica at a time, keeping the leader or a ready
 standby up. It does **not** block involuntary disruptions (node crash) or Deployment rolling
 updates (which delete pods directly rather than via the eviction API). A PDB with
-`minAvailable: 1` on a single-replica Deployment would block all draining — which is why the
-PDB ships together with `replicas: 2`.
+`minAvailable: 1` on a single-replica Deployment would block all draining (the one pod can never
+be evicted) — so the chart **only renders the PDB when `replicas > 1`** (`gt (int
+.Values.manager.replicas) 1`). A single-replica install therefore gets no PDB and stays drainable,
+rather than relying on the operator to keep `replicas` and `podDisruptionBudget.enable` in sync.
 
 ## Deploy paths
 

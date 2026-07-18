@@ -54,6 +54,67 @@ var (
 	setupLog = ctrl.Log.WithName("setup")
 )
 
+// gracefulShutdownTimeout is NEGATIVE on purpose: controller-runtime treats a negative value as "wait
+// indefinitely for the runnables to stop." This is the only SAFE pairing with the
+// LeaderElectionReleaseOnCancel below. The manager releases the lease in a defer that runs only AFTER
+// the runnable-stop wait returns (manager/internal.go engageStopProcedure). With a FINITE timeout,
+// runnableGroup.StopAndWait returns on ctx.Done() WITHOUT the runnable WaitGroup draining, so a timeout
+// shorter than the pod's terminationGracePeriodSeconds would let the lease be released while a reconcile
+// is still doing lease-guarded work — a split-brain window (controller-runtime #1132). Waiting
+// indefinitely means the lease is released ONLY after the runnables have truly stopped; if a runnable
+// hangs, the kubelet SIGKILLs the pod at terminationGracePeriodSeconds WITHOUT the release defer running,
+// so failover safely degrades to waiting out LeaseDuration rather than risking two active leaders.
+// terminationGracePeriodSeconds (30s in the manifests) gives the release HEADROOM when the runnables stop
+// promptly — the release is a Get+Update bounded by RenewDeadline — but it is NOT a guarantee: if the
+// grace left after the runnables stop is too short, the kubelet SIGKILL still falls back safely to
+// lease-expiry failover. The wiring is set by newManagerOptions and pinned by TestNewManagerOptionsAreSafe.
+const gracefulShutdownTimeout = -1 * time.Second
+
+// Leader-election timing, set EXPLICITLY (not left to the controller-runtime defaults) so the values are
+// pinned against a dependency bump and shared with the tests that reason about shutdown timing. These are
+// the current controller-runtime/client-go defaults.
+const (
+	leaderLeaseDuration = 15 * time.Second
+	leaderRenewDeadline = 10 * time.Second
+	leaderRetryPeriod   = 2 * time.Second
+)
+
+// newManagerOptions builds the manager Options, including the leader-election and graceful-shutdown fields
+// that make active-passive HA safe. It is a single constructor (not a mutating helper) so main() must use
+// its return value — deleting the call fails to compile — and TestNewManagerOptionsAreSafe can assert the
+// wiring without starting a manager. Dropping the negative GracefulShutdownTimeout reintroduces the
+// early-release safety risk (#1132); dropping ReleaseOnCancel or the explicit lease timing only degrades
+// failover speed or removes dependency-upgrade pinning (the values match the controller-runtime defaults).
+func newManagerOptions(
+	scheme *runtime.Scheme, metrics metricsserver.Options, probeAddr string, leaderElection bool,
+) ctrl.Options {
+	gracefulShutdown := gracefulShutdownTimeout // addressable copies for the *time.Duration options
+	leaseDuration := leaderLeaseDuration
+	renewDeadline := leaderRenewDeadline
+	retryPeriod := leaderRetryPeriod
+	return ctrl.Options{
+		Scheme:                 scheme,
+		Metrics:                metrics,
+		HealthProbeBindAddress: probeAddr,
+		LeaderElection:         leaderElection,
+		LeaderElectionID:       "b1076767.operators.dev",
+		// Release the lease on graceful shutdown so a standby takes over immediately instead of waiting out
+		// LeaseDuration — the active-passive HA win. SAFE only with the negative GracefulShutdownTimeout
+		// below, and because main() exits promptly after mgr.Start() returns with no lease-guarded work (#1132).
+		LeaderElectionReleaseOnCancel: true,
+		// Wait indefinitely for runnables before cancelling leader election. The manager releases the lease
+		// in a defer that runs only AFTER the runnable-stop wait returns; a FINITE timeout would let that
+		// wait return on ctx-expiry (runnableGroup.StopAndWait) while a reconcile is still doing lease-guarded
+		// work, and release the lease then — a split-brain window. Waiting indefinitely releases only after
+		// the runnables truly stop; if shutdown outlasts terminationGracePeriodSeconds the kubelet kills the
+		// process and the lease expires naturally.
+		GracefulShutdownTimeout: &gracefulShutdown,
+		LeaseDuration:           &leaseDuration,
+		RenewDeadline:           &renewDeadline,
+		RetryPeriod:             &retryPeriod,
+	}
+}
+
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 
@@ -171,21 +232,8 @@ func main() {
 		metricsServerOptions.KeyName = metricsCertKey
 	}
 
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
-		Scheme:                 scheme,
-		Metrics:                metricsServerOptions,
-		HealthProbeBindAddress: probeAddr,
-		LeaderElection:         enableLeaderElection,
-		LeaderElectionID:       "b1076767.operators.dev",
-		// Release the lease on graceful shutdown so a standby replica takes over
-		// immediately instead of waiting out LeaseDuration (~15s) — the active-passive
-		// HA win, and it collapses the rollout dead window. This is SAFE here because
-		// main() exits as soon as mgr.Start returns (below) with NO post-Start work:
-		// controller-runtime warns (issue #1132) this is only unsafe when the binary
-		// keeps running — and performing lease-guarded work — after the Manager stops.
-		// Lease timing keeps the controller-runtime/client-go defaults (15s/10s/2s).
-		LeaderElectionReleaseOnCancel: true,
-	})
+	mgrOpts := newManagerOptions(scheme, metricsServerOptions, probeAddr, enableLeaderElection)
+	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), mgrOpts)
 	if err != nil {
 		setupLog.Error(err, "Failed to start manager")
 		os.Exit(1)

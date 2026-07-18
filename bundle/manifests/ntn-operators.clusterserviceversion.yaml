@@ -190,7 +190,7 @@ spec:
                   seccompProfile:
                     type: RuntimeDefault
                 serviceAccountName: ntn-operators-controller-manager
-                terminationGracePeriodSeconds: 10
+                terminationGracePeriodSeconds: 30
     strategy: deployment
   installModes:
     - supported: false
