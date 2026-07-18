@@ -107,4 +107,7 @@ spec:
           type: RuntimeDefault
         {{- end }}
       serviceAccountName: {{ include "ntn-operators.resourceName" (dict "suffix" "controller-manager" "context" $) }}
-      terminationGracePeriodSeconds: 10
+      # >= RenewDeadline (10s): gives the graceful lease release headroom when runnables stop promptly
+      # (not a guarantee). Safety is the INFINITE GracefulShutdownTimeout (cmd/main.go) — the lease is
+      # never released before the runnables truly stop.
+      terminationGracePeriodSeconds: 30

@@ -99,4 +99,8 @@ spec:
         volumeMounts: []
       volumes: []
       serviceAccountName: controller-manager
-      terminationGracePeriodSeconds: 10
+      # >= leader-election RenewDeadline (10s): gives the graceful lease release HEADROOM when runnables
+      # stop promptly (not a guarantee — if little grace remains, SIGKILL falls back to lease-expiry
+      # failover). Safety comes from the INFINITE GracefulShutdownTimeout (cmd/main.go): the lease is
+      # released only after runnables truly stop; a hung pod is SIGKILLed here WITHOUT an early release.
+      terminationGracePeriodSeconds: 30

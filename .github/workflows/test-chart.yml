@@ -7,6 +7,7 @@ on:
       - 'dist/chart/**'
       - 'bundle/**'
       - 'config/crd/**'
+      - 'cmd/**'
       - 'Makefile'
       - '.github/workflows/**'
   pull_request:
@@ -14,6 +15,7 @@ on:
       - 'dist/chart/**'
       - 'bundle/**'
       - 'config/crd/**'
+      - 'cmd/**'
       - 'Makefile'
       - '.github/workflows/**'
 
@@ -59,6 +61,23 @@ jobs:
 
       - name: Lint Helm Chart
         run: ./bin/helm lint ./dist/chart
+
+      - name: Verify chart HA invariants (PDB replicas gate + shutdown grace)
+        run: |
+          set -euo pipefail
+          H=./bin/helm
+          count() { $H template t ./dist/chart --set manager.replicas="$1" --set podDisruptionBudget.enable=true | grep -c '^kind: PodDisruptionBudget' || true; }
+          [ "$(count 1)" = "0" ] || { echo "FAIL: replicas=1 must render 0 PDBs (a minAvailable:1 PDB over 1 replica deadlocks node drains)"; exit 1; }
+          [ "$(count 2)" = "1" ] || { echo "FAIL: replicas=2 must render 1 PDB"; exit 1; }
+          [ "$(count 3)" = "1" ] || { echo "FAIL: replicas=3 must render 1 PDB"; exit 1; }
+          echo "PDB replicas gate OK (1->0, 2->1, 3->1)"
+          # Threshold shares the SAME source as production: parse leaderRenewDeadline (seconds) from
+          # cmd/main.go so the chart headroom check cannot drift from the Go constant.
+          renew=$(grep -oE 'leaderRenewDeadline = [0-9]+ \* time\.Second' cmd/main.go | grep -oE '[0-9]+' | head -1)
+          [ -n "$renew" ] || { echo "FAIL: could not read leaderRenewDeadline from cmd/main.go"; exit 1; }
+          grace=$($H template t ./dist/chart | grep -oE 'terminationGracePeriodSeconds: [0-9]+' | head -1 | grep -oE '[0-9]+$')
+          { [ -n "$grace" ] && [ "$grace" -ge "$renew" ]; } || { echo "FAIL: chart terminationGracePeriodSeconds='$grace' must be >= RenewDeadline ${renew}s"; exit 1; }
+          echo "chart terminationGracePeriodSeconds=$grace (>= RenewDeadline ${renew}s) OK"
 
       - name: Deploy manager via Helm
         run: make helm-deploy IMG=controller:latest HELM_EXTRA_ARGS="--set manager.image.pullPolicy=Never"
