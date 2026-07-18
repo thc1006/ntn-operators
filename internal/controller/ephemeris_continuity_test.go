@@ -67,17 +67,24 @@ func ephForContinuity(t *testing.T, name string) (*SatelliteEphemerisReconciler,
 	return r, cli, key, fetcher
 }
 
-// assertSustainedOutageKeepsPropagating is the property the whole I-18 "serve cache preserves
-// SIB19 continuity" claim rests on, and which NOTHING tested before: across a SUSTAINED
+// assertSustainedOutageKeepsPropagating covers ONE facet of the I-18 "serve cache preserves
+// SIB19 continuity" claim: WITHIN a single fetch-retry backoff window, across a SUSTAINED
 // upstream outage the controller must
 //
-//	(a) contact the source only ONCE (the retry backoff must hold), while
+//	(a) contact the source only ONCE (the retry backoff must hold WITHIN the window), while
 //	(b) STILL re-propagating on every reconcile so the pushed epoch never expires, and
 //	(c) requeueing on the 3-minute propagation cadence, not the 2–24h fetch backoff.
 //
 // The old code used the fetch backoff AS the reconcile cadence, so it re-propagated once to
 // now+5m and then slept for hours — the epoch expired ~5 minutes in and the consumer refused
 // the state for the rest of the outage. Continuity was ~4% (5min / 2h), not 100%.
+//
+// This uses the real wall clock (a 2ms sleep to separate epochs), so it can only observe the
+// FIRST window — every cycle here sees calls==1. What happens as the outage OUTLASTS that
+// window — the fetch re-attempting once per window and the 1m→2m→4m ramp growing while
+// propagation stays continuous — is the OTHER facet, covered deterministically by
+// TestReconcile_SustainedOutage_AdvancesClockAcrossMultipleRetryWindows (which needs an
+// injected clock to jump past each nextFetchAttempt without sleeping for minutes).
 func assertSustainedOutageKeepsPropagating(t *testing.T, fetchErr error) {
 	t.Helper()
 	ctx := context.Background()

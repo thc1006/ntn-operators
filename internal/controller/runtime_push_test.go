@@ -442,14 +442,55 @@ func TestPushEphemerisUpdateIfNeeded_PermanentRejectionNoRequeue(t *testing.T) {
 // small so OCUDU's internal propagation from the epoch is short (guards against a
 // regression back to now+refreshInterval, which back-propagated hours).
 func TestPropagationEpochLeadVsSkewMargin(t *testing.T) {
-	if propagationEpochLead <= epochSkewMargin {
-		t.Fatalf("propagationEpochLead (%v) must exceed epochSkewMargin (%v) so a fresh state is not stale-skipped",
-			propagationEpochLead, epochSkewMargin)
+	// The heartbeat only reschedules on a POSITIVE cadence: the reconcile returns
+	// RequeueAfter = min(effectiveInterval, propagationRefreshInterval), and controller-runtime requeues
+	// after a duration only when it is > 0, so a zero/negative cadence disables periodic propagation.
+	if propagationRefreshInterval <= 0 {
+		t.Fatalf("propagationRefreshInterval must be positive; got %v — a non-positive RequeueAfter disables "+
+			"the scheduled propagation heartbeat entirely", propagationRefreshInterval)
+	}
+	// The producer stamps each epoch at now+propagationEpochLead and re-propagates every
+	// propagationRefreshInterval; the consumer rejects a state whose EpochUnixMs <= now+epochSkewMargin.
+	// Both sides serialize through UnixMilli, which truncates sub-millisecond, and the producer's `now` can
+	// sit at ANY sub-millisecond phase — so comparing UnixMilli at a single fixed phase (e.g. the Unix
+	// epoch) is not enough: two instants less than 1ms apart floor into the same millisecond at some phase,
+	// and the consumer's <= then rejects the epoch. The necessary-and-sufficient constant-level condition,
+	// over every phase, is that the nominal headroom (lead - cadence - skew) is at least ONE full
+	// millisecond; then floor(p+lead) is always at least one bucket above floor(p+cadence+skew) for every
+	// phase p (see TestPropagationEpochSerialization_AllClockPhases). This is the constant-level LOWER BOUND
+	// on continuity — runtime processing / queue / status-watch / delivery latency live outside it (tracked
+	// by #234); it is NOT an unconditional "never expires" guarantee. (The outage progression test proves
+	// only that the fetch-retry state machine does not BLOCK the heartbeat; it cannot prove the lead is
+	// large enough, as its expected epoch is derived from this same constant.) This subsumes the old
+	// lead > epochSkewMargin check.
+	if headroom := propagationEpochLead - propagationRefreshInterval - epochSkewMargin; headroom < time.Millisecond {
+		t.Fatalf("propagationEpochLead (%v) must leave at least 1ms of nominal headroom after "+
+			"propagationRefreshInterval (%v) + epochSkewMargin (%v); got %v — at some sub-millisecond clock "+
+			"phase the serialized (UnixMilli) epoch collapses onto the consumer's stale cutoff",
+			propagationEpochLead, propagationRefreshInterval, epochSkewMargin, headroom)
 	}
 	if propagationEpochLead > 30*time.Minute {
 		t.Fatalf("propagationEpochLead (%v) is too large; a near-now epoch keeps OCUDU's internal propagation short",
 			propagationEpochLead)
 	}
+}
+
+// TestPropagationEpochSerialization_AllClockPhases is the standalone precision proof behind the
+// >= 1ms headroom requirement in TestPropagationEpochLeadVsSkewMargin: with only a sub-millisecond gap
+// there IS a clock phase where the serialized (UnixMilli) epoch floors into the same millisecond as the
+// consumer's stale cutoff, so the consumer's <= would reject it. It is not tied to the production
+// constants; it demonstrates why a single fixed-phase UnixMilli comparison is insufficient.
+func TestPropagationEpochSerialization_AllClockPhases(t *testing.T) {
+	const gap = 100 * time.Microsecond // a sub-millisecond headroom
+	lead := propagationEpochLead
+	cutoff := lead - gap
+	for phase := time.Duration(0); phase < time.Millisecond; phase += time.Microsecond {
+		base := time.Unix(0, int64(phase))
+		if base.Add(lead).UnixMilli() <= base.Add(cutoff).UnixMilli() {
+			return // found the phase where a sub-1ms gap collapses under UnixMilli — exactly why >= 1ms is required
+		}
+	}
+	t.Fatal("expected a sub-millisecond clock phase where a 100µs headroom collapses under UnixMilli, found none")
 }
 
 func TestEphemerisPushShouldRequeue(t *testing.T) {
