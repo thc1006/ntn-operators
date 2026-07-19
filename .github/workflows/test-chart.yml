@@ -79,6 +79,79 @@ jobs:
           { [ -n "$grace" ] && [ "$grace" -ge "$renew" ]; } || { echo "FAIL: chart terminationGracePeriodSeconds='$grace' must be >= RenewDeadline ${renew}s"; exit 1; }
           echo "chart terminationGracePeriodSeconds=$grace (>= RenewDeadline ${renew}s) OK"
 
+      # #230 item 1: the active-passive HA topology the design relies on was never asserted structurally.
+      # A drift that dropped the soft anti-affinity, changed the default replica count, or misaligned the
+      # PDB selector (so it stops selecting the manager pods → the minAvailable guard silently protects
+      # nothing) would ship green. Assert the rendered topology holds.
+      - name: Verify chart HA topology (replicas / PDB selector alignment / soft anti-affinity)
+        run: |
+          set -euo pipefail
+          ./bin/helm template t ./dist/chart -n ntn-system --set podDisruptionBudget.enable=true > /tmp/ha_topology.yaml
+          python3 - <<'PY'
+          import sys, math, yaml
+          docs = [d for d in yaml.safe_load_all(open('/tmp/ha_topology.yaml')) if d]
+          deps = [d for d in docs if d['kind'] == 'Deployment']
+          pdbs = [d for d in docs if d['kind'] == 'PodDisruptionBudget']
+          errs = []
+          if len(deps) != 1:
+              errs.append(f"expected exactly 1 Deployment, got {len(deps)}")
+          if len(pdbs) != 1:
+              errs.append(f"expected exactly 1 PodDisruptionBudget, got {len(pdbs)}")
+          if not errs:
+              dep, pdb = deps[0], pdbs[0]
+              # (1) active-passive default = 2 replicas (one active reconciler + one warm standby).
+              if dep['spec'].get('replicas') != 2:
+                  errs.append(f"default replicas must be 2 (active-passive), got {dep['spec'].get('replicas')}")
+              # (2) PDB minAvailable=1 over 2 replicas → a drain may take at most one at a time.
+              if pdb['spec'].get('minAvailable') != 1:
+                  errs.append(f"PDB minAvailable must be 1, got {pdb['spec'].get('minAvailable')}")
+              pod_labels = dep['spec']['template']['metadata']['labels']
+              # (3) soft (preferred) pod anti-affinity spreads the standby onto another node; must NOT be
+              #     hard (required), which would wedge scheduling on a single-node cluster; AND its
+              #     labelSelector must actually SELECT the manager pods and spread by hostname — else the
+              #     spread silently guards nothing (the same class the PDB alignment check below catches).
+              paa = dep['spec']['template']['spec'].get('affinity', {}).get('podAntiAffinity', {})
+              pref = paa.get('preferredDuringSchedulingIgnoredDuringExecution', [])
+              if not pref:
+                  errs.append("Deployment must set a SOFT (preferred) podAntiAffinity")
+              if 'requiredDuringSchedulingIgnoredDuringExecution' in paa:
+                  errs.append("podAntiAffinity must NOT be hard (required) — it would wedge single-node scheduling")
+              if pref:
+                  term = pref[0].get('podAffinityTerm', {})
+                  aff_sel = term.get('labelSelector', {}).get('matchLabels', {})
+                  aff_mism = {k: (v, pod_labels.get(k)) for k, v in aff_sel.items() if pod_labels.get(k) != v}
+                  if not aff_sel or aff_mism:
+                      errs.append(f"podAntiAffinity labelSelector does not select the manager pods (sel={aff_sel} mismatch={aff_mism})")
+                  if term.get('topologyKey') != 'kubernetes.io/hostname':
+                      errs.append(f"podAntiAffinity topologyKey must be kubernetes.io/hostname, got {term.get('topologyKey')}")
+              # (4) selector alignment: the PDB must actually SELECT the manager pods, else minAvailable
+              #     guards nothing. Every PDB selector label must match the Deployment's pod-template labels.
+              sel = pdb['spec']['selector']['matchLabels']
+              mism = {k: (v, pod_labels.get(k)) for k, v in sel.items() if pod_labels.get(k) != v}
+              if not sel or mism:
+                  errs.append(f"PDB selector does not match the Deployment pod labels (sel={sel} mismatch={mism})")
+              # (5) the cache-sync /readyz rollout gate (TestHACacheSyncRolloutGate, #230) relies on the
+              #     effective maxUnavailable being 0 for the default 2 replicas: a broken new pod must NOT be
+              #     able to tear down the last healthy one. Kube's default RollingUpdate (25%/25%) floors to 0
+              #     over 2 replicas; assert nothing overrode that into a >0 value and that the strategy is not
+              #     Recreate (which drops every pod at once). Percentages for maxUnavailable round DOWN.
+              strat = dep['spec'].get('strategy') or {}
+              if strat.get('type') == 'Recreate':
+                  errs.append("Deployment strategy must not be Recreate — it tears down the healthy version during a rollout")
+              mu = (strat.get('rollingUpdate') or {}).get('maxUnavailable')
+              if mu is None:
+                  eff_mu = 0  # kube default 25% of 2 replicas → floor(0.5) = 0
+              elif isinstance(mu, str) and mu.endswith('%'):
+                  eff_mu = math.floor(int(mu[:-1]) / 100 * 2)
+              else:
+                  eff_mu = int(mu)
+              if eff_mu != 0:
+                  errs.append(f"effective maxUnavailable over 2 replicas must be 0 (strategy.rollingUpdate.maxUnavailable={mu} -> {eff_mu}); a >0 value lets a broken new pod evict the last healthy replica")
+          if errs:
+              print("FAIL: chart HA topology:\n  - " + "\n  - ".join(errs)); sys.exit(1)
+          print("chart HA topology OK (replicas=2, PDB minAvailable=1 selecting the manager pods, soft anti-affinity)")
+          PY
+
       # F7 (#228): the egress NetworkPolicy was never rendered or validated in CI, so a regression that
       # dropped DNS/UDP or an egress port would ship silently. Assert it renders only when enabled, carries
       # the egress rules the operator depends on, and is accepted by the live API server (server-side
@@ -119,3 +192,12 @@ jobs:
 
       - name: Check Helm release status
         run: make helm-status
+
+      # #230 items 2-5: exercise the active-passive HA behaviours against the just-deployed 2-replica
+      # release — graceful failover (leader delete → standby acquires lease → new leader reconciles),
+      # ungraceful failover (SIGKILL → failover within LeaseDuration), PDB eviction (evicts at most one),
+      # and the cache-sync /readyz rollout gate (a broken replica stays NotReady, healthy version preserved).
+      # These are DESTRUCTIVE (kill/evict pods, briefly break RBAC) so they run last, after the chart
+      # validations above. The suite self-heals to 2 ready replicas between cases.
+      - name: HA failover / PDB / cache-sync E2E (#230)
+        run: HA_NAMESPACE=ntn-operators-system make test-e2e-ha
