@@ -188,6 +188,11 @@ var _ = Describe("NTNCellConfig runtime-push lifecycle (envtest)", func() {
 		frozenGeneration := eph.Generation
 		frozenSpec := eph.Spec.DeepCopy()
 		frozenInputHash := eph.Status.PropagatedStatesInputHash
+		// Also pin the CELL's generation: "only the epoch moved" relies on the cell's own spec (hence
+		// generation) staying untouched, so assert that explicitly below rather than leaving it implicit.
+		frozenCell := &ntnv1alpha1.NTNCellConfig{}
+		Expect(k8sClient.Get(context.Background(), cellKey, frozenCell)).To(Succeed())
+		frozenCellGeneration := frozenCell.Generation
 		freshEpoch := initialEpoch + (2 * time.Minute).Milliseconds()
 		eph.Status.PropagatedStates[0].EpochUnixMs = freshEpoch
 		Expect(k8sClient.Status().Update(context.Background(), eph)).To(Succeed())
@@ -212,6 +217,7 @@ var _ = Describe("NTNCellConfig runtime-push lifecycle (envtest)", func() {
 
 			current := &ntnv1alpha1.NTNCellConfig{}
 			g.Expect(k8sClient.Get(context.Background(), cellKey, current)).To(Succeed())
+			g.Expect(current.Generation).To(Equal(frozenCellGeneration))
 			fresh := meta.FindStatusCondition(current.Status.Conditions, ntnv1alpha1.ConditionEphemerisPushed)
 			g.Expect(fresh).NotTo(BeNil())
 			g.Expect(fresh.Status).To(Equal(metav1.ConditionTrue))
