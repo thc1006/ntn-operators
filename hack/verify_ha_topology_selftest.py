@@ -195,6 +195,37 @@ def m_pdb_maxunavail_2(d):
     _pdb(d)['spec']['maxUnavailable'] = 2
 
 
+def m_podaffinity_empty_selector(d):
+    # Empty {} labelSelector = labels.Everything() -> selects ALL pods -> co-locates. _selector_selects returns
+    # False for {}, so the guard must special-case it (else a silent HA-defeating co-location slips through).
+    _dep(d)['spec']['template']['spec'].setdefault('affinity', {})['podAffinity'] = {
+        'preferredDuringSchedulingIgnoredDuringExecution': [{
+            'weight': 100,
+            'podAffinityTerm': {'topologyKey': 'kubernetes.io/hostname', 'labelSelector': {}},
+        }],
+    }
+
+
+def m_podaffinity_matchlabelkeys(d):
+    # matchLabelKeys merges the selector to same-ReplicaSet pods -> co-locates even with a base {} selector.
+    _dep(d)['spec']['template']['spec'].setdefault('affinity', {})['podAffinity'] = {
+        'requiredDuringSchedulingIgnoredDuringExecution': [{
+            'topologyKey': 'kubernetes.io/hostname',
+            'labelSelector': {},
+            'matchLabelKeys': ['pod-template-hash'],
+        }],
+    }
+
+
+def m_pdb_both_set(d):
+    _pdb(d)['spec']['minAvailable'] = 1  # kube forbids BOTH minAvailable AND maxUnavailable
+    _pdb(d)['spec']['maxUnavailable'] = 2
+
+
+def m_pdb_frac_pct(d):
+    _pdb(d)['spec']['minAvailable'] = '50.5%'  # malformed percentage -> must reject cleanly, not traceback
+
+
 # Each mutation must be REJECTED by check(); m_aff_weight0 also proves the weight=0 (no-op) case is caught.
 CASES = [
     m_replicas, m_pdb_min, m_pdb_selector, m_recreate, m_maxunavail_int, m_maxunavail_pct,
@@ -204,6 +235,7 @@ CASES = [
     m_aff_invalid_op, m_aff_in_empty, m_aff_notin_empty,
     m_nodename, m_nodeselector_host, m_nodeaffinity_host, m_podaffinity_colocate,
     m_paused, m_weight_str, m_pdb_maxunavail_0, m_pdb_maxunavail_2,
+    m_podaffinity_empty_selector, m_podaffinity_matchlabelkeys, m_pdb_both_set, m_pdb_frac_pct,
 ]
 
 

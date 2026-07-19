@@ -169,7 +169,15 @@ func (e *haEnv) leaseDuration(t *testing.T) time.Duration {
 	if l.Spec.LeaseDurationSeconds == nil {
 		t.Fatalf("lease %s has no leaseDurationSeconds", haLeaseName)
 	}
-	return time.Duration(*l.Spec.LeaseDurationSeconds) * time.Second
+	ld := time.Duration(*l.Spec.LeaseDurationSeconds) * time.Second
+	// Pin the ABSOLUTE HA failover budget. The RTO bounds derived from ld are self-calibrating (relative to
+	// it), so they would silently scale with a leaderLeaseDuration regression — 15s -> 120s makes an 8x-slower
+	// handoff still "pass". Assert the deployed lease stays within the stated sub-15s active-passive budget
+	// (docs/high-availability.md; the chart-invariants CI step pins the source constant too).
+	if ld > 15*time.Second {
+		t.Fatalf("deployed lease duration %s exceeds the pinned 15s HA failover budget", ld)
+	}
+	return ld
 }
 
 // holderPodBase maps a controller-runtime holderIdentity ("<pod>_<uuid>") to its owning pod name.

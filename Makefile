@@ -135,7 +135,7 @@ test-e2e: manifests generate fmt vet ## Run the e2e tests. Defaults to a Kind en
 
 .PHONY: test-e2e-ha
 test-e2e-ha: ## Run the HA E2E suite (#230) against an ALREADY-DEPLOYED chart release (2 replicas, leader election). Set HA_NAMESPACE (default ntn-operators-system). Does NOT create a cluster or deploy — run `make helm-deploy` first.
-	go test -tags=e2e_ha ./test/e2e/ -run '^TestHA' -v -timeout 20m
+	go test -tags=e2e_ha -count=1 ./test/e2e/ -run '^TestHA' -v -timeout 20m
 
 .PHONY: cleanup-test-e2e
 cleanup-test-e2e: ## Tear down the Kind cluster used for e2e tests

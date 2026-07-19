@@ -110,6 +110,13 @@ jobs:
           grace=$($H template t ./dist/chart | grep -oE 'terminationGracePeriodSeconds: [0-9]+' | head -1 | grep -oE '[0-9]+$')
           { [ -n "$grace" ] && [ "$grace" -ge "$renew" ]; } || { echo "FAIL: chart terminationGracePeriodSeconds='$grace' must be >= RenewDeadline ${renew}s"; exit 1; }
           echo "chart terminationGracePeriodSeconds=$grace (>= RenewDeadline ${renew}s) OK"
+          # Pin the ABSOLUTE HA failover budget. The E2E RTO bounds are self-calibrating (relative to the live
+          # Lease's leaseDurationSeconds), so they would silently scale with a leaderLeaseDuration regression
+          # (15s -> 120s makes an 8x-slower handoff still pass). Assert the source constant stays within the
+          # stated sub-15s active-passive budget (docs/high-availability.md).
+          lease=$(grep -oE 'leaderLeaseDuration = [0-9]+ \* time\.Second' cmd/main.go | grep -oE '[0-9]+' | head -1)
+          { [ -n "$lease" ] && [ "$lease" -le 15 ]; } || { echo "FAIL: leaderLeaseDuration='$lease's exceeds the pinned 15s HA failover budget"; exit 1; }
+          echo "leaderLeaseDuration=${lease}s (<= 15s HA budget) OK"
 
       # #230 item 1: the active-passive HA topology the design relies on was never asserted structurally.
       # A drift that dropped the soft anti-affinity, changed the default replica count, misaligned the PDB
@@ -172,11 +179,14 @@ jobs:
       - name: Verify the deployed manager runs the just-built image
         run: |
           set -euo pipefail
-          imgs=$(kubectl -n ntn-operators-system get deploy -l control-plane=controller-manager \
-                   -o jsonpath='{.items[*].spec.template.spec.containers[*].image}')
-          echo "deployed manager image(s): $imgs"
-          echo "$imgs" | grep -q 'controller:latest' \
-            || { echo "FAIL: deployed manager image is not the built controller:latest (stale-code risk)"; exit 1; }
+          # Select the "manager" container BY NAME and compare EXACTLY — a substring grep over all containers
+          # could be satisfied by a sidecar tagged controller:latest (or fooled by controller:latest-debug)
+          # while the manager itself deployed a stale image.
+          img=$(kubectl -n ntn-operators-system get deploy -l control-plane=controller-manager \
+                  -o jsonpath='{.items[0].spec.template.spec.containers[?(@.name=="manager")].image}')
+          echo "deployed manager container image: $img"
+          [ "$img" = "controller:latest" ] \
+            || { echo "FAIL: manager container image is '$img', not the built controller:latest (stale-code risk)"; exit 1; }
 
       # #230 items 2-5: exercise the active-passive HA behaviours against the just-deployed 2-replica
       # release — graceful failover (leader delete → standby acquires lease → new leader reconciles),
@@ -201,7 +211,14 @@ jobs:
           if grep -Eq 'no tests to run|no test files' /tmp/ha_e2e.out; then
             echo "FALSE GREEN: go test -tags=e2e_ha ran no tests"; exit 1
           fi
-          for tc in TestHAGracefulFailover TestHAUngracefulFailover TestHAPDBEviction TestHACacheSyncRolloutGate; do
+          # DERIVE the TestHA* set from the compiled binary so a NEW HA test or a rename is auto-covered (not
+          # just a hardcoded list), require at least the current four, then assert each actually PASSED. A
+          # build-tag typo makes the list empty -> caught by the floor.
+          mapfile -t HATESTS < <(go test -tags=e2e_ha ./test/e2e/ -list '^TestHA' 2>/dev/null | grep '^TestHA' || true)
+          if [ "${#HATESTS[@]}" -lt 4 ]; then
+            echo "FALSE GREEN: expected >= 4 TestHA* tests, found ${#HATESTS[@]} (build-tag/rename regression?)"; exit 1
+          fi
+          for tc in "${HATESTS[@]}"; do
             grep -Eq "^--- PASS: ${tc} " /tmp/ha_e2e.out || { echo "FALSE GREEN: ${tc} did not run+PASS"; exit 1; }
           done
-          echo "verified: all 4 TestHA* ran and passed"
+          echo "verified: all ${#HATESTS[@]} TestHA* ran and passed"

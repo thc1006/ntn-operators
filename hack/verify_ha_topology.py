@@ -70,6 +70,17 @@ def _as_int(v, default=0):
     return v if isinstance(v, int) and not isinstance(v, bool) else default
 
 
+def _percent(v):
+    """Parse an integer-percentage string ("50%" -> 50); return None for a non-integer or non-"%" string
+    (e.g. "50.5%", "abc%") so the caller fails closed instead of raising a ValueError traceback."""
+    if not isinstance(v, str) or not v.endswith('%'):
+        return None
+    try:
+        return int(v[:-1])
+    except ValueError:
+        return None
+
+
 def _pdb_guaranteed_available(pdb_spec, replicas=2):
     """The minimum pods the PDB guarantees stay available, whether written as minAvailable or maxUnavailable,
     int or percentage — so `maxUnavailable: 1` (equivalent to `minAvailable: 1` over 2 replicas) is accepted,
@@ -77,17 +88,21 @@ def _pdb_guaranteed_available(pdb_spec, replicas=2):
     unavailable-count rounds up, i.e. the fewest guaranteed available). Returns None if neither is set or a
     value is a non-percentage string (kube itself rejects those; the caller flags them)."""
     mn, mx = pdb_spec.get('minAvailable'), pdb_spec.get('maxUnavailable')
+    if mn is not None and mx is not None:
+        return None  # kube forbids setting BOTH — treat as unresolvable so the caller flags it
     if mn is not None:
         if isinstance(mn, bool):
             return None
         if isinstance(mn, str):
-            return math.ceil(int(mn[:-1]) / 100 * replicas) if mn.endswith('%') else None
+            pct = _percent(mn)
+            return math.ceil(pct / 100 * replicas) if pct is not None else None
         return int(mn)
     if mx is not None:
         if isinstance(mx, bool):
             return None
         if isinstance(mx, str):
-            return replicas - math.ceil(int(mx[:-1]) / 100 * replicas) if mx.endswith('%') else None
+            pct = _percent(mx)
+            return replicas - math.ceil(pct / 100 * replicas) if pct is not None else None
         return replicas - int(mx)
     return None
 
@@ -239,6 +254,8 @@ def check(docs):
     #     label; a nodeAffinity (required or preferred) that references the hostname label or pins the node
     #     name; and a podAffinity (ATTRACTION, hard or soft) on the hostname topology selecting the manager
     #     (which pulls the replicas together — the opposite of anti-affinity).
+    # NOTE: this guard covers the kubernetes.io/hostname pinning dimension only — a pin via a custom single-node
+    # label (a rack/zone label that happens to map to one node) cannot be detected from a render alone.
     podspec = dep['spec']['template']['spec']
     if podspec.get('nodeName'):
         errs.append(f"pod template sets spec.nodeName={podspec.get('nodeName')!r} — pins ALL replicas to one "
@@ -250,18 +267,27 @@ def check(docs):
     na_terms = list((na.get('requiredDuringSchedulingIgnoredDuringExecution') or {}).get('nodeSelectorTerms') or [])
     na_terms += [(p.get('preference') or {}) for p in (na.get('preferredDuringSchedulingIgnoredDuringExecution') or [])]
     for term in na_terms:
-        keys = [e.get('key') for e in (term.get('matchExpressions') or [])]
-        fields = [e.get('key') for e in (term.get('matchFields') or [])]
-        if 'kubernetes.io/hostname' in keys or 'metadata.name' in fields:
-            errs.append("nodeAffinity references the node hostname (kubernetes.io/hostname / metadata.name) — "
-                        "can pin all replicas to one node, defeating the HA spread")
+        # Only a POSITIVE pin co-locates: hostname/metadata.name `In` WITH values. NotIn/Exists/DoesNotExist are
+        # exclusions or presence checks that do NOT force all replicas onto one node (so must not be rejected).
+        pins = any(e.get('key') == 'kubernetes.io/hostname' and e.get('operator') == 'In' and (e.get('values') or [])
+                   for e in (term.get('matchExpressions') or []))
+        pins = pins or any(e.get('key') == 'metadata.name' and e.get('operator') == 'In' and (e.get('values') or [])
+                           for e in (term.get('matchFields') or []))
+        if pins:
+            errs.append("nodeAffinity pins the node (kubernetes.io/hostname In / metadata.name In) — can pin all "
+                        "replicas to one node, defeating the HA spread")
             break
     pa = affinity.get('podAffinity') or {}
     pa_terms = list(pa.get('requiredDuringSchedulingIgnoredDuringExecution') or [])
     pa_terms += [(p.get('podAffinityTerm') or {}) for p in (pa.get('preferredDuringSchedulingIgnoredDuringExecution') or [])]
     for term in pa_terms:
-        if term.get('topologyKey') == 'kubernetes.io/hostname' \
-                and _selector_selects(term.get('labelSelector') or {}, pod_labels):
+        if term.get('topologyKey') != 'kubernetes.io/hostname':
+            continue
+        sel = term.get('labelSelector')
+        # An EMPTY {} selector is labels.Everything() (selects ALL pods) -> co-locates; a NIL/absent selector is
+        # labels.Nothing() (selects none) -> harmless. matchLabelKeys merges the selector to same-ReplicaSet
+        # pods -> co-locates. A non-empty selector co-locates iff it selects the manager.
+        if sel == {} or term.get('matchLabelKeys') or (sel and _selector_selects(sel, pod_labels)):
             errs.append("podAffinity ATTRACTS the manager on kubernetes.io/hostname — pulls both replicas onto "
                         "one node, the opposite of the anti-affinity spread")
             break
