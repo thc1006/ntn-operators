@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -63,7 +64,7 @@ var _ = Describe("NTNCellConfig runtime-push lifecycle (envtest)", func() {
 	cellKey := types.NamespacedName{Namespace: namespace, Name: cellName}
 	ephKey := types.NamespacedName{Namespace: namespace, Name: ephName}
 
-	It("deduplicates a settled epoch and pushes once after input currency catches up", func() {
+	It("re-pushes for an epoch-only freshness advance and after input currency catches up", func() {
 		prov := newRuntimePushRecorder()
 		mgr, err := ctrl.NewManager(cfg, ctrl.Options{
 			Scheme:  scheme.Scheme,
@@ -178,6 +179,42 @@ var _ = Describe("NTNCellConfig runtime-push lifecycle (envtest)", func() {
 		Expect(condition).NotTo(BeNil())
 		Expect(condition.Message).To(Equal(settledMarker))
 
+		// Advance only the propagated epoch while the spec, generation, and input
+		// hash stay fixed. This is the between-GP-fetch freshness path: the watch
+		// must fan out exactly one runtime update for the new epoch.
+		Expect(k8sClient.Get(context.Background(), ephKey, eph)).To(Succeed())
+		epochOnlyGeneration := eph.Generation
+		epochOnlySpec := eph.Spec.DeepCopy()
+		epochOnlyInputHash := eph.Status.PropagatedStatesInputHash
+		epochOnlyEpoch := initialEpoch + (3 * time.Minute).Milliseconds()
+		eph.Status.PropagatedStates[0].EpochUnixMs = epochOnlyEpoch
+		Expect(k8sClient.Status().Update(context.Background(), eph)).To(Succeed())
+
+		var epochOnlyPush provider.RuntimeUpdate
+		Eventually(prov.pushes, "10s").Should(Receive(&epochOnlyPush))
+		Expect(epochOnlyPush.EpochUnixMs).To(Equal(epochOnlyEpoch))
+
+		expectedEpochOnlyMarker := fmt.Sprintf(
+			"ephemerisRef=%s ephGeneration=%d norad=%d epoch=%d",
+			ephName, epochOnlyGeneration, 25544, epochOnlyEpoch,
+		)
+		Eventually(func(g Gomega) {
+			currentEph := &ntnv1alpha1.SatelliteEphemeris{}
+			g.Expect(k8sClient.Get(context.Background(), ephKey, currentEph)).To(Succeed())
+			g.Expect(currentEph.Spec).To(Equal(*epochOnlySpec))
+			g.Expect(currentEph.Generation).To(Equal(epochOnlyGeneration))
+			g.Expect(currentEph.Status.PropagatedStatesInputHash).To(Equal(epochOnlyInputHash))
+
+			current := &ntnv1alpha1.NTNCellConfig{}
+			g.Expect(k8sClient.Get(context.Background(), cellKey, current)).To(Succeed())
+			fresh := meta.FindStatusCondition(current.Status.Conditions, ntnv1alpha1.ConditionEphemerisPushed)
+			g.Expect(fresh).NotTo(BeNil())
+			g.Expect(fresh.Status).To(Equal(metav1.ConditionTrue))
+			g.Expect(fresh.Reason).To(Equal("Pushed"))
+			g.Expect(fresh.Message).To(Equal(expectedEpochOnlyMarker))
+		}, "10s", "100ms").Should(Succeed())
+		Consistently(prov.pushes, "2s", "100ms").ShouldNot(Receive())
+
 		// The apiserver owns generation: changing a propagation input bumps it while
 		// the status subresource still describes the old input set. The cached
 		// controller must fail closed and settle without pushing stale data.
@@ -202,9 +239,10 @@ var _ = Describe("NTNCellConfig runtime-push lifecycle (envtest)", func() {
 
 		// Once the producer status catches up to the new inputs and epoch, the status
 		// watch fans out exactly one fresh runtime push. The controller's own status
-		// write must not create a hot requeue or a third push.
+		// write must not create a hot requeue or a fourth push.
 		Expect(k8sClient.Get(context.Background(), ephKey, eph)).To(Succeed())
-		nextEpoch := initialEpoch + (3 * time.Minute).Milliseconds()
+		nextGeneration := eph.Generation
+		nextEpoch := epochOnlyEpoch + (3 * time.Minute).Milliseconds()
 		eph.Status.PropagatedStatesInputHash = propagationInputHash(eph.Spec)
 		eph.Status.PropagatedStates[0].EpochUnixMs = nextEpoch
 		Expect(k8sClient.Status().Update(context.Background(), eph)).To(Succeed())
@@ -220,7 +258,10 @@ var _ = Describe("NTNCellConfig runtime-push lifecycle (envtest)", func() {
 			g.Expect(fresh).NotTo(BeNil())
 			g.Expect(fresh.Status).To(Equal(metav1.ConditionTrue))
 			g.Expect(fresh.Reason).To(Equal("Pushed"))
-			g.Expect(fresh.Message).To(Equal(runtimeEphemerisPushMarker(eph, &eph.Status.PropagatedStates[0])))
+			g.Expect(fresh.Message).To(Equal(fmt.Sprintf(
+				"ephemerisRef=%s ephGeneration=%d norad=%d epoch=%d",
+				ephName, nextGeneration, 25544, nextEpoch,
+			)))
 		}, "10s", "100ms").Should(Succeed())
 		Consistently(prov.pushes, "2s", "100ms").ShouldNot(Receive())
 	})

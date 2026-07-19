@@ -95,6 +95,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   through same-epoch deduplication, a propagation-input generation bump that fails
   closed while status is stale, and exactly one re-push after status catches up
   without a hot requeue (#252).
+- **Runtime-push epoch-only freshness re-push now has manager-backed envtest coverage.**
+  The regression holds the ephemeris spec and generation constant, advances only
+  the propagated epoch, and requires exactly one push with an independently
+  asserted persisted marker (#255).
 - **The chart's PodDisruptionBudget renders only when `replicas > 1`.** A `minAvailable: 1` PDB over
   a single replica blocks every eviction-API disruption (node drain, descheduler, autoscaler) — the
   one pod can never be evicted (it does not gate Deployment rolling updates, which delete pods
