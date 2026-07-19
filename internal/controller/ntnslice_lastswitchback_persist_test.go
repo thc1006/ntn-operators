@@ -17,6 +17,7 @@ import (
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -83,6 +84,11 @@ func TestReconcile_FailedSwitchbackThenPassEnded_NoGhostDwell(t *testing.T) {
 			Satellite: "ONEWEB-0012", GroundStation: "gs",
 			AOS: metav1.Time{Time: aos}, LOS: metav1.Time{Time: los},
 		}}
+		// PassesPredicted=True: the prediction is current, so an ENDED window is a genuine end-of-pass
+		// under the consumer's 3-state contract (ADR 0006 / #234), not "unknown".
+		meta.SetStatusCondition(&eph.Status.Conditions, metav1.Condition{
+			Type: ntnv1alpha1.ConditionPassesPredicted, Status: metav1.ConditionTrue, Reason: "Predicted",
+		})
 		if err := cli.Status().Update(context.Background(), eph); err != nil {
 			t.Fatalf("seed pass window: %v", err)
 		}
@@ -149,12 +155,16 @@ func baseSliceForDwell(t *testing.T, fixedNow time.Time, status ntnv1alpha1.NTNS
 	}
 	cli := fake.NewClientBuilder().WithScheme(sch).
 		WithObjects(nsObj, eph).WithStatusSubresource(nsObj, eph).Build()
-	// Live pass window: satellite available now.
+	// Live pass window: satellite available now. PassesPredicted=True marks the prediction current so
+	// the consumer's 3-state contract (ADR 0006 / #234) trusts the windows.
 	eph.Status.NextPassWindows = []ntnv1alpha1.PassWindow{{
 		Satellite: "ONEWEB-0012", GroundStation: "gs",
 		AOS: metav1.Time{Time: fixedNow.Add(-1 * time.Hour)},
 		LOS: metav1.Time{Time: fixedNow.Add(1 * time.Hour)},
 	}}
+	meta.SetStatusCondition(&eph.Status.Conditions, metav1.Condition{
+		Type: ntnv1alpha1.ConditionPassesPredicted, Status: metav1.ConditionTrue, Reason: "Predicted",
+	})
 	if err := cli.Status().Update(context.Background(), eph); err != nil {
 		t.Fatalf("seed ephemeris pass window: %v", err)
 	}

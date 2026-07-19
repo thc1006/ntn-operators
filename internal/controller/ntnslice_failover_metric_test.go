@@ -93,6 +93,9 @@ func TestReconcile_FailoverCounterNotIncrementedOnStatusConflict(t *testing.T) {
 					MaxElevation:  "45.0",
 				},
 			},
+			Conditions: []metav1.Condition{{
+				Type: ntnv1alpha1.ConditionPassesPredicted, Status: metav1.ConditionTrue, Reason: "Predicted",
+			}},
 		},
 	}
 

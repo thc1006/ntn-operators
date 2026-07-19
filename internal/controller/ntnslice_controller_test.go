@@ -202,6 +202,9 @@ var _ = Describe("NTNSlice Controller", func() {
 					MaxElevation:  "45.0",
 				},
 			}
+			meta.SetStatusCondition(&eph.Status.Conditions, metav1.Condition{
+				Type: ntnv1alpha1.ConditionPassesPredicted, Status: metav1.ConditionTrue, Reason: "Predicted",
+			})
 			Expect(k8sClient.Status().Update(context.Background(), eph)).To(Succeed())
 			DeferCleanup(func() {
 				_ = k8sClient.Delete(context.Background(), eph)
@@ -336,6 +339,11 @@ var _ = Describe("NTNSlice Controller", func() {
 				},
 			}
 		}
+		// PassesPredicted=True: the prediction is current, so the windows (active or ended) are trusted
+		// by the consumer's 3-state contract (ADR 0006 / #234).
+		meta.SetStatusCondition(&eph.Status.Conditions, metav1.Condition{
+			Type: ntnv1alpha1.ConditionPassesPredicted, Status: metav1.ConditionTrue, Reason: "Predicted",
+		})
 		Expect(k8sClient.Status().Update(context.Background(), eph)).To(Succeed())
 		return eph
 	}
@@ -1045,6 +1053,9 @@ var _ = Describe("NTNSlice Controller", func() {
 				LOS:          metav1.Time{Time: time.Date(2026, 4, 17, 9, 0, 0, 0, time.UTC)},
 				MaxElevation: "45.0",
 			}}
+			meta.SetStatusCondition(&eph.Status.Conditions, metav1.Condition{
+				Type: ntnv1alpha1.ConditionPassesPredicted, Status: metav1.ConditionTrue, Reason: "Predicted",
+			})
 			Expect(k8sClient.Status().Update(context.Background(), eph)).To(Succeed())
 			DeferCleanup(func() { _ = k8sClient.Delete(context.Background(), eph) })
 
@@ -1176,8 +1187,12 @@ var _ = Describe("NTNSlice Controller", func() {
 				},
 			}
 			Expect(k8sClient.Create(context.Background(), eph)).To(Succeed())
-			// No pass windows in status.
+			// No pass windows, but the prediction SUCCEEDED (PassesPredicted=True) — a GENUINE empty
+			// list, so the consumer reports the satellite unavailable rather than unknown (ADR 0006 / #234).
 			eph.Status.SatelliteCount = 651
+			meta.SetStatusCondition(&eph.Status.Conditions, metav1.Condition{
+				Type: ntnv1alpha1.ConditionPassesPredicted, Status: metav1.ConditionTrue, Reason: "Predicted",
+			})
 			Expect(k8sClient.Status().Update(context.Background(), eph)).To(Succeed())
 			DeferCleanup(func() { _ = k8sClient.Delete(context.Background(), eph) })
 
