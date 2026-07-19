@@ -1160,6 +1160,10 @@ func (in *SatelliteEphemerisStatus) DeepCopyInto(out *SatelliteEphemerisStatus) 
 		in, out := &in.LastUpdated, &out.LastUpdated
 		*out = (*in).DeepCopy()
 	}
+	if in.LastPassPredictionTime != nil {
+		in, out := &in.LastPassPredictionTime, &out.LastPassPredictionTime
+		*out = (*in).DeepCopy()
+	}
 	if in.NextPassWindows != nil {
 		in, out := &in.NextPassWindows, &out.NextPassWindows
 		*out = make([]PassWindow, len(*in))

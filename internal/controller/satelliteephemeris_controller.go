@@ -348,16 +348,9 @@ func (r *SatelliteEphemerisReconciler) Reconcile(ctx context.Context, req ctrl.R
 	orbitRegimeEvent := r.reportOrbitRegime(ctx, eph, len(trackedDeepSpace), ephemeris.DeepSpaceSummary(trackedDeepSpace))
 	ntnmetrics.GPDeepSpaceRejectedCount.With(prometheus.Labels{"namespace": eph.Namespace, "ephemeris": eph.Name}).Set(float64(len(trackedDeepSpace)))
 
-	// Step 7: Compute pass predictions if configured; clear stale data if disabled.
-	passNote, passFailNote, passErr := r.handlePassPrediction(ctx, eph, result, now)
-	if passErr != nil {
-		// Context cancellation (shutdown / leader loss / per-reconcile timeout) from pass
-		// prediction: stop here and let controller-runtime requeue, rather than clearing status
-		// or running the remaining propagation and status write on a cancelled context.
-		return ctrl.Result{}, passErr
-	}
-
-	// Step 7b: Propagate tracked satellites to a NEAR-now epoch for the runtime
+	// Step 7: Propagate FIRST — the runtime-push epoch is the heartbeat and must never be delayed or
+	// skipped by the (slow, lower-cadence) pass-window sweep below (ADR 0006 / #234).
+	// Propagate tracked satellites to a NEAR-now epoch for the runtime
 	// ephemeris push (#176). The epoch is only a small lead ahead of now — enough
 	// to satisfy OCUDU's "epoch must be in the future" check and the consumer's
 	// stale-epoch guard plus reconcile/delivery latency. OCUDU internally
@@ -368,9 +361,10 @@ func (r *SatelliteEphemerisReconciler) Reconcile(ctx context.Context, req ctrl.R
 	// was itself SGP4-propagated hours forward, compounding LEO error; a near-now
 	// epoch keeps OCUDU's internal propagation short and forward.
 	// #235: sample the epoch base at the ACTUAL propagation instant, not reconcile-start `now`.
-	// The fetch and pass prediction ran in between; a stale `now` would deliver an epoch already
-	// aged by that compute, eating into propagationEpochLead. (acquireOMMs and pass prediction
-	// keep the reconcile-start `now` — their windows are reconcile-relative, not epoch-critical.)
+	// The fetch ran in between; a stale `now` would deliver an epoch already aged by that compute,
+	// eating into propagationEpochLead. (acquireOMMs — and the pass sweep, now on the lower cadence
+	// AFTER this propagation per #234 — keep the reconcile-start `now`: their windows are
+	// reconcile-relative, not epoch-critical.)
 	truncEvent := r.propagateStates(ctx, eph, result, r.now().Add(propagationEpochLead))
 
 	// Stamp the propagation-input digest these propagatedStates were computed under.
@@ -384,6 +378,38 @@ func (r *SatelliteEphemerisReconciler) Reconcile(ctx context.Context, req ctrl.R
 	// (#204-G1; #221 review finding 2).
 	eph.Status.PropagatedStatesInputHash = propagationInputHash(eph.Spec)
 
+	// Decide the pass-prediction sweep BEFORE write A so an INPUT CHANGE can invalidate the now-stale
+	// windows in the SAME write that carries the fresh epoch. The two-write split (ADR 0006 / #234) would
+	// otherwise persist the fresh epoch in write A while PassesPredicted=True still sat over windows
+	// computed from the OLD inputs; a ctx-cancel/conflict before write B would then strand that stale
+	// True, and the NTNSlice consumer would steer failover on windows that no longer match the spec.
+	// (round-5 Blocker 1 — close the A->B stale-window race.)
+	inputSig, sweepDue := r.passSweepDecision(ctx, eph, now)
+	switch {
+	case !passPredictionConfigured(eph.Spec):
+		// Pass prediction DISABLED: clear any stale pass status so it rides with the epoch write below
+		// (no sweep). Centralized so the timestamp AND input hash are cleared too — not just the windows —
+		// otherwise a later re-enable would be blocked for up to an interval (ADR 0006 / #234).
+		invalidatePassPredictionStatus(eph)
+	case inputSig != eph.Status.LastPassPredictionInputHash:
+		// The pass inputs CHANGED (ground-station add/edit/delete, selector, elevation, horizon, or source
+		// edit): the published windows are from the old inputs and are now stale. Clear them and mark
+		// PassesPredicted=Unknown(Recomputing) so the consumer's 3-state gate HOLDS (anything != True is
+		// unknown) throughout A->B; write B then republishes fresh windows + True. A pure time-cadence
+		// sweep (inputs unchanged) is deliberately NOT cleared here — its windows are still input-backed, so
+		// leaving them avoids a spurious empty-window blink during A->B.
+		invalidatePassPredictionStatus(eph)
+		meta.SetStatusCondition(&eph.Status.Conditions, metav1.Condition{
+			Type:               ntnv1alpha1.ConditionPassesPredicted,
+			Status:             metav1.ConditionUnknown,
+			Reason:             "Recomputing",
+			Message:            "pass inputs changed; predictions are being recomputed",
+			ObservedGeneration: eph.Generation,
+		})
+	}
+
+	// WRITE A — the epoch heartbeat. Always, and BEFORE the pass sweep, so a slow or ctx-cancelled
+	// sweep never delays or drops the epoch the consumer pushes (ADR 0006 / #234).
 	if err := r.Status().Update(ctx, eph); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -404,17 +430,6 @@ func (r *SatelliteEphemerisReconciler) Reconcile(ctx context.Context, req ctrl.R
 		r.Recorder.Eventf(eph, nil, corev1.EventTypeWarning, "StatesTruncated", "StatesTruncated", "%s", truncEvent)
 	}
 
-	// Pass-prediction events, same post-persist + transition-gated discipline (#188):
-	// the notes are non-empty only when the PassesPredicted condition changed, so the
-	// ~3-minute cache re-propagation never re-emits an identical pass event, and a
-	// rolled-back status update fires neither.
-	if passNote != "" && r.Recorder != nil {
-		r.Recorder.Eventf(eph, nil, corev1.EventTypeNormal, "PassesPredicted", "PassesPredicted", "%s", passNote)
-	}
-	if passFailNote != "" && r.Recorder != nil {
-		r.Recorder.Eventf(eph, nil, corev1.EventTypeWarning, "PredictionFailed", "PredictionFailed", "%s", passFailNote)
-	}
-
 	// Emit the "fetched" event only on a real successful fetch — not on the
 	// short-cadence cache re-propagations (would flood the stream, #179) and not on
 	// a serve-cache-on-error cycle (the fetch failed). The latter emits its own
@@ -428,6 +443,45 @@ func (r *SatelliteEphemerisReconciler) Reconcile(ctx context.Context, req ctrl.R
 	case !reusedCache:
 		if r.Recorder != nil {
 			r.Recorder.Eventf(eph, nil, corev1.EventTypeNormal, "GPDataFetched", "GPDataFetched", "Fetched %d satellites", result.SatelliteCount)
+		}
+	}
+
+	// Step 7b: PASS PREDICTION on a lower cadence (ADR 0006 Option B) — off the epoch's critical
+	// path. Running the O(horizon x sats x ground stations) sweep every propagation heartbeat would
+	// put its cost in the epoch cadence and, at large fleet, stretch it past propagationEpochLead. Run
+	// it when the time cadence elapses OR the inputs changed (passSweepDecision, so a ground-station or
+	// selector edit re-predicts at once, not up to an interval late). Write the pass windows in a
+	// SECOND status update so a conflict here never rolls back the epoch already persisted by write A.
+	if sweepDue {
+		passNote, passFailNote, passErr := r.handlePassPrediction(ctx, eph, result, now)
+		if passErr != nil {
+			// ctx-cancel during the sweep: the epoch is already persisted (write A), so the heartbeat
+			// is safe. Requeue; lastPassPredictionTime is NOT stamped, so the sweep retries next cycle.
+			return ctrl.Result{}, passErr
+		}
+		// The sweep ran (a fast-failing resolution error is recorded as PredictionFailed by
+		// handlePassPrediction, not returned as an error). Advance BOTH the time cadence and the input
+		// hash so an unchanged-input reconcile does not re-sweep and the time cadence resets. Stamp the
+		// cadence timestamp at sweep COMPLETION (a fresh r.now()), NOT the reconcile-start `now`: a sweep
+		// that itself outlasts the interval would otherwise be "due" again the instant it returns and
+		// re-sweep back-to-back. inputSig was computed pre-write-A, so a station edit RACING the sweep
+		// leaves the persisted hash mismatched and re-triggers next cycle rather than being absorbed. (P2)
+		eph.Status.LastPassPredictionTime = &metav1.Time{Time: r.now()}
+		eph.Status.LastPassPredictionInputHash = inputSig
+		// WRITE B — pass windows + cadence state. controller-runtime wrote eph's fresh
+		// resourceVersion back after write A, so this uses it; an external edit in the gap 409s and
+		// requeues without losing the epoch.
+		if err := r.Status().Update(ctx, eph); err != nil {
+			return ctrl.Result{}, err
+		}
+		// Pass-prediction events, post-persist + transition-gated (#188): the notes are non-empty
+		// only when the PassesPredicted condition changed, so the sweep cadence never re-emits an
+		// identical event and a rolled-back write B fires neither.
+		if passNote != "" && r.Recorder != nil {
+			r.Recorder.Eventf(eph, nil, corev1.EventTypeNormal, "PassesPredicted", "PassesPredicted", "%s", passNote)
+		}
+		if passFailNote != "" && r.Recorder != nil {
+			r.Recorder.Eventf(eph, nil, corev1.EventTypeWarning, "PredictionFailed", "PredictionFailed", "%s", passFailNote)
 		}
 	}
 
@@ -492,6 +546,114 @@ func effectivePassHorizon(raw time.Duration) (horizon time.Duration, clamped boo
 // each re-propagation updates status.propagatedStates, which fans out (via the
 // NTNCellConfig watch) a fresh push to every referencing cell.
 const propagationRefreshInterval = 3 * time.Minute
+
+// passPredictionInterval is how often the (expensive) pass-window sweep runs, decoupled from the
+// propagation heartbeat (propagationRefreshInterval) so the sweep's O(horizon x satellites x ground
+// stations) cost never sits in the runtime-push epoch cadence (ADR 0006 / #234). Absolute AOS/LOS
+// windows tolerate this coarser refresh. It MUST stay greater than propagationRefreshInterval — the
+// 3-minute heartbeat re-evaluates "sweep is due" every cycle, so the requeue needs no separate pass
+// term (see TestPassPredictionIntervalExceedsHeartbeat). Well under the ~90-minute LEO pass recurrence
+// so a window is recomputed before it rolls off.
+const passPredictionInterval = 15 * time.Minute
+
+// passPredictionConfigured reports whether pass prediction is enabled (at least one ground station).
+func passPredictionConfigured(spec ntnv1alpha1.SatelliteEphemerisSpec) bool {
+	return spec.PassPrediction != nil && len(spec.PassPrediction.GroundStations) > 0
+}
+
+// passSweepDue reports whether the pass-window sweep must run: it has never run, OR the time cadence
+// (passPredictionInterval) has elapsed, OR the pass-prediction inputs changed since the last sweep
+// (currentInputHash != the persisted hash). The input-change arm is what honors the
+// GroundStationLifecycle watch and immediate spec-edit re-prediction — a purely time-based gate would
+// leave stale windows for up to an interval after a ground-station or selector change (ADR 0006 / #234).
+// The caller must also check passPredictionConfigured and pass the signature from
+// passPredictionInputSignature.
+func passSweepDue(eph *ntnv1alpha1.SatelliteEphemeris, now time.Time, currentInputHash string) bool {
+	if currentInputHash != eph.Status.LastPassPredictionInputHash {
+		return true
+	}
+	last := eph.Status.LastPassPredictionTime
+	if last == nil {
+		return true
+	}
+	// A timestamp in the FUTURE (clock skew, a restored backup, or a hand-edited status) would otherwise
+	// suppress every sweep until wall-clock catches up to last+interval — freezing predictions for up to
+	// an interval. Treat it as due so a bad timestamp self-heals on the next reconcile. (round-5 P2)
+	if last.After(now) {
+		return true
+	}
+	return !now.Before(last.Add(passPredictionInterval))
+}
+
+// passPredictionInputSignature digests the CONTROL-PLANE inputs that determine the pass windows, so a
+// change to any of them forces an immediate re-sweep (passSweepDue) instead of waiting out the time
+// cadence. It covers the pass-prediction spec (ground stations, minElevation, horizon), the tracked
+// NORAD selector, the source identity, and each resolved GroundStationLifecycle's UID + generation +
+// terminating flag — which capture a station coordinate edit, add, delete, or entry into deletion, none
+// of which bump the SatelliteEphemeris generation. Ground stations are read from the (watched) cache and
+// folded in sorted order so a mere reordering does not force a needless sweep; a missing station is a
+// distinct marker so its later creation re-triggers the sweep.
+//
+// It deliberately does NOT hash the OMM orbital-element CONTENT: the elements refresh on their own fetch
+// cadence and would make this signature churn on every propagation heartbeat. New elements therefore
+// take effect on the NEXT time-cadence sweep (bounded by passPredictionInterval), not instantly — an
+// accepted staleness bound, since orbital drift over one interval is far below the minElevation margin.
+// A source-identity edit (type/URL) DOES flip the signature and re-sweep at once.
+func (r *SatelliteEphemerisReconciler) passPredictionInputSignature(
+	ctx context.Context, eph *ntnv1alpha1.SatelliteEphemeris,
+) string {
+	pp := eph.Spec.PassPrediction
+	h := sha256.New()
+	var norad []int
+	if eph.Spec.Satellites != nil {
+		norad = append(norad, eph.Spec.Satellites.NoradIDs...)
+	}
+	sort.Ints(norad)
+	norad = slices.Compact(norad)
+	stations := append([]string(nil), pp.GroundStations...)
+	sort.Strings(stations)
+	// %q on the user-controlled strings so a crafted value cannot embed the field delimiters.
+	_, _ = fmt.Fprintf(h, "minElev=%q\nhorizon=%d\nnorad=%v\nsrcType=%q\nsrcURL=%q\n",
+		pp.MinElevation, pp.Horizon.Duration, norad, eph.Spec.Source.Type, eph.Spec.Source.URL)
+	for _, name := range stations {
+		gs := &ntnv1alpha1.GroundStationLifecycle{}
+		if err := r.Get(ctx, client.ObjectKey{Namespace: eph.Namespace, Name: name}, gs); err != nil {
+			// Missing/unreadable station: a distinct, stable marker so its later creation flips the
+			// signature and re-triggers the sweep. hash.Hash.Write never returns an error.
+			_, _ = fmt.Fprintf(h, "gs=%q:absent\n", name)
+			continue
+		}
+		_, _ = fmt.Fprintf(h, "gs=%q:uid=%s:gen=%d:terminating=%t\n", name, gs.UID, gs.Generation, gs.DeletionTimestamp != nil)
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// invalidatePassPredictionStatus clears ALL pass-prediction status in one place: the windows, the
+// cadence timestamp, the input hash, and the PassesPredicted condition. Every path that concludes the
+// existing windows can no longer be trusted MUST call this — clearing the windows while leaving a recent
+// lastPassPredictionTime (or a matching input hash) would block the next sweep for up to an interval and
+// let NTNSlice consume empty windows as a real end-of-pass (ADR 0006 / #234). Callers: pass prediction
+// disabled, and cold-cache fetch failure (handleFetchError).
+func invalidatePassPredictionStatus(eph *ntnv1alpha1.SatelliteEphemeris) {
+	eph.Status.NextPassWindows = nil
+	eph.Status.LastPassPredictionTime = nil
+	eph.Status.LastPassPredictionInputHash = ""
+	meta.RemoveStatusCondition(&eph.Status.Conditions, ntnv1alpha1.ConditionPassesPredicted)
+}
+
+// passSweepDecision folds the sweep gate for Reconcile into one call: it returns the pass-prediction
+// input signature and whether the sweep should run (time cadence elapsed OR inputs changed). Disabled
+// pass prediction returns ("", false) without resolving ground stations. The caller persists the
+// returned signature only after a successful sweep.
+func (r *SatelliteEphemerisReconciler) passSweepDecision(
+	ctx context.Context, eph *ntnv1alpha1.SatelliteEphemeris, now time.Time,
+) (inputSig string, due bool) {
+	if !passPredictionConfigured(eph.Spec) {
+		return "", false
+	}
+	inputSig = r.passPredictionInputSignature(ctx, eph)
+	return inputSig, passSweepDue(eph, now, inputSig)
+}
 
 // cachedFetch is a per-CR OMM cache entry. fetchKey+uid pin it to the RAW UPSTREAM
 // PAYLOAD identity of the exact object: an edited source.type/URL (fetchKey change) or a
@@ -726,6 +888,12 @@ func (r *SatelliteEphemerisReconciler) handleSetupFailure(
 	// `gp_fetch_ready == 0` alerts even on a never-fetched cold start, where
 	// `gp_satellite_count == 0` cannot (absent series).
 	ntnmetrics.GPFetchReady.With(prometheus.Labels{"namespace": eph.Namespace, "ephemeris": eph.Name}).Set(0)
+	// A setup failure fetched no OMM, so any previously-published pass windows are
+	// now unbacked. Clear them and the cadence state so the NTNSlice consumer's
+	// PassesPredicted gate holds instead of steering failover on stale predictions
+	// that will never be recomputed while setup stays broken. (round-5 Blocker 2 —
+	// all no-OMM clear paths must invalidate.)
+	invalidatePassPredictionStatus(eph)
 	if err := r.Status().Update(ctx, eph); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -1163,6 +1331,14 @@ func (r *SatelliteEphemerisReconciler) predictPasses(
 		if err := r.Get(ctx, client.ObjectKey{Namespace: eph.Namespace, Name: gsName}, gs); err != nil {
 			return "", fmt.Errorf("ground station %q not found: %w", gsName, err)
 		}
+		// A ground station under deletion (finalizer still holding the object) is being torn down — its
+		// contact windows can no longer be relied on, so exclude it from the sweep exactly as if it were
+		// already gone. The input signature folds in this terminating flag, so entering deletion
+		// re-triggers the sweep even though a deletionTimestamp does not bump generation. (round-5 P3)
+		if gs.DeletionTimestamp != nil {
+			log.Info("skipping terminating ground station in pass prediction", "groundStation", gsName)
+			continue
+		}
 		lat, err := ephemeris.ParseGeoCoord(gs.Spec.Deployment.Location.Lat)
 		if err != nil {
 			return "", fmt.Errorf("invalid latitude for %q: %w", gsName, err)
@@ -1299,6 +1475,10 @@ func (r *SatelliteEphemerisReconciler) handleInsecureURL(
 		Message:            msg,
 		ObservedGeneration: eph.Generation,
 	})
+	// No OMM was fetched over the rejected insecure URL, so previously-published
+	// pass windows are unbacked — clear them and the cadence state so the NTNSlice
+	// consumer's PassesPredicted gate holds. (round-5 Blocker 2)
+	invalidatePassPredictionStatus(eph)
 	if err := r.Status().Update(ctx, eph); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -1342,10 +1522,10 @@ func (r *SatelliteEphemerisReconciler) handleFetchError(
 		ObservedGeneration: eph.Generation,
 	})
 
-	// Clear stale pass windows to prevent NTNSlice from using outdated data
-	// for failover readiness decisions.
-	eph.Status.NextPassWindows = nil
-	meta.RemoveStatusCondition(&eph.Status.Conditions, ntnv1alpha1.ConditionPassesPredicted)
+	// Invalidate stale pass windows so NTNSlice does not consume outdated data for failover readiness
+	// — and clear the cadence timestamp + input hash too, so a rapid recovery re-sweeps immediately
+	// instead of waiting out passPredictionInterval (ADR 0006 / #234).
+	invalidatePassPredictionStatus(eph)
 
 	if err := r.Status().Update(ctx, eph); err != nil {
 		return ctrl.Result{}, err

@@ -65,6 +65,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Pass prediction now runs on its own lower cadence, off the propagation heartbeat (#234, ADR 0006).**
+  The SatelliteEphemeris reconcile propagates and publishes the runtime-push epoch **first**, then runs
+  the expensive pass-window sweep only once per 15 minutes (was on every ~3-minute heartbeat) in a
+  separate status write. This keeps the sweep's `O(horizon x satellites x ground stations)` cost out of
+  the epoch's refresh cadence, so a large fleet can no longer stretch the delivered epoch past its
+  validity, and the epoch heartbeat stays fresh even when the sweep is slow or cancelled. Adds an
+  additive, controller-owned `status.lastPassPredictionTime` field. The sweep also re-runs
+  IMMEDIATELY when a pass-prediction input changes (ground stations added/edited/removed, NORAD
+  selector, minElevation, horizon, or source) instead of waiting out the interval, so it never leaves
+  stale windows for a downstream consumer; this is tracked by a new `status.lastPassPredictionInputHash`
+  field. Mutation-tested.
+
+- **NTNSlice failover now honors the pass-prediction validity contract (#234, ADR 0006).** The
+  consumer (`NTNSlice.checkSatelliteAvailability`) no longer reads `NextPassWindows` directly; it
+  treats satellite-pass availability as KNOWN only while the producer's `PassesPredicted` condition is
+  `True`. `Unknown` (recomputing after an input change or a no-OMM failure), `False`
+  (`PredictionFailed`), and an absent condition all mean UNKNOWN, so the slice holds its current path
+  instead of misreading stale or empty windows as a real end-of-pass (a transient prediction failure no
+  longer drops a slice off a satellite that is actually overhead). On an input change the producer clears
+  the stale windows and marks `PassesPredicted=Unknown` in the epoch (first) write, so a consumer reading
+  between the two writes holds; `handleSetupFailure` and `handleInsecureURL` join `handleFetchError` in
+  clearing pass status on any no-OMM path; a terminating ground station is excluded from the sweep; and a
+  future-dated cadence timestamp self-heals. A new `-race` CI job covers the two-write path.
+  Mutation-tested.
+
 - **Runtime-push currency/freshness lifecycle now has manager-backed envtest coverage.**
   The regression drives the real apiserver status subresource and informer cache
   through same-epoch deduplication, a propagation-input generation bump that fails

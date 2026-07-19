@@ -789,12 +789,21 @@ func (r *NTNSliceReconciler) checkSatelliteAvailability(
 		return false, false
 	}
 
+	// The pass windows are trustworthy ONLY when the producer's most recent prediction SUCCEEDED. If
+	// PassesPredicted is not True — absent (never predicted), Unknown (recomputing after an input change
+	// or a no-OMM failure), or False (PredictionFailed) — pass availability is UNKNOWN, so hold the
+	// current path instead of reading possibly-stale or empty windows as a real end-of-pass. This
+	// completes the SatelliteEphemeris(producer) -> NTNSlice(consumer) pass-status contract (ADR 0006 /
+	// #234): the producer leaves PassesPredicted=True only while NextPassWindows reflects the live inputs.
+	if !meta.IsStatusConditionTrue(eph.Status.Conditions, ntnv1alpha1.ConditionPassesPredicted) {
+		return false, false
+	}
 	for _, pw := range eph.Status.NextPassWindows {
 		if !pw.AOS.After(now) && pw.LOS.After(now) {
 			return true, true // currently in a pass window
 		}
 	}
-	return false, true // found, no active pass — a genuine end-of-pass signal
+	return false, true // prediction current, no active pass — a genuine end-of-pass signal
 }
 
 // now returns the current time (injectable for testing).

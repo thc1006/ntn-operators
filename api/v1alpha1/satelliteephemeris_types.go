@@ -199,6 +199,24 @@ type SatelliteEphemerisStatus struct {
 	// +optional
 	LastUpdated *metav1.Time `json:"lastUpdated,omitempty"`
 
+	// lastPassPredictionTime is when the pass-window sweep last ran. The sweep runs on its own
+	// lower cadence (passPredictionInterval), decoupled from the propagation heartbeat, so its
+	// O(horizon x satellites x ground stations) cost stays out of the runtime-push epoch cadence
+	// (ADR 0006 / #234). Persisted rather than in-memory so the "sweep is due" decision survives a
+	// leader failover. Absent means the sweep has not run since this field appeared (or ever).
+	// +optional
+	LastPassPredictionTime *metav1.Time `json:"lastPassPredictionTime,omitempty"`
+
+	// lastPassPredictionInputHash is a digest of the inputs that determine the pass windows: the
+	// pass-prediction spec (ground stations, minElevation, horizon), the tracked NORAD selector, the
+	// source identity, and each resolved ground station's identity/generation. The sweep re-runs
+	// IMMEDIATELY when this changes — not only on the passPredictionInterval time cadence — so a
+	// ground-station edit/add/delete, a selector change, or an elevation/horizon change re-predicts at
+	// once instead of leaving stale windows for up to an interval (ADR 0006 / #234). Cleared whenever
+	// the pass windows are invalidated (see invalidatePassPredictionStatus).
+	// +optional
+	LastPassPredictionInputHash string `json:"lastPassPredictionInputHash,omitempty"`
+
 	// satelliteCount is the number of satellites currently tracked.
 	// +optional
 	SatelliteCount int `json:"satelliteCount,omitempty"`

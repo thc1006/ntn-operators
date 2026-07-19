@@ -51,3 +51,28 @@ jobs:
 
       - name: Run tests
         run: make test
+
+  race:
+    name: Race detector (controllers + pkg)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Setup Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Cache envtest binaries
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: bin/k8s
+          key: envtest-${{ runner.os }}-${{ hashFiles('Makefile', 'go.mod', 'go.sum') }}
+
+      # The two-write pass-cadence split (#234) and the interceptor-driven concurrency tests
+      # (slow-sweep cancel, completion-time stamp) are exercised under -race so a data race in the
+      # reconcile→status-write path fails CI rather than flaking in production.
+      - name: Run race tests
+        run: make test-race
