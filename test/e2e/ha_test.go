@@ -74,8 +74,16 @@ func newHAEnv(t *testing.T) *haEnv {
 	// cluster-scoped ClusterRole). Refuse to run unless the caller explicitly acknowledges that — so a stray
 	// `make test-e2e-ha` against the wrong kubecontext cannot cordon a production fleet or break a live operator.
 	if os.Getenv("HA_ALLOW_DESTRUCTIVE") != "1" {
-		t.Skip("HA suite is DESTRUCTIVE (cordons every node, evicts manager pods, mutates cluster RBAC); " +
-			"set HA_ALLOW_DESTRUCTIVE=1 and point KUBECONFIG at a disposable Kind cluster to run it")
+		msg := "HA suite is DESTRUCTIVE (cordons every node, evicts manager pods, mutates cluster RBAC); " +
+			"set HA_ALLOW_DESTRUCTIVE=1 and point KUBECONFIG at a disposable Kind cluster to run it"
+		// In CI (GitHub sets CI=true) or when the caller pins HA_REQUIRE_RUN=1, a missing opt-in is a CONFIG
+		// error, NOT a reason to skip-then-green: if the workflow ever dropped HA_ALLOW_DESTRUCTIVE, silently
+		// skipping every HA test would report success while running nothing. Fail loudly there; skip only for
+		// an interactive local run.
+		if os.Getenv("CI") == "true" || os.Getenv("HA_REQUIRE_RUN") == "1" {
+			t.Fatal(msg + " (refusing to skip under CI/HA_REQUIRE_RUN — that would be a false green)")
+		}
+		t.Skip(msg)
 	}
 	cfg, err := ctrlcfg.GetConfig()
 	if err != nil {
@@ -170,6 +178,18 @@ func holderPodBase(holder string) string {
 		return holder[:i]
 	}
 	return holder
+}
+
+// managerContainerID returns the containerd id of the pod's "manager" container (the chart's container name),
+// stripped of the "containerd://" scheme — selected BY NAME, not container index 0, so it stays correct if a
+// sidecar is ever added.
+func managerContainerID(pod *corev1.Pod) (string, bool) {
+	for _, cs := range pod.Status.ContainerStatuses {
+		if cs.Name == "manager" && cs.ContainerID != "" {
+			return strings.TrimPrefix(cs.ContainerID, "containerd://"), true
+		}
+	}
+	return "", false
 }
 
 // managerPods lists the controller-manager pods.
@@ -276,7 +296,14 @@ func (e *haEnv) assertLeaderReconciles(t *testing.T, name string) {
 func TestHAGracefulFailover(t *testing.T) {
 	e := newHAEnv(t)
 	e.waitReadyManagerPods(t)
+	ld := e.leaseDuration(t)
 	holder0 := e.waitLeaseHolder(t)
+	// Re-confirm holder0 is STILL the leader right before the delete — leadership could have moved while the
+	// prior test's churn settled; deleting a standby would make the measurement meaningless and (with no lower
+	// bound) trivially pass. If it moved, re-resolve so we always delete the ACTUAL current leader.
+	if h, err := e.leaseHolder(); err == nil && h != holder0 {
+		holder0 = e.waitLeaseHolder(t)
+	}
 	leader0 := holderPodBase(holder0)
 	t.Logf("initial leader pod=%s holder=%s", leader0, holder0)
 
@@ -284,18 +311,33 @@ func TestHAGracefulFailover(t *testing.T) {
 		t.Fatalf("delete leader pod: %v", err)
 	}
 	start := time.Now()
-	eventually(t, time.Minute, time.Second, "the lease to fail over to a new holder", func() (bool, string) {
+	eventually(t, time.Minute, 200*time.Millisecond, "the lease to fail over to a new holder", func() (bool, string) {
 		h, err := e.leaseHolder()
 		if err != nil {
 			return false, err.Error()
 		}
-		if h == "" || holderPodBase(h) == leader0 {
+		// Full-identity comparison (not pod-base): the deleted leader is gone, so ANY new holder — the standby
+		// or the deleted pod's fresh-named replacement — has a different identity. Stricter than pod-base and
+		// closes the "we deleted a standby and instantly saw the already-moved holder" false pass.
+		if h == "" || h == holder0 {
 			return false, "holder still " + h
 		}
 		return true, ""
 	})
+	rto := time.Since(start)
 	h1, _ := e.leaseHolder()
-	t.Logf("GRACEFUL failover took %s; new holder=%s", time.Since(start).Round(time.Millisecond), h1)
+	t.Logf("GRACEFUL failover took %s; new holder=%s", rto.Round(time.Millisecond), h1)
+	// Upper bound PROVES the lease was ACTIVELY released on SIGTERM (LeaderElectionReleaseOnCancel), not merely
+	// that it failed over eventually: an active release hands off within a few RetryPeriod ticks, whereas a
+	// regressed release falls back to the LeaseDuration timeout (~15 s). Bound at 2/3 of the lease duration:
+	// the standby acquires only on its next client-go acquire tick, which jitters up to RetryPeriod*(1+1.2),
+	// so with SIGTERM delivery + graceful shutdown the worst legitimate active release approaches ~9 s on a
+	// loaded runner — ld/2 (7.5 s) would false-fail; 2*ld/3 (10 s) absorbs the jitter yet stays clearly below
+	// the ~13 s lease-timeout floor (the ungraceful RTO). Without any bound a broken release would still pass.
+	if rto >= 2*ld/3 {
+		t.Fatalf("graceful failover took %s (>= 2*LeaseDuration/3=%s) — the lease was NOT actively released on "+
+			"SIGTERM; it fell back to the timeout path (LeaderElectionReleaseOnCancel regressed?)", rto, 2*ld/3)
+	}
 	e.waitReadyManagerPods(t)
 	e.assertLeaderReconciles(t, "ha-graceful-probe")
 }
@@ -343,14 +385,16 @@ func TestHAUngracefulFailover(t *testing.T) {
 			t.Logf("attempt %d: get leader pod %s: %v — re-resolving", attempt, leader0, err)
 			continue
 		}
-		if len(pod.Status.ContainerStatuses) == 0 || pod.Status.ContainerStatuses[0].ContainerID == "" {
-			t.Logf("attempt %d: leader pod %s has no running container id — re-resolving", attempt, leader0)
+		cid, ok := managerContainerID(pod)
+		if !ok {
+			t.Logf("attempt %d: leader pod %s has no running 'manager' container id — re-resolving", attempt, leader0)
 			continue
 		}
 		node := pod.Spec.NodeName
-		cid := strings.TrimPrefix(pod.Status.ContainerStatuses[0].ContainerID, "containerd://")
-		// Re-confirm this is STILL the leader immediately before the kill; if it moved during resolution, retry.
-		if h, _ := e.leaseHolder(); h != holder0 {
+		// Re-confirm this is STILL the leader immediately before the kill; only a SUCCESSFUL read showing a
+		// different holder counts as "moved" (a transient API error must not masquerade as a move and burn a
+		// retry — that would turn flakiness into a HA_REQUIRE_UNGRACEFUL Fatal).
+		if h, err := e.leaseHolder(); err == nil && h != holder0 {
 			t.Logf("attempt %d: leadership moved during resolution (%s -> %s) — re-resolving", attempt, holder0, h)
 			continue
 		}
@@ -419,32 +463,60 @@ func TestHAPDBEviction(t *testing.T) {
 	}
 
 	// Cordon every node so an evicted pod's replacement stays Pending (never Ready), making the PDB's
-	// currentHealthy accounting deterministic. Uncordon on cleanup.
+	// currentHealthy accounting deterministic.
 	nodes, err := e.cs.CoreV1().Nodes().List(e.ctx, metav1.ListOptions{})
 	if err != nil {
 		t.Fatalf("list nodes: %v", err)
 	}
-	// Register the uncordon cleanup BEFORE cordoning, so a mid-loop cordon failure (Fatal) still releases the
-	// nodes already cordoned. A cordon that SILENTLY failed would let the replacement become Ready and the
+	// Record each node's ORIGINAL schedulability so cleanup restores exactly that, rather than unconditionally
+	// uncordoning — never wrongly un-cordoning a node an operator had deliberately cordoned (matters for a
+	// non-Kind disposable cluster under HA_EXPECT_KIND=0; a fresh Kind node is schedulable anyway).
+	origUnsched := make(map[string]bool, len(nodes.Items))
+	for i := range nodes.Items {
+		origUnsched[nodes.Items[i].Name] = nodes.Items[i].Spec.Unschedulable
+	}
+	// Register the restore cleanup BEFORE cordoning, so a mid-loop cordon failure (Fatal) still restores the
+	// nodes already changed. A cordon that SILENTLY failed would let the replacement become Ready and the
 	// second eviction be legitimately allowed — which we would then misreport as "PDB unprotected" — so a
-	// SETUP cordon failure is Fatal; the cleanup uncordon is best-effort but reported.
+	// SETUP cordon failure is Fatal; the cleanup restore is best-effort but reported.
 	t.Cleanup(func() {
 		var stuck []string
 		for i := range nodes.Items {
-			if err := e.setCordon(nodes.Items[i].Name, false); err != nil {
-				stuck = append(stuck, nodes.Items[i].Name)
-				t.Logf("cleanup: uncordon %s failed: %v", nodes.Items[i].Name, err)
+			n := nodes.Items[i].Name
+			// Retry: a single failed uncordon would leave the node unschedulable and hang the NEXT test's
+			// waitReadyManagerPods for its full 4-minute budget (on a single-node Kind, wedging the suite).
+			var err error
+			for range 5 {
+				if err = e.setCordon(n, origUnsched[n]); err == nil {
+					break
+				}
+				time.Sleep(time.Second)
+			}
+			if err != nil {
+				stuck = append(stuck, n)
+				t.Logf("cleanup: restore node %s unschedulable=%v failed after retries: %v", n, origUnsched[n], err)
 			}
 		}
 		if len(stuck) > 0 {
-			t.Errorf("CRITICAL: cleanup left node(s) cordoned %v — the cluster may not schedule new pods", stuck)
+			t.Errorf("CRITICAL: cleanup could not restore node schedulability for %v", stuck)
 		}
 	})
 	for i := range nodes.Items {
+		if origUnsched[nodes.Items[i].Name] {
+			continue // already cordoned by its operator; leave it (and cleanup leaves it) untouched
+		}
 		if err := e.setCordon(nodes.Items[i].Name, true); err != nil {
 			t.Fatalf("setup: cordon node %s failed: %v", nodes.Items[i].Name, err)
 		}
 	}
+
+	// Wait for the PDB status to CATCH UP before evicting: the disruption controller recomputes
+	// disruptionsAllowed asynchronously and lags pod-Ready (this test runs right after the SIGKILL test churns
+	// a pod), so an eviction in that lag window would 429 and false-fail "first eviction should succeed". This
+	// also cross-checks the selector at runtime: expectedPods must equal exactly the manager replica count (a
+	// stray pod sharing the manager label would inflate it — the runtime complement to the checker's
+	// structural over-broad guard).
+	e.waitManagerPDBReady(t)
 
 	evict := func(pod string) error {
 		return e.cs.PolicyV1().Evictions(e.ns).Evict(e.ctx, &policyv1.Eviction{
@@ -468,7 +540,9 @@ func TestHAPDBEviction(t *testing.T) {
 		switch {
 		case err == nil:
 			t.Fatalf("PDB ALLOWED the second eviction of %s — the last replica was left unprotected", ready[1])
-		case apierrors.IsTooManyRequests(err) || strings.Contains(err.Error(), "disruption budget"):
+		case apierrors.IsTooManyRequests(err) && strings.Contains(err.Error(), "disruption budget"):
+			// Require the disruption-budget MESSAGE, not a bare 429 — an unrelated 429 (e.g. API-priority
+			// throttling) must not be misread as a PDB refusal.
 			refused = true
 		case apierrors.IsNotFound(err):
 			t.Fatalf("second pod %s is gone — a prior eviction was wrongly allowed (PDB unprotected)", ready[1])
@@ -488,6 +562,32 @@ func (e *haEnv) setCordon(node string, unschedulable bool) error {
 	patch := fmt.Sprintf(`{"spec":{"unschedulable":%v}}`, unschedulable)
 	_, err := e.cs.CoreV1().Nodes().Patch(e.ctx, node, types.StrategicMergePatchType, []byte(patch), metav1.PatchOptions{})
 	return err
+}
+
+// waitManagerPDBReady waits for the single manager PodDisruptionBudget's status to CATCH UP with 2 healthy
+// replicas — disruptionsAllowed >= 1 (the disruption controller computes this asynchronously and lags
+// pod-Ready, so evicting too early would 429) — and cross-checks expectedPods == haReplicas: the selector must
+// resolve to EXACTLY the manager replicas, so a runtime stray sharing the manager label (which the structural
+// checker cannot see) fails here.
+func (e *haEnv) waitManagerPDBReady(t *testing.T) {
+	t.Helper()
+	eventually(t, 60*time.Second, time.Second, "manager PDB to allow one disruption", func() (bool, string) {
+		l, err := e.cs.PolicyV1().PodDisruptionBudgets(e.ns).List(e.ctx, metav1.ListOptions{})
+		if err != nil {
+			return false, err.Error()
+		}
+		if len(l.Items) != 1 {
+			t.Fatalf("expected exactly 1 PodDisruptionBudget in %s, got %d", e.ns, len(l.Items))
+		}
+		s := l.Items[0].Status
+		if s.ExpectedPods > int32(haReplicas) {
+			t.Fatalf("PDB selects %d pods, more than the %d manager replicas — over-broad selector (matches strays)",
+				s.ExpectedPods, haReplicas)
+		}
+		ok := s.ExpectedPods == int32(haReplicas) && s.CurrentHealthy == int32(haReplicas) && s.DisruptionsAllowed >= 1
+		return ok, fmt.Sprintf("expectedPods=%d currentHealthy=%d disruptionsAllowed=%d",
+			s.ExpectedPods, s.CurrentHealthy, s.DisruptionsAllowed)
+	})
 }
 
 // TestHACacheSyncRolloutGate (#230 item 4): /readyz gates on informer cache-sync, not leadership (#226). A
@@ -564,6 +664,16 @@ func TestHACacheSyncRolloutGate(t *testing.T) {
 	}
 
 	// Strip list/watch on the CRD group so a fresh informer cannot sync those caches.
+	//
+	// WHY this holds a STANDBY NotReady (load-bearing, keep this in sync with the controller): the surge/rolled
+	// pod is a non-leader standby, and controllers are leader-election runnables, so their CRD informers are
+	// normally NOT created on a standby. The reason a standby's cache-sync /readyz gate is observable at all is
+	// that NTNCellConfigReconciler.SetupWithManager calls mgr.GetFieldIndexer().IndexField(...), which EAGERLY
+	// creates the NTNCellConfig informer on EVERY replica at setup — and controller-runtime waits on it
+	// (runnables.Caches -> WaitForCacheSync) before the non-leader cacheReadyRunnable flips /readyz ready.
+	// Breaking list/watch on ntn.operators.dev stalls that lone informer -> /readyz 500 -> standby NotReady.
+	// If that eager field indexer is ever removed, a standby would sync its (empty) CRD cache and go Ready under
+	// broken RBAC, flipping this test to a confusing false-FAIL with no /readyz change — revisit this then.
 	broken := orig.DeepCopy()
 	for i := range broken.Rules {
 		r := &broken.Rules[i]
@@ -580,42 +690,65 @@ func TestHACacheSyncRolloutGate(t *testing.T) {
 		t.Fatalf("rollout restart: %v", err)
 	}
 
-	// Invariant over the window: a NEW-generation pod (a pod-template-hash absent before the rollout) whose
-	// container is RUNNING but which never becomes Ready — i.e. held by the cache-sync /readyz gate, not a
-	// pull/schedule failure — appears, while a Ready pod is preserved throughout. The structural guarantee is
-	// maxUnavailable=0 (asserted by the chart topology check), so kube cannot remove a healthy old pod before a
-	// new one is Ready; this loop is the runtime confirmation. Polled at 1s — the "never below 1 Ready" claim
-	// holds to that sampling resolution.
-	sawGatedNewPod := false
-	sawNewPod := false
+	// Proving the gate needs MORE than a single "Running+NotReady" poll: every healthy pod is briefly
+	// Running-but-NotReady during startup (the chart readiness probe has a 5 s initialDelay), so one such poll
+	// could be a transient startup blip, not sustained gating. Instead: (1) wait for the surge pod, failing if
+	// any new-generation pod is already Ready; (2) confirm via /readyz?verbose that the /readyz (cache-sync)
+	// gate is what's failing, not a crash or unrelated probe; (3) hold for a sustained window (>> the ~15 s a
+	// healthy pod needs to go Ready) asserting the SAME pod stays NotReady, NO new-generation pod EVER goes
+	// Ready, and a Ready old-generation pod is preserved (maxUnavailable=0); (4) re-assert NotReady at the end.
+	gatedName, gatedUID := e.waitForGatedNewPod(t, oldHashes)
+	e.assertReadyzGateFailing(t, gatedName)
+
+	const sustain = 45 * time.Second
 	minReady := 1 << 30
-	deadline := time.Now().Add(120 * time.Second)
-	for time.Now().Before(deadline) {
-		if pods, err := e.managerPods(); err == nil {
-			ready, gatedNew, sawNew := scanRolloutGate(pods, oldHashes)
-			if sawNew {
-				sawNewPod = true
-			}
-			if ready < minReady {
-				minReady = ready
-			}
-			if gatedNew && ready >= 1 {
-				sawGatedNewPod = true
-			}
-		}
+	polls, heldPolls, errPolls := 0, 0, 0
+	hold := time.Now().Add(sustain)
+	for time.Now().Before(hold) {
 		time.Sleep(time.Second)
+		pods, err := e.managerPods()
+		if err != nil {
+			errPolls++ // count separately so a run of API errors reports as flakiness, not "gate not holding"
+			continue
+		}
+		polls++
+		ready, gatedHeld, newReady := scanSustained(pods, oldHashes, gatedUID)
+		if newReady != "" {
+			t.Fatalf("new-generation pod %s became Ready under broken cache RBAC — the cache-sync gate did NOT "+
+				"hold (a healthy pod goes Ready; this is exactly the transient-startup false pass a single-poll "+
+				"check would have missed)", newReady)
+		}
+		if ready < minReady {
+			minReady = ready
+		}
+		if gatedHeld {
+			heldPolls++
+		}
 	}
-	if !sawGatedNewPod {
-		t.Fatalf("did not observe a RUNNING new-generation pod held NotReady by the cache-sync gate while a "+
-			"Ready pod was preserved (sawNewPod=%v, minReady=%d) — if no new pod appeared the rollout may not "+
-			"have progressed; if it came up Ready the gate failed to hold it", sawNewPod, minReady)
+	if polls == 0 {
+		t.Fatalf("could not observe the gate — every one of %d polls hit an API error", errPolls)
 	}
-	if minReady < 1 {
-		t.Fatalf("a healthy pod was torn down under the broken rollout (min ready=%d, 1s resolution) — the "+
-			"cache-sync gate / maxUnavailable=0 guarantee failed", minReady)
+	if heldPolls < polls {
+		t.Fatalf("gated pod %s was not continuously present+NotReady across the %s window (%d/%d good polls, %d "+
+			"API errors) — not sustained gating", gatedName, sustain, heldPolls, polls, errPolls)
 	}
-	t.Logf("cache-sync /readyz gate held: a RUNNING but NotReady new-generation pod was gated while ready pods "+
-		"stayed >= %d over the window", minReady)
+	// maxUnavailable=0 must keep BOTH old replicas Ready while the new one is gated — a regression to
+	// maxUnavailable=1 (one old pod torn down) leaves min ready=1, which "< haReplicas" catches but "< 1" would
+	// silently pass. The old pods' cachesSynced latch + readiness failureThreshold=3 keep this stable.
+	if minReady < haReplicas {
+		t.Fatalf("fewer than %d healthy pods during the broken rollout (min ready=%d) — the maxUnavailable=0 "+
+			"guarantee failed (a healthy old replica was torn down)", haReplicas, minReady)
+	}
+	// (4) final re-assert: the gated pod is STILL NotReady, not a blip that recovered.
+	final, err := e.cs.CoreV1().Pods(e.ns).Get(e.ctx, gatedName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get gated pod %s at end: %v", gatedName, err)
+	}
+	if podReady(final) {
+		t.Fatalf("gated pod %s became Ready by the end of the window — the gate did not hold", gatedName)
+	}
+	t.Logf("cache-sync /readyz gate held: %s stayed NotReady (confirmed via the /readyz gate) across %s, no "+
+		"new-generation pod ever went Ready, min ready=%d", gatedName, sustain, minReady)
 
 	// Restore RBAC + roll again, and confirm full recovery (the Cleanup is the failsafe).
 	if err := restore(); err != nil {
@@ -625,11 +758,12 @@ func TestHACacheSyncRolloutGate(t *testing.T) {
 	t.Log("recovered: 2 ready manager pods after restoring RBAC")
 }
 
-// scanRolloutGate summarizes one poll of the manager pods during a rollout: ready = count of Ready pods;
-// gatedNew = a NEW-generation pod (pod-template-hash absent from oldHashes) is RUNNING but held NotReady (the
-// cache-sync gate, not a pull/schedule failure); sawNew = any new-generation pod exists at all. Extracted from
-// TestHACacheSyncRolloutGate to keep that test's cyclomatic complexity bounded.
-func scanRolloutGate(pods []corev1.Pod, oldHashes map[string]bool) (ready int, gatedNew, sawNew bool) {
+// scanSustained summarizes one poll of the sustained cache-sync window: ready = count of Ready pods;
+// gatedHeld = the tracked gated pod (by UID) is present and NotReady; newReady = the name of a NEW-generation
+// pod that has (wrongly) become Ready, or "" if none. Extracted to keep the test's cyclomatic complexity down.
+func scanSustained(
+	pods []corev1.Pod, oldHashes map[string]bool, gatedUID types.UID,
+) (ready int, gatedHeld bool, newReady string) {
 	for i := range pods {
 		p := &pods[i]
 		if p.DeletionTimestamp != nil {
@@ -637,16 +771,87 @@ func scanRolloutGate(pods []corev1.Pod, oldHashes map[string]bool) (ready int, g
 		}
 		isNew := false
 		if h := p.Labels["pod-template-hash"]; h != "" && !oldHashes[h] {
-			isNew, sawNew = true, true
+			isNew = true
 		}
-		switch {
-		case podReady(p):
+		if podReady(p) {
 			ready++
-		case isNew && containerRunning(p):
-			gatedNew = true // started (not a pull/schedule failure) yet held NotReady by the gate
+			if isNew {
+				newReady = p.Name
+			}
+			continue
+		}
+		if p.UID == gatedUID {
+			gatedHeld = true
 		}
 	}
-	return ready, gatedNew, sawNew
+	return ready, gatedHeld, newReady
+}
+
+// waitForGatedNewPod waits for a NEW-generation manager pod (a pod-template-hash absent before the rollout) to
+// appear Running-but-NotReady — the surge pod the cache-sync gate should hold — and returns its name + UID. It
+// FAILS immediately if a new-generation pod is already Ready: a healthy pod goes Ready, so a Ready new pod
+// means the gate is not holding.
+func (e *haEnv) waitForGatedNewPod(t *testing.T, oldHashes map[string]bool) (string, types.UID) {
+	t.Helper()
+	var name string
+	var uid types.UID
+	eventually(t, 60*time.Second, time.Second, "a new-generation pod held NotReady by the rollout", func() (bool, string) {
+		pods, err := e.managerPods()
+		if err != nil {
+			return false, err.Error()
+		}
+		for i := range pods {
+			p := &pods[i]
+			if p.DeletionTimestamp != nil {
+				continue
+			}
+			h := p.Labels["pod-template-hash"]
+			if h == "" || oldHashes[h] {
+				continue
+			}
+			if podReady(p) {
+				t.Fatalf("new-generation pod %s is Ready under broken cache RBAC — the cache-sync gate is not holding", p.Name)
+			}
+			if containerRunning(p) {
+				name, uid = p.Name, p.UID
+				return true, ""
+			}
+		}
+		return false, "no running new-generation pod yet"
+	})
+	return name, uid
+}
+
+// assertReadyzGateFailing confirms the pod is NotReady BECAUSE the /readyz cache-sync gate is failing — not a
+// crash or an unrelated probe — by reading /readyz?verbose through the API-server pod proxy. The manager's ONLY
+// readyz check is the cache-sync gate (cmd/main.go registers "readyz" = cacheSyncReadyCheck), so a failing
+// "readyz" check is the cache-sync gate holding the pod NotReady.
+func (e *haEnv) assertReadyzGateFailing(t *testing.T, pod string) {
+	t.Helper()
+	eventually(t, 30*time.Second, 2*time.Second, "/readyz cache-sync gate to report failing", func() (bool, string) {
+		// /readyz returns HTTP 500 while not ready, so DoRaw sets err for the non-2xx; the verbose body is
+		// still returned in raw. Only a truly empty body is a transport problem worth retrying.
+		raw, err := e.cs.CoreV1().RESTClient().Get().
+			Namespace(e.ns).Resource("pods").SubResource("proxy").
+			Name(pod+":8081").Suffix("readyz").Param("verbose", "").
+			DoRaw(e.ctx)
+		if len(raw) == 0 {
+			if err != nil {
+				return false, err.Error()
+			}
+			return false, "empty /readyz body"
+		}
+		// The verbose body lists each check on its own line: "[+]<name> ok" when passing, "[-]<name> failed:
+		// reason withheld" when failing (controller-runtime's summary line is always "healthz check failed",
+		// even for the readyz endpoint, so we match the per-check "[-]readyz" line — the specific, authoritative
+		// signal that our cache-sync gate is the one holding the pod NotReady).
+		body := string(raw)
+		if strings.Contains(body, "[-]readyz") {
+			return true, ""
+		}
+		return false, "readyz did not report the cache-sync gate failing: " + body
+	})
+	t.Logf("confirmed %s is held NotReady by the /readyz cache-sync gate", pod)
 }
 
 // containerRunning reports whether any of the pod's containers is currently in the Running state — used to
