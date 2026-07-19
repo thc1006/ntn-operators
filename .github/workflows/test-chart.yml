@@ -79,6 +79,41 @@ jobs:
           { [ -n "$grace" ] && [ "$grace" -ge "$renew" ]; } || { echo "FAIL: chart terminationGracePeriodSeconds='$grace' must be >= RenewDeadline ${renew}s"; exit 1; }
           echo "chart terminationGracePeriodSeconds=$grace (>= RenewDeadline ${renew}s) OK"
 
+      # F7 (#228): the egress NetworkPolicy was never rendered or validated in CI, so a regression that
+      # dropped DNS/UDP or an egress port would ship silently. Assert it renders only when enabled, carries
+      # the egress rules the operator depends on, and is accepted by the live API server (server-side
+      # dry-run — exercises it structurally without needing a NetworkPolicy-enforcing CNI).
+      - name: Verify NetworkPolicy renders + API server accepts it (F7)
+        run: |
+          set -euo pipefail
+          H=./bin/helm
+          # (a) default (enable=false) renders NO NetworkPolicy.
+          off=$($H template t ./dist/chart -n default | grep -c '^kind: NetworkPolicy' || true)
+          [ "$off" = "0" ] || { echo "FAIL: networkPolicy.enable=false must render 0 NetworkPolicy, got $off"; exit 1; }
+          # (b) enable=true renders the policy; the live API server normalizes it (server-side dry-run) to
+          # JSON, then jq asserts the required rules SCOPED TO .spec.egress. Scoping to .spec.egress (not a
+          # whole-YAML grep) means an ingress port cannot satisfy an egress assertion, and a port dropped
+          # from egress but still present in ingress is still caught — the exact ingress/egress confusion a
+          # substring grep would miss. Ingress and egress are opposite directions; for an egress-isolated pod
+          # only .spec.egress is the outbound allowlist.
+          np=$($H template t ./dist/chart -n default --set networkPolicy.enable=true \
+                 --show-only templates/manager/networkpolicy.yaml)
+          echo "$np" | grep -q '^kind: NetworkPolicy' || { echo "FAIL: enable=true must render a NetworkPolicy"; exit 1; }
+          obj=$(printf '%s\n' "$np" | kubectl apply --dry-run=server -f - -o json)
+          # A NetworkPolicy egress rule matches ports AND to; a rule with no 'to' allows the port to ALL
+          # destinations. The chart's default rules for these ports are 'to'-less (broad), so require each
+          # required port to appear in a 'to'-LESS egress rule — otherwise a mutation that scopes the 443
+          # rule to some ipBlock CIDR would still list 443/TCP yet block apiserver/CelesTrak/Space-Track.
+          echo "$obj" | jq -e '
+            .kind == "NetworkPolicy"
+            and (.spec.policyTypes | index("Egress"))
+            and ([ .spec.egress[]? | select((.to // []) | length == 0) | .ports[]? | "\(.port)/\(.protocol // "TCP")" ] as $p
+                 | ($p | index("53/TCP")) and ($p | index("53/UDP"))
+                 and ($p | index("443/TCP")) and ($p | index("9090/TCP")) and ($p | index("8001/TCP")))
+          ' >/dev/null \
+            || { echo "FAIL: .spec.egress must allow DNS 53 TCP+UDP, 443/TCP, 9090/TCP, 8001/TCP to ALL destinations (a 'to'-less rule)"; echo "$obj" | jq '.spec.egress'; exit 1; }
+          echo "NetworkPolicy egress assertion OK (server-normalized, 'to'-less .spec.egress: 53 TCP+UDP, 443/9090/8001 TCP)"
+
       - name: Deploy manager via Helm
         run: make helm-deploy IMG=controller:latest HELM_EXTRA_ARGS="--set manager.image.pullPolicy=Never"
 
