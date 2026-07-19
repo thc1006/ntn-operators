@@ -11,6 +11,16 @@ metadata:
   namespace: {{ .Release.Namespace }}
 spec:
   replicas: {{ .Values.manager.replicas }}
+  # Active-passive HA: never tear down a healthy replica before its replacement is Ready. The cache-sync
+  # /readyz rollout gate and the PDB both depend on maxUnavailable=0 (a broken new replica must not evict the
+  # last healthy one); maxSurge=1 lets the rollout still progress. Pinned explicitly rather than relying on the
+  # default RollingUpdate rounding (25%/25% happens to floor to 0/ceil to 1 at 2 replicas). See
+  # docs/high-availability.md and hack/verify_ha_topology.py.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
   selector:
     matchLabels:
       app.kubernetes.io/name: {{ include "ntn-operators.name" . }}

@@ -46,6 +46,11 @@ type MockProvider struct {
 	LastRuntime    *RuntimeUpdate
 	LastTarget     *ResolvedRemoteControl
 	StatusValue    *ntnv1alpha1.NTNCellConfigStatus
+	// RuntimeHistory / TargetHistory record a DEEP COPY of every PushRuntimeUpdate call's frame (not just the
+	// last pointer), so a test can compare successive pushes byte-for-byte — e.g. proving a crash re-push
+	// re-emits an identical same-epoch payload rather than a mutated/aliased view of the latest one.
+	RuntimeHistory []RuntimeUpdate
+	TargetHistory  []ResolvedRemoteControl
 }
 
 func (m *MockProvider) ApplyCellConfig(
@@ -84,6 +89,20 @@ func (m *MockProvider) PushRuntimeUpdate(_ context.Context, target ResolvedRemot
 	m.RuntimeCalls++
 	m.LastRuntime = &update
 	m.LastTarget = &target
+	// Deep-copy the frame into the history so a later mutation/aliasing of the caller's pointers cannot
+	// retroactively change what we recorded for THIS call.
+	hist := update
+	if update.SatSwitch != nil {
+		hist.SatSwitch = update.SatSwitch.DeepCopy()
+	}
+	if update.Ephemeris.ECEF != nil {
+		hist.Ephemeris.ECEF = update.Ephemeris.ECEF.DeepCopy()
+	}
+	if update.Ephemeris.Orbital != nil {
+		hist.Ephemeris.Orbital = update.Ephemeris.Orbital.DeepCopy()
+	}
+	m.RuntimeHistory = append(m.RuntimeHistory, hist)
+	m.TargetHistory = append(m.TargetHistory, target)
 	return m.RuntimeErr
 }
 

@@ -3,19 +3,51 @@ name: Test Chart
 on:
   push:
     branches: [main]
+    # Broad on purpose: this job is the ONLY one that runs the HA suite (make test-e2e-ha, tag e2e_ha), so it
+    # must re-run whenever anything the HA behaviour depends on changes — the chart topology, the manager
+    # Deployment/RBAC, leader-election/readiness (cmd), the controllers + API used by the reconcile-proof, the
+    # provider, controller-runtime (go.mod), the HA test itself, or the topology checker. The general E2E job
+    # covers test/** but only runs -tags=e2e, which does NOT compile ha_test.go.
     paths:
       - 'dist/chart/**'
       - 'bundle/**'
       - 'config/crd/**'
+      - 'config/manager/**'
+      - 'config/rbac/**'
       - 'cmd/**'
+      - 'internal/**'
+      - 'pkg/**'
+      - 'api/**'
+      - 'test/e2e/**'
+      - 'hack/verify_ha_topology*.py'
+      - 'Dockerfile'
+      - '.dockerignore'
+      - 'go.mod'
+      - 'go.sum'
       - 'Makefile'
       - '.github/workflows/**'
   pull_request:
+    # Broad on purpose: this job is the ONLY one that runs the HA suite (make test-e2e-ha, tag e2e_ha), so it
+    # must re-run whenever anything the HA behaviour depends on changes — the chart topology, the manager
+    # Deployment/RBAC, leader-election/readiness (cmd), the controllers + API used by the reconcile-proof, the
+    # provider, controller-runtime (go.mod), the HA test itself, or the topology checker. The general E2E job
+    # covers test/** but only runs -tags=e2e, which does NOT compile ha_test.go.
     paths:
       - 'dist/chart/**'
       - 'bundle/**'
       - 'config/crd/**'
+      - 'config/manager/**'
+      - 'config/rbac/**'
       - 'cmd/**'
+      - 'internal/**'
+      - 'pkg/**'
+      - 'api/**'
+      - 'test/e2e/**'
+      - 'hack/verify_ha_topology*.py'
+      - 'Dockerfile'
+      - '.dockerignore'
+      - 'go.mod'
+      - 'go.sum'
       - 'Makefile'
       - '.github/workflows/**'
 
@@ -78,6 +110,26 @@ jobs:
           grace=$($H template t ./dist/chart | grep -oE 'terminationGracePeriodSeconds: [0-9]+' | head -1 | grep -oE '[0-9]+$')
           { [ -n "$grace" ] && [ "$grace" -ge "$renew" ]; } || { echo "FAIL: chart terminationGracePeriodSeconds='$grace' must be >= RenewDeadline ${renew}s"; exit 1; }
           echo "chart terminationGracePeriodSeconds=$grace (>= RenewDeadline ${renew}s) OK"
+          # Pin the ABSOLUTE HA failover budget. The E2E RTO bounds are self-calibrating (relative to the live
+          # Lease's leaseDurationSeconds), so they would silently scale with a leaderLeaseDuration regression
+          # (15s -> 120s makes an 8x-slower handoff still pass). Assert the source constant stays within the
+          # stated sub-15s active-passive budget (docs/high-availability.md).
+          lease=$(grep -oE 'leaderLeaseDuration = [0-9]+ \* time\.Second' cmd/main.go | grep -oE '[0-9]+' | head -1)
+          { [ -n "$lease" ] && [ "$lease" -le 15 ]; } || { echo "FAIL: leaderLeaseDuration='$lease's exceeds the pinned 15s HA failover budget"; exit 1; }
+          echo "leaderLeaseDuration=${lease}s (<= 15s HA budget) OK"
+
+      # #230 item 1: the active-passive HA topology the design relies on was never asserted structurally.
+      # A drift that dropped the soft anti-affinity, changed the default replica count, misaligned the PDB
+      # selector (so it stops selecting the manager pods → minAvailable silently protects nothing), or picked
+      # a rollout strategy that can tear down the healthy version would ship green. Assert the rendered
+      # topology holds (hack/verify_ha_topology.py), then SELF-TEST the checker against deliberately-broken
+      # renders so a refactor that weakens a guard fails here rather than letting real drift through.
+      - name: Verify chart HA topology + self-test the checker (negative controls)
+        run: |
+          set -euo pipefail
+          ./bin/helm template t ./dist/chart -n ntn-system --set podDisruptionBudget.enable=true > /tmp/ha_topology.yaml
+          python3 hack/verify_ha_topology.py /tmp/ha_topology.yaml
+          python3 hack/verify_ha_topology_selftest.py /tmp/ha_topology.yaml
 
       # F7 (#228): the egress NetworkPolicy was never rendered or validated in CI, so a regression that
       # dropped DNS/UDP or an egress port would ship silently. Assert it renders only when enabled, carries
@@ -119,3 +171,54 @@ jobs:
 
       - name: Check Helm release status
         run: make helm-status
+
+      # Assert the deployed manager runs the JUST-BUILT image, not a stale published tag. helm-deploy sets the
+      # image via --set from IMG=controller:latest; if that override were ever dropped, the chart default
+      # (a real published release) could deploy and the HA suite would validate OLD code. pullPolicy=Never
+      # already fails that closed, but assert image identity so the guarantee does not rest on one flag.
+      - name: Verify the deployed manager runs the just-built image
+        run: |
+          set -euo pipefail
+          # Select the "manager" container BY NAME and compare EXACTLY — a substring grep over all containers
+          # could be satisfied by a sidecar tagged controller:latest (or fooled by controller:latest-debug)
+          # while the manager itself deployed a stale image.
+          img=$(kubectl -n ntn-operators-system get deploy -l control-plane=controller-manager \
+                  -o jsonpath='{.items[0].spec.template.spec.containers[?(@.name=="manager")].image}')
+          echo "deployed manager container image: $img"
+          [ "$img" = "controller:latest" ] \
+            || { echo "FAIL: manager container image is '$img', not the built controller:latest (stale-code risk)"; exit 1; }
+
+      # #230 items 2-5: exercise the active-passive HA behaviours against the just-deployed 2-replica
+      # release — graceful failover (leader delete → standby acquires lease → new leader reconciles),
+      # ungraceful failover (SIGKILL → failover within LeaseDuration), PDB eviction (evicts at most one),
+      # and the cache-sync /readyz rollout gate (a broken replica stays NotReady, healthy version preserved).
+      # These are DESTRUCTIVE (kill/evict pods, briefly break RBAC) so they run last, after the chart
+      # validations above. The suite self-heals to 2 ready replicas between cases.
+      - name: HA failover / PDB / cache-sync E2E (#230)
+        env:
+          HA_NAMESPACE: ntn-operators-system
+          HA_ALLOW_DESTRUCTIVE: "1"    # explicit opt-in — the suite cordons nodes, evicts pods, mutates cluster RBAC
+          HA_EXPECT_KIND: "1"          # refuse to run unless EVERY node is a disposable Kind node
+          HA_REQUIRE_UNGRACEFUL: "1"   # the ungraceful SIGKILL test must RUN — a skip is a FAILURE here, not green
+          HA_REQUIRE_RUN: "1"          # a missing HA_ALLOW_DESTRUCTIVE must FAIL here, not skip every test to green
+        run: |
+          set -euo pipefail
+          make test-e2e-ha 2>&1 | tee /tmp/ha_e2e.out
+          # Guard the ONE false-green the HA_REQUIRE_* env vars cannot: those live INSIDE newHAEnv, so if a
+          # build-tag typo or a TestHA* rename makes `go test -run '^TestHA'` match ZERO tests, it exits 0 and
+          # every guard is bypassed. Assert go test did not no-op AND each expected test actually PASSED (also
+          # catches a SKIP, which prints "--- SKIP" not "--- PASS").
+          if grep -Eq 'no tests to run|no test files' /tmp/ha_e2e.out; then
+            echo "FALSE GREEN: go test -tags=e2e_ha ran no tests"; exit 1
+          fi
+          # DERIVE the TestHA* set from the compiled binary so a NEW HA test or a rename is auto-covered (not
+          # just a hardcoded list), require at least the current four, then assert each actually PASSED. A
+          # build-tag typo makes the list empty -> caught by the floor.
+          mapfile -t HATESTS < <(go test -tags=e2e_ha ./test/e2e/ -list '^TestHA' 2>/dev/null | grep '^TestHA' || true)
+          if [ "${#HATESTS[@]}" -lt 4 ]; then
+            echo "FALSE GREEN: expected >= 4 TestHA* tests, found ${#HATESTS[@]} (build-tag/rename regression?)"; exit 1
+          fi
+          for tc in "${HATESTS[@]}"; do
+            grep -Eq "^--- PASS: ${tc} " /tmp/ha_e2e.out || { echo "FALSE GREEN: ${tc} did not run+PASS"; exit 1; }
+          done
+          echo "verified: all ${#HATESTS[@]} TestHA* ran and passed"
