@@ -135,6 +135,36 @@ func TestPushEphemerisUpdateIfNeeded_RuntimePath_Closes176(t *testing.T) {
 	if mock.LastRuntime.EpochUnixMs != futureMs {
 		t.Fatalf("epoch not sourced from propagated state: got %d want %d", mock.LastRuntime.EpochUnixMs, futureMs)
 	}
+	// ccWithRemoteControl leaves ntnUlSyncValidityDur unset, so the runtime push must send the operator's
+	// 5 s default on the wire (effectiveUlSyncValidityDurSeconds) — the SAME value the SIB19-cadence advisory
+	// evaluates against. This pins the "shared helper, cannot drift" contract end-to-end (#228 round-4).
+	if mock.LastRuntime.UlSyncValidityDur != 5 {
+		t.Fatalf("unset ntnUlSyncValidityDur must push the 5 s operator default on the wire; got %d", mock.LastRuntime.UlSyncValidityDur)
+	}
+}
+
+// TestPushEphemerisUpdateIfNeeded_RuntimePath_ExplicitUlSyncValidity pins the non-nil branch of the shared
+// effectiveUlSyncValidityDurSeconds on the runtime-push path: an explicit ntnUlSyncValidityDur must
+// round-trip to the wire (not be replaced by the default). Complements the unset→5 assertion above, so a
+// push that ignored the spec value and always sent 5 would be caught here.
+func TestPushEphemerisUpdateIfNeeded_RuntimePath_ExplicitUlSyncValidity(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := ntnv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme: %v", err)
+	}
+	eph := ephWithPropagatedState(time.Now().Add(time.Hour).UnixMilli())
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(eph).Build()
+	r := &NTNCellConfigReconciler{Client: c}
+	mock := &provider.MockProvider{}
+	cc := ccWithRemoteControl()
+	cc.Spec.NTN.NTNUlSyncValidityDur = new(30)
+
+	if _, _, err := r.pushEphemerisUpdateIfNeeded(context.Background(), cc, &cc.Spec, mock); err != nil {
+		t.Fatalf("push: %v", err)
+	}
+	if mock.LastRuntime == nil || mock.LastRuntime.UlSyncValidityDur != 30 {
+		t.Fatalf("explicit ntnUlSyncValidityDur=30 must round-trip to the wire; got %+v", mock.LastRuntime)
+	}
 }
 
 // A pending satSwitchWithResync must ride along in the runtime push (issue #52 —

@@ -322,6 +322,14 @@ func (r *NTNCellConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		ObservedGeneration: cc.Generation,
 	})
 
+	// #228 G4 advisory: warn (never block — ConfigApplied stays independent) when the SIB19 broadcast
+	// cadence cannot keep UEs' UL-sync assistance fresh within ntn-UlSyncValidityDur. Set the condition
+	// BEFORE the push block so it rides whichever Status().Update persists (the push-fail early return OR
+	// the final one); emitCadenceWarn fires the Warning post-persist at BOTH, so a first-reconcile push
+	// failure cannot swallow it (the WO-20 emit-after-persist discipline).
+	cadenceWarn, cadenceEpisode := r.applySIB19CadenceCondition(cc, spec)
+	emitCadenceWarn := func() { r.emitSIB19CadenceWarning(cc, cadenceWarn, cadenceEpisode) }
+
 	// Step 8: Push runtime ephemeris update if ephemerisRef is configured.
 	// Keep ConfigApplied semantics independent from ephemeris push status.
 	if cc.Spec.EphemerisRef == "" {
@@ -358,6 +366,7 @@ func (r *NTNCellConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			if configApplyChanged {
 				r.emitConfigApplied(cc, spec)
 			}
+			emitCadenceWarn()
 			// Count EVERY real push failure by reason (I-19), NOT once per episode:
 			// _errors_total is a failure counter, and the shipped NTNEphemerisPushFailing
 			// alert is increase(...[15m]) > 0 for 15m — which only stays firing while the
@@ -410,6 +419,7 @@ func (r *NTNCellConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	if configApplyChanged {
 		r.emitConfigApplied(cc, spec)
 	}
+	emitCadenceWarn()
 
 	log.Info("NTN cell configuration applied successfully")
 	return ctrl.Result{RequeueAfter: 5 * time.Minute}, nil
@@ -674,10 +684,10 @@ func (r *NTNCellConfigReconciler) pushRuntimeEphemeris(
 		return false, marker, nil
 	}
 
-	ulSync := 5
-	if spec.NTN.NTNUlSyncValidityDur != nil {
-		ulSync = *spec.NTN.NTNUlSyncValidityDur
-	}
+	// The value the operator applies on the wire — explicit or the 5 s default. The advisory
+	// (sib19CadenceWarning) reads the SAME helper, so an unset field cannot mean "5 s to OCUDU but
+	// no-opinion to the advisory".
+	ulSync := effectiveUlSyncValidityDurSeconds(spec)
 	ecef := state.ECEF // copy out of the slice before taking its address
 	update := provider.RuntimeUpdate{
 		Cell:              provider.CellIdentity{PLMN: spec.CellID.PLMN, NCI: uint64(spec.CellID.NCI)},
@@ -874,18 +884,185 @@ func ephemerisPushMarker(eph *ntnv1alpha1.SatelliteEphemeris) string {
 // re-push the live state between GP fetches and after a gNB restart (I-12). The
 // epoch is a monotonic 1:1 proxy for the propagated ECEF — each re-propagation
 // yields a new epoch and a new state — so a same-epoch reconcile dedups without
-// hashing the payload. Refreshing epoch/ephemeris/TA is SI-change-free per TS
-// 38.331. The re-push cadence is bounded by the SatelliteEphemeris re-propagation
-// interval (a few minutes) and can be longer than a configured ntn-UlSyncValidityDur
-// value: that field's enum includes values as low as 5 s (an earlier "NR max 240 s"
-// note was wrong). Whether that timing mismatch actually causes a UE-side UL-sync
-// validity lapse, and whether the operator should clamp the cadence, validate/warn on
-// the pairing, or treat it as a deployment-sizing responsibility, remains open in #228.
-// This marker only deduplicates by propagated epoch and does not decide that semantic
-// or policy.
+// hashing the payload. Refreshing epoch/ephemeris/TA is SI-change-free per TS 38.331.
+//
+// #228 G4 resolution — the re-push cadence (bounded by the SatelliteEphemeris re-propagation interval, a
+// few minutes) versus ntn-UlSyncValidityDur (enum as low as 5 s; the old "NR max 240 s" note was wrong).
+// A UE runs timer T430 = ntn-UlSyncValidityDuration from the SIB19 epochTime (TS 38.331 §5.2.2.4.21) and,
+// on T430 expiry (§5.2.2.6), deems UL sync lost and ceases UL transmission (the cessation itself is the
+// lower-layer MAC/PHY consequence, TS 38.321/38.213 — T430 is a 38.331 timer). Whether a slow re-push
+// lapses that validity depends on how the gNB derives the BROADCAST epochTime — most of which the operator
+// CAN observe: the runtime ntn_config_update always sends a non-optional epoch_timestamp, and the ConfigMap
+// path emits an explicit epoch_time only when spec.ntn.epochTime is set. For OCUDU (verified against its
+// source: periodic_ntn_config_update_task + generate_sib19_info) the pushed timestamp seeds only the orbital
+// propagation; the broadcast epochTime is re-derived as the SI-window end on each periodic SIB19
+// regeneration, so it RE-ANCHORS per broadcast and the re-push cadence does NOT lapse UL-sync validity. So
+// the pairing is NOT auto-clamped or rejected: for OCUDU it is a non-issue, and for a hypothetical provider
+// that pins epochTime to the pushed timestamp the safe threshold is deployment-specific (broadcast epoch +
+// validity > next push + skew), so it stays a documented deployment-sizing responsibility
+// (docs/ntn-ul-sync-timing.md). The part that IS locally decidable — a UE must re-acquire a FRESH SIB19
+// within the validity window, so siPeriod must be shorter than ntn-UlSyncValidityDur — is enforced as an
+// advisory Warning by sib19CadenceWarning, but only for a re-anchoring gNB (sib19EpochReanchored): it is NOT
+// epoch-mode-independent, since re-reading a pinned epoch does not extend validity. This marker dedups by
+// epoch and decides neither.
 func runtimeEphemerisPushMarker(eph *ntnv1alpha1.SatelliteEphemeris, state *ntnv1alpha1.PropagatedState) string {
 	return fmt.Sprintf("ephemerisRef=%s ephGeneration=%d norad=%d epoch=%d",
 		eph.Name, eph.Generation, state.NoradID, state.EpochUnixMs)
+}
+
+// radioFrameDuration is the NR radio-frame length (3GPP TS 38.211): 10 ms. siPeriod is expressed in
+// radio frames, so the SIB19 broadcast period in wall-clock time is siPeriod * radioFrameDuration.
+const radioFrameDuration = 10 * time.Millisecond
+
+// defaultSIB19PeriodFrames is the advisory's assumed SIB19 broadcast period (in radio frames) when
+// sibSchedule is unset — so an unconfigured schedule is evaluated against the period the gNB will actually
+// broadcast rather than treated as zero. It matches OCUDU's si-periodicity fallback (pkg/provider/ocudu
+// defaultSIPeriod=16); it is a local advisory assumption, not wired to a provider constant. The exact value
+// is not load-bearing — at the minimum validity (5 s), 2 × 16 frames = 320 ms is far below 5 s, so the
+// unset-schedule path never raises a warning regardless of this constant.
+const defaultSIB19PeriodFrames = 16
+
+// defaultNTNUlSyncValidityDurSeconds is the ntn-UlSyncValidityDuration the operator APPLIES when
+// spec.ntn.ntnUlSyncValidityDur is unset: the runtime ntn_config_update sends it verbatim (pushRuntimeEphemeris),
+// and OCUDU's own config default is the same value on the ConfigMap path (ntn_ul_sync_validity_dur = 5 —
+// OCUDU du_high_unit_cell_ntn_config.h:95 / ntn_configuration_manager_config.h:31, matching the srsRAN config
+// reference). So an unset field is NOT "no validity" — the UE still runs a 5 s T430 — and the advisory must
+// evaluate against this, not treat unset as no-opinion.
+const defaultNTNUlSyncValidityDurSeconds = 5
+
+// effectiveUlSyncValidityDurSeconds returns the ntn-UlSyncValidityDuration the operator actually applies: the
+// explicit spec value, or defaultNTNUlSyncValidityDurSeconds when unset. SHARED by the runtime push and the
+// SIB19-cadence advisory so the two cannot drift (an unset field is a real 5 s validity on the wire).
+func effectiveUlSyncValidityDurSeconds(spec *ntnv1alpha1.NTNCellConfigSpec) int {
+	if spec.NTN.NTNUlSyncValidityDur != nil {
+		return *spec.NTN.NTNUlSyncValidityDur
+	}
+	return defaultNTNUlSyncValidityDurSeconds
+}
+
+// sib19CadenceWarning returns a non-empty, operator-facing message when the SIB19 broadcast period
+// is not comfortably shorter than ntn-UlSyncValidityDur, i.e. a UE cannot reliably re-acquire SIB19
+// within the UL-sync validity window and risks losing UL synchronization. Per TS 38.331 §5.2.2.4.21 the UE
+// starts timer T430 = ntn-UlSyncValidityDuration from the subframe indicated by epochTime and is expected
+// (a NOTE: "by UE implementation") to re-acquire SIB19 before it expires; on T430 expiry (§5.2.2.6) it deems
+// UL sync lost, informs lower layers, and re-acquires SIB19. The actual cessation of UL transmission once UL
+// sync / a valid TA is lost is the lower-layer MAC/PHY behaviour (TS 38.321 / TS 38.213); T430 itself is a
+// 38.331 timer. Re-acquiring SIB19 only advances the UE's deadline when the re-broadcast carries a FRESHER
+// epoch/assistance (T430 counts from epochTime, not from reception) — so this cadence check is meaningful
+// only for a provider that refreshes the broadcast epoch each SIB19 regeneration (OCUDU re-anchors it to the
+// SI-window end; applySIB19CadenceCondition gates the check on that provider capability). It is NOT
+// epoch-mode-independent: for a provider that re-broadcasts a pinned epoch, siPeriod is not the signal.
+// Unlike the ephemeris re-push-cadence pairing (a
+// deployment-sizing concern documented on runtimeEphemerisPushMarker / docs/ntn-ul-sync-timing.md), it is
+// safe to check locally from the NTNCellConfig spec alone. It requires at least TWO broadcasts inside the
+// window: one is the bare necessary condition, but a single missed acquisition (RF error / fade) would
+// then already lose sync, so two gives a one-retransmission margin. An UNSET ntnUlSyncValidityDur is
+// evaluated against the operator's applied default (defaultNTNUlSyncValidityDurSeconds = 5 s), NOT treated
+// as no-opinion — unset is a real 5 s validity on the wire. Returns "" only when the timing is sane.
+func sib19CadenceWarning(spec *ntnv1alpha1.NTNCellConfigSpec) string {
+	validitySeconds := effectiveUlSyncValidityDurSeconds(spec)
+	validity := time.Duration(validitySeconds) * time.Second
+	frames := defaultSIB19PeriodFrames
+	if spec.CellOverrides != nil && spec.CellOverrides.SIBSchedule != nil && spec.CellOverrides.SIBSchedule.SIPeriod > 0 {
+		frames = spec.CellOverrides.SIBSchedule.SIPeriod
+	}
+	period := time.Duration(frames) * radioFrameDuration
+	if 2*period > validity {
+		src := ""
+		if spec.NTN.NTNUlSyncValidityDur == nil {
+			src = ", operator default (ntnUlSyncValidityDur unset)"
+		}
+		return fmt.Sprintf(
+			"SIB19 broadcast period (siPeriod=%d frames = %s) leaves fewer than two broadcasts inside the "+
+				"ntn-UlSyncValidityDur window (%s%s): a UE may fail to re-acquire SIB19 before UL-sync validity "+
+				"expires and then lose UL synchronization. Reduce siPeriod or increase ntnUlSyncValidityDur.",
+			frames, period, validity, src)
+	}
+	return ""
+}
+
+// providerReanchorsSIB19Epoch is the PROVIDER-TYPE default for whether a gNB re-anchors the broadcast SIB19
+// epochTime (and re-propagates the assistance) on each periodic SIB19 regeneration, rather than pinning it
+// to a value pushed once. This is the precondition for the siPeriod-vs-validity cadence check to mean
+// anything: T430 counts UL-sync validity from the SIB19 epochTime, so re-acquiring SIB19 only advances the
+// UE's deadline when the re-broadcast carries a fresher epoch. OCUDU derives the epoch from the SI-window end
+// on each regeneration (verified at the revision in the runtimeEphemerisPushMarker note), so it re-anchors;
+// the ProviderRef enum admits only "ocudu" today, and any future provider must be assessed before it is
+// added. The per-deployment override is spec.provider.sib19EpochMode (see sib19EpochReanchored).
+func providerReanchorsSIB19Epoch(providerType string) bool {
+	return providerType == "ocudu"
+}
+
+// sib19EpochReanchored resolves the EFFECTIVE SIB19 epoch mode for a config: the explicit
+// spec.provider.sib19EpochMode override if set, else the provider-type default (providerReanchorsSIB19Epoch).
+// This is the enforceable escape hatch the round-4 review required — the operator cannot observe the gNB's
+// build/version at runtime, so a deployment on a gNB whose broadcast SIB19 epoch is PINNED (not re-anchored)
+// sets sib19EpochMode="pinned" and the advisory then expresses no opinion, rather than a doc note (which
+// cannot stop a changed build from being trusted) being the only guard.
+func sib19EpochReanchored(spec *ntnv1alpha1.NTNCellConfigSpec) bool {
+	if m := spec.Provider.SIB19EpochMode; m != nil {
+		return *m == "reanchored"
+	}
+	return providerReanchorsSIB19Epoch(spec.Provider.Type)
+}
+
+// applySIB19CadenceCondition sets the advisory SIB19CadenceSane condition (#228 G4) in memory and returns
+// the warning message ("" when sane or the config gets no opinion) plus whether the warning EPISODE changed,
+// so the caller emits the Warning event once per episode, post-persist. Extracted from Reconcile to keep its
+// cyclomatic complexity in check.
+//
+// It is evaluated only after provider validation and ApplyCellConfig succeed (the earlier failure paths
+// return before this runs), so a provider-broken config (ConfigApplied=False) carries no fresh advisory
+// until it applies. That is intentional: the SIB19 timing only matters once the config is actually live,
+// and the advisory self-corrects (with the current generation) on the first successful apply.
+func (r *NTNCellConfigReconciler) applySIB19CadenceCondition(
+	cc *ntnv1alpha1.NTNCellConfig, spec *ntnv1alpha1.NTNCellConfigSpec,
+) (warn string, episodeChanged bool) {
+	// The cadence margin is a valid signal ONLY when the gNB REFRESHES the broadcast epoch/assistance on each
+	// SIB19 regeneration — then re-acquiring SIB19 within the window advances the UE's T430 deadline (T430
+	// counts from the SIB19 epochTime, not from reception). For a gNB that re-broadcasts a PINNED epoch,
+	// re-reading SIB19 does not extend validity, so siPeriod is not the right signal; express NO opinion and
+	// clear any stale condition. sib19EpochReanchored takes the explicit spec.provider.sib19EpochMode override
+	// (the round-4 escape hatch) or the provider-type default (OCUDU, verified to re-anchor).
+	if !sib19EpochReanchored(spec) {
+		meta.RemoveStatusCondition(&cc.Status.Conditions, ntnv1alpha1.ConditionSIB19CadenceSane)
+		return "", false
+	}
+	// Past the gate the effective validity is ALWAYS known — the explicit ntnUlSyncValidityDur, or the 5 s
+	// operator default (effectiveUlSyncValidityDurSeconds) — so an unset field is NOT no-opinion: it is
+	// evaluated, and the result is either a warning (False) or sane (True). Round-4 fix: unset was wrongly
+	// treated as no-opinion while the runtime push already sent OCUDU a real 5 s validity.
+	if warn = sib19CadenceWarning(spec); warn != "" {
+		episodeChanged = conditionEpisodeChanged(
+			meta.FindStatusCondition(cc.Status.Conditions, ntnv1alpha1.ConditionSIB19CadenceSane),
+			metav1.ConditionFalse, "InsufficientSIB19Margin", cc.Generation)
+		meta.SetStatusCondition(&cc.Status.Conditions, metav1.Condition{
+			Type:               ntnv1alpha1.ConditionSIB19CadenceSane,
+			Status:             metav1.ConditionFalse,
+			Reason:             "InsufficientSIB19Margin",
+			Message:            warn,
+			ObservedGeneration: cc.Generation,
+		})
+	} else {
+		// Sane: record True so a prior warning clears and can re-fire on a later regression.
+		meta.SetStatusCondition(&cc.Status.Conditions, metav1.Condition{
+			Type:               ntnv1alpha1.ConditionSIB19CadenceSane,
+			Status:             metav1.ConditionTrue,
+			Reason:             "WithinValidity",
+			Message:            "SIB19 broadcast cadence margin is within ntnUlSyncValidityDur; runtime epoch and ephemeris-push headroom are not evaluated by this condition",
+			ObservedGeneration: cc.Generation,
+		})
+	}
+	return warn, episodeChanged
+}
+
+// emitSIB19CadenceWarning fires the SIB19CadenceRisk Warning event, but only on a changed episode and a
+// real warning — the emit-after-persist, once-per-episode discipline (WO-20). Called at every persist
+// point so a first-reconcile push failure cannot swallow the event.
+func (r *NTNCellConfigReconciler) emitSIB19CadenceWarning(cc *ntnv1alpha1.NTNCellConfig, warn string, episodeChanged bool) {
+	if episodeChanged && warn != "" && r.Recorder != nil {
+		r.Recorder.Eventf(cc, nil, corev1.EventTypeWarning, "SIB19CadenceRisk", "SIB19CadenceRisk", "%s", warn)
+	}
 }
 
 // SetupWithManager sets up the controller with the Manager.

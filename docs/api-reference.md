@@ -717,7 +717,20 @@ OCUDU YAML renders as "ncells:" for compatibility.<br/>
         <td><b>ntnUlSyncValidityDur</b></td>
         <td>integer</td>
         <td>
-          ntnUlSyncValidityDur sets the UL synchronization validity duration in seconds.<br/>
+          ntnUlSyncValidityDur sets the UL synchronization validity duration in seconds (SIB19
+ntn-Config-r17 ntn-UlSyncValidityDuration). A UE runs timer T430 = this duration from the SIB19
+epochTime (TS 38.331 §5.2.2.4.21) and, on T430 expiry (§5.2.2.6), deems UL sync lost and re-acquires
+SIB19; the resulting cessation of uplink transmission is the lower-layer MAC/PHY behaviour (TS 38.321 /
+TS 38.213 — T430 itself is a 38.331 timer). Unset is NOT "no validity": the operator applies 5 s (the
+runtime push sends it, and OCUDU's own config default is 5 s), so the advisory evaluates an unset field
+against 5 s too. Two deployment-sizing rules follow (see docs/ntn-ul-sync-timing.md):
+(1) the SIB19 broadcast period (cellOverrides.sibSchedule.siPeriod) must be shorter than this value so
+the UE can re-read SIB19 in time — the operator raises a SIB19CadenceSane=False Warning when it is not
+(gated on the gNB re-anchoring its SIB19 epoch; see provider.sib19EpochMode);
+(2) the ephemeris re-push cadence vs this value is a NON-issue on OCUDU (the primary provider re-anchors
+the broadcast SIB19 epochTime to the SI-window end on each regeneration, so validity self-renews) — it
+would only matter for a provider that pins the broadcast epochTime to the pushed timestamp, where it is
+a deployment-sizing responsibility (not auto-enforced).<br/>
           <br/>
             <i>Enum</i>: 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 120, 180, 240, 900<br/>
         </td>
@@ -1843,6 +1856,24 @@ config push. When set together with spec.cellID, the operator pushes runtime
 ntn_config_update commands; otherwise it uses the ConfigMap path only.<br/>
         </td>
         <td>false</td>
+      </tr><tr>
+        <td><b>sib19EpochMode</b></td>
+        <td>enum</td>
+        <td>
+          sib19EpochMode declares how this gNB build derives the BROADCAST SIB19 epochTime — which the operator
+cannot observe at runtime, but which decides whether the SIB19-cadence advisory (SIB19CadenceSane) is
+meaningful. "reanchored": each periodic SIB19 regeneration refreshes the broadcast epoch, so a UE
+re-acquiring SIB19 within the validity window advances its T430 deadline — the advisory applies.
+"pinned": the gNB re-broadcasts a fixed epoch, so re-acquisition does not extend validity and the
+cadence check would mislead — the operator then expresses NO opinion (no SIB19CadenceSane condition).
+Unset falls back to the provider-type default: OCUDU is VERIFIED to re-anchor at the revision recorded
+in docs/ntn-ul-sync-timing.md, so unset+ocudu ⇒ reanchored. Set this explicitly (e.g. "pinned") if you
+run a gNB build whose SIB19 epoch behaviour differs from that verified revision — a doc note alone
+cannot stop a changed build from being trusted, so this is the enforceable override.<br/>
+          <br/>
+            <i>Enum</i>: reanchored, pinned<br/>
+        </td>
+        <td>false</td>
       </tr></tbody>
 </table>
 
@@ -2083,8 +2114,12 @@ SIB19 broadcast cadence needs to track short ntn-UlSyncValidityDur.
         <td><b>siPeriod</b></td>
         <td>integer</td>
         <td>
-          siPeriod is the SIB19 broadcast period in radio frames.
-Shorter periods keep UEs' NTN assistance fresh but cost air time.<br/>
+          siPeriod is the SIB19 broadcast period in radio frames (1 frame = 10 ms; unset defaults to 16).
+Shorter periods keep UEs' NTN assistance fresh but cost air time. It should be shorter than
+ntn.ntnUlSyncValidityDur so a UE can re-acquire SIB19 within the UL-sync validity window — an
+engineering consequence of the TS 38.331 §5.2.2.4.21 re-acquisition requirement, not a normative
+38.331 constraint; the operator raises a SIB19CadenceSane=False Warning when fewer than two SIB19
+broadcasts fit inside that window (see docs/ntn-ul-sync-timing.md).<br/>
           <br/>
             <i>Enum</i>: 8, 16, 32, 64, 128, 256, 512<br/>
         </td>
@@ -3318,6 +3353,32 @@ SatelliteEphemerisStatus defines the observed state of SatelliteEphemeris.
         <td>[]object</td>
         <td>
           conditions represent the current state of the resource.<br/>
+        </td>
+        <td>false</td>
+      </tr><tr>
+        <td><b>lastPassPredictionInputHash</b></td>
+        <td>string</td>
+        <td>
+          lastPassPredictionInputHash is a digest of the inputs that determine the pass windows: the
+pass-prediction spec (ground stations, minElevation, horizon), the tracked NORAD selector, the
+source identity, and each resolved ground station's identity/generation. The sweep re-runs
+IMMEDIATELY when this changes — not only on the passPredictionInterval time cadence — so a
+ground-station edit/add/delete, a selector change, or an elevation/horizon change re-predicts at
+once instead of leaving stale windows for up to an interval (ADR 0006 / #234). Cleared whenever
+the pass windows are invalidated (see invalidatePassPredictionStatus).<br/>
+        </td>
+        <td>false</td>
+      </tr><tr>
+        <td><b>lastPassPredictionTime</b></td>
+        <td>string</td>
+        <td>
+          lastPassPredictionTime is when the pass-window sweep last ran. The sweep runs on its own
+lower cadence (passPredictionInterval), decoupled from the propagation heartbeat, so its
+O(horizon x satellites x ground stations) cost stays out of the runtime-push epoch cadence
+(ADR 0006 / #234). Persisted rather than in-memory so the "sweep is due" decision survives a
+leader failover. Absent means the sweep has not run since this field appeared (or ever).<br/>
+          <br/>
+            <i>Format</i>: date-time<br/>
         </td>
         <td>false</td>
       </tr><tr>
