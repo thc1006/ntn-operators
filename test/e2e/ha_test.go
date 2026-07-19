@@ -39,15 +39,15 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/util/retry"
 	ctrlcfg "sigs.k8s.io/controller-runtime/pkg/client/config"
 )
 
 const (
-	// haLeaseName must equal LeaderElectionID in cmd/main.go.
-	haLeaseName = "b1076767.operators.dev"
-	// haLeaseDuration must track leaderLeaseDuration in cmd/main.go — an ungraceful (SIGKILL) failover
-	// waits out at most this before the standby can steal the lease.
-	haLeaseDuration = 15 * time.Second
+	// haLeaseName must equal LeaderElectionID in cmd/main.go. If it drifts, leaseHolder() fails loudly
+	// (Lease not found) rather than passing wrongly. The lease DURATION is NOT hard-coded here — it is read
+	// from the live Lease (leaseDuration()) so the RTO bounds track the actual running config, not a copy.
+	haLeaseName     = "b1076767.operators.dev"
 	managerSelector = "control-plane=controller-manager"
 	haReplicas      = 2 // active-passive: one active reconciler + one warm standby
 	crdAPIGroup     = "ntn.operators.dev"
@@ -70,6 +70,13 @@ type haEnv struct {
 
 func newHAEnv(t *testing.T) *haEnv {
 	t.Helper()
+	// Hard opt-in: this suite is DESTRUCTIVE (cordons every node, deletes/evicts manager pods, rewrites a
+	// cluster-scoped ClusterRole). Refuse to run unless the caller explicitly acknowledges that — so a stray
+	// `make test-e2e-ha` against the wrong kubecontext cannot cordon a production fleet or break a live operator.
+	if os.Getenv("HA_ALLOW_DESTRUCTIVE") != "1" {
+		t.Skip("HA suite is DESTRUCTIVE (cordons every node, evicts manager pods, mutates cluster RBAC); " +
+			"set HA_ALLOW_DESTRUCTIVE=1 and point KUBECONFIG at a disposable Kind cluster to run it")
+	}
 	cfg, err := ctrlcfg.GetConfig()
 	if err != nil {
 		t.Fatalf("load kube config (is KUBECONFIG set to the Kind cluster?): %v", err)
@@ -82,7 +89,35 @@ func newHAEnv(t *testing.T) *haEnv {
 	if err != nil {
 		t.Fatalf("dynamic client: %v", err)
 	}
-	return &haEnv{cs: cs, dyn: dyn, ns: haNamespace(), ctx: context.Background()}
+	e := &haEnv{cs: cs, dyn: dyn, ns: haNamespace(), ctx: context.Background()}
+	e.requireDisposableCluster(t)
+	return e
+}
+
+// requireDisposableCluster refuses to run unless EVERY node is a Kind node (providerID "kind://…"). The PDB
+// test cordons all nodes and the cache-sync test rewrites a cluster-scoped ClusterRole, so a wrong kubecontext
+// could cordon a production fleet or break a live operator's RBAC. Set HA_EXPECT_KIND=0 to bypass ONLY when
+// you are certain the target is disposable (e.g. a non-Kind ephemeral test cluster).
+func (e *haEnv) requireDisposableCluster(t *testing.T) {
+	t.Helper()
+	if os.Getenv("HA_EXPECT_KIND") == "0" {
+		t.Log("HA_EXPECT_KIND=0 — skipping the Kind safety check; caller asserts the cluster is disposable")
+		return
+	}
+	nodes, err := e.cs.CoreV1().Nodes().List(e.ctx, metav1.ListOptions{})
+	if err != nil {
+		t.Fatalf("list nodes for the disposable-cluster safety check: %v", err)
+	}
+	if len(nodes.Items) == 0 {
+		t.Fatal("no nodes found — refusing to run the destructive HA suite")
+	}
+	for i := range nodes.Items {
+		if pid := nodes.Items[i].Spec.ProviderID; !strings.HasPrefix(pid, "kind://") {
+			t.Fatalf("node %s is not a Kind node (providerID=%q) — refusing to cordon/mutate a non-disposable "+
+				"cluster; set HA_EXPECT_KIND=0 only if you are certain the target is disposable",
+				nodes.Items[i].Name, pid)
+		}
+	}
 }
 
 // eventually polls cond until it returns (true, _) or timeout; on timeout it fails with the last message.
@@ -113,6 +148,20 @@ func (e *haEnv) leaseHolder() (string, error) {
 		return "", nil
 	}
 	return *l.Spec.HolderIdentity, nil
+}
+
+// leaseDuration reads the deployed leader-election Lease's configured duration, so RTO bounds track the
+// ACTUAL running config (cmd/main.go's leaderLeaseDuration) instead of a hard-coded copy that could drift.
+func (e *haEnv) leaseDuration(t *testing.T) time.Duration {
+	t.Helper()
+	l, err := e.cs.CoordinationV1().Leases(e.ns).Get(e.ctx, haLeaseName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get lease %s for its duration: %v", haLeaseName, err)
+	}
+	if l.Spec.LeaseDurationSeconds == nil {
+		t.Fatalf("lease %s has no leaseDurationSeconds", haLeaseName)
+	}
+	return time.Duration(*l.Spec.LeaseDurationSeconds) * time.Second
 }
 
 // holderPodBase maps a controller-runtime holderIdentity ("<pod>_<uuid>") to its owning pod name.
@@ -251,6 +300,17 @@ func TestHAGracefulFailover(t *testing.T) {
 	e.assertLeaderReconciles(t, "ha-graceful-probe")
 }
 
+// ungracefulSkipOrFail skips the ungraceful test locally, but FAILS it under HA_REQUIRE_UNGRACEFUL=1 — a CI
+// job that claims to exercise ungraceful (SIGKILL) failover must actually run it, never skip-then-green when
+// docker/crictl/Kind integration regresses.
+func ungracefulSkipOrFail(t *testing.T, format string, args ...any) {
+	t.Helper()
+	if os.Getenv("HA_REQUIRE_UNGRACEFUL") == "1" {
+		t.Fatalf(format, args...)
+	}
+	t.Skipf(format, args...)
+}
+
 // TestHAUngracefulFailover (#230 item 3): an UNGRACEFUL leader loss (the container SIGKILLed on the node, so
 // the process never runs the lease-release defer) must still fail over — the standby waits out LeaseDuration
 // — and the RTO is recorded. A plain pod delete cannot exercise this: the manager image is distroless, so a
@@ -261,35 +321,53 @@ func TestHAGracefulFailover(t *testing.T) {
 func TestHAUngracefulFailover(t *testing.T) {
 	e := newHAEnv(t)
 	e.waitReadyManagerPods(t)
-	holder0 := e.waitLeaseHolder(t)
-	leader0 := holderPodBase(holder0)
-
-	pod, err := e.cs.CoreV1().Pods(e.ns).Get(e.ctx, leader0, metav1.GetOptions{})
-	if err != nil {
-		t.Fatalf("get leader pod: %v", err)
-	}
-	node := pod.Spec.NodeName
-	if len(pod.Status.ContainerStatuses) == 0 || pod.Status.ContainerStatuses[0].ContainerID == "" {
-		t.Fatalf("leader pod %s has no running container id", leader0)
-	}
-	cid := strings.TrimPrefix(pod.Status.ContainerStatuses[0].ContainerID, "containerd://")
-	t.Logf("initial leader pod=%s node=%s container=%.12s", leader0, node, cid)
+	ld := e.leaseDuration(t) // self-calibrating: RTO bounds derive from the live Lease, not a hard-coded copy
 
 	if _, err := exec.LookPath("docker"); err != nil {
-		t.Skip("docker not available: the ungraceful (node-level SIGKILL) test needs a Kind cluster")
+		ungracefulSkipOrFail(t, "docker not available: the ungraceful (node-level SIGKILL) test needs a Kind cluster")
 	}
-	// Leadership can legitimately move in the gap while we resolved the pod/container id above; if it has,
-	// the container we're about to kill is no longer the leader and the RTO would be meaningless — skip.
-	if h, _ := e.leaseHolder(); h != holder0 {
-		t.Skipf("leadership moved before the kill (%s -> %s); nothing to measure", holder0, h)
+
+	// Resolve the CURRENT leader and SIGKILL its container, RETRYING if leadership moves during resolution — a
+	// stale target would make the RTO meaningless. Leadership is stable in steady state, so attempt 0 almost
+	// always wins; we retry rather than skip so a genuine environment regression cannot hide behind a skip. A
+	// missing docker or a failed crictl is an environment fault, not a race, so it goes through
+	// ungracefulSkipOrFail (fatal under HA_REQUIRE_UNGRACEFUL, skip otherwise).
+	var holder0 string
+	var start time.Time
+	killed := false
+	for attempt := 0; attempt < 3 && !killed; attempt++ {
+		holder0 = e.waitLeaseHolder(t)
+		leader0 := holderPodBase(holder0)
+		pod, err := e.cs.CoreV1().Pods(e.ns).Get(e.ctx, leader0, metav1.GetOptions{})
+		if err != nil {
+			t.Logf("attempt %d: get leader pod %s: %v — re-resolving", attempt, leader0, err)
+			continue
+		}
+		if len(pod.Status.ContainerStatuses) == 0 || pod.Status.ContainerStatuses[0].ContainerID == "" {
+			t.Logf("attempt %d: leader pod %s has no running container id — re-resolving", attempt, leader0)
+			continue
+		}
+		node := pod.Spec.NodeName
+		cid := strings.TrimPrefix(pod.Status.ContainerStatuses[0].ContainerID, "containerd://")
+		// Re-confirm this is STILL the leader immediately before the kill; if it moved during resolution, retry.
+		if h, _ := e.leaseHolder(); h != holder0 {
+			t.Logf("attempt %d: leadership moved during resolution (%s -> %s) — re-resolving", attempt, holder0, h)
+			continue
+		}
+		t.Logf("attempt %d: SIGKILL leader pod=%s node=%s container=%.12s", attempt, leader0, node, cid)
+		// crictl stop --timeout 0 SIGKILLs the container immediately — no SIGTERM, so no lease release.
+		kill := exec.Command("docker", "exec", node, "crictl", "stop", "--timeout", "0", cid)
+		if out, err := kill.CombinedOutput(); err != nil {
+			ungracefulSkipOrFail(t, "could not SIGKILL the container via docker/crictl (non-Kind cluster?): %v: %s", err, out)
+		}
+		start = time.Now() // measure the RTO from the fault, NOT including the docker-exec setup
+		killed = true
 	}
-	// crictl stop --timeout 0 SIGKILLs the container immediately — no SIGTERM, so no lease release.
-	kill := exec.Command("docker", "exec", node, "crictl", "stop", "--timeout", "0", cid)
-	if out, err := kill.CombinedOutput(); err != nil {
-		t.Skipf("could not SIGKILL the container via docker/crictl (non-Kind cluster?): %v: %s", err, out)
+	if !killed {
+		ungracefulSkipOrFail(t, "leadership kept moving before the kill across 3 attempts; cannot measure RTO")
 	}
-	start := time.Now() // measure the RTO from the fault, NOT including the docker-exec setup
-	eventually(t, haLeaseDuration+30*time.Second, time.Second, "ungraceful failover", func() (bool, string) {
+
+	eventually(t, ld+30*time.Second, time.Second, "ungraceful failover", func() (bool, string) {
 		h, err := e.leaseHolder()
 		if err != nil {
 			return false, err.Error()
@@ -304,18 +382,18 @@ func TestHAUngracefulFailover(t *testing.T) {
 		return true, ""
 	})
 	rto := time.Since(start)
-	t.Logf("ungraceful (SIGKILL) failover RTO=%s (LeaseDuration=%s)", rto.Round(time.Millisecond), haLeaseDuration)
+	t.Logf("ungraceful (SIGKILL) failover RTO=%s (LeaseDuration=%s)", rto.Round(time.Millisecond), ld)
 
 	// The lease renews every few seconds, so the standby cannot steal it until ~LeaseDuration after the last
-	// renew. A graceful release would be ~1 s; require the RTO to be clearly in the lease-timeout regime,
-	// proving no release happened, while bounding the top for a slow CI.
-	if rto < 8*time.Second {
-		t.Fatalf("ungraceful RTO %s too fast — the lease was released, not the LeaseDuration path", rto)
+	// renew. A graceful release would be ~1 s; require the RTO to be clearly in the lease-timeout regime
+	// (>= half the lease duration), proving no release happened, while bounding the top for a slow CI.
+	if rto < ld/2 {
+		t.Fatalf("ungraceful RTO %s too fast (<LeaseDuration/2=%s) — released, not the lease-timeout path", rto, ld/2)
 	}
 	// Upper bound kept below the eventually window (LeaseDuration+30s) so a legitimately-slow-but-bounded
 	// failover trips THIS clear message rather than the generic eventually timeout.
-	if rto > haLeaseDuration+20*time.Second {
-		t.Fatalf("ungraceful failover RTO %s exceeded LeaseDuration+margin", rto)
+	if rto > ld+20*time.Second {
+		t.Fatalf("ungraceful failover RTO %s exceeded LeaseDuration+margin (%s)", rto, ld+20*time.Second)
 	}
 	e.waitReadyManagerPods(t)
 }
@@ -346,14 +424,27 @@ func TestHAPDBEviction(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list nodes: %v", err)
 	}
-	for i := range nodes.Items {
-		e.setCordon(t, nodes.Items[i].Name, true)
-	}
+	// Register the uncordon cleanup BEFORE cordoning, so a mid-loop cordon failure (Fatal) still releases the
+	// nodes already cordoned. A cordon that SILENTLY failed would let the replacement become Ready and the
+	// second eviction be legitimately allowed — which we would then misreport as "PDB unprotected" — so a
+	// SETUP cordon failure is Fatal; the cleanup uncordon is best-effort but reported.
 	t.Cleanup(func() {
+		var stuck []string
 		for i := range nodes.Items {
-			e.setCordon(t, nodes.Items[i].Name, false)
+			if err := e.setCordon(nodes.Items[i].Name, false); err != nil {
+				stuck = append(stuck, nodes.Items[i].Name)
+				t.Logf("cleanup: uncordon %s failed: %v", nodes.Items[i].Name, err)
+			}
+		}
+		if len(stuck) > 0 {
+			t.Errorf("CRITICAL: cleanup left node(s) cordoned %v — the cluster may not schedule new pods", stuck)
 		}
 	})
+	for i := range nodes.Items {
+		if err := e.setCordon(nodes.Items[i].Name, true); err != nil {
+			t.Fatalf("setup: cordon node %s failed: %v", nodes.Items[i].Name, err)
+		}
+	}
 
 	evict := func(pod string) error {
 		return e.cs.PolicyV1().Evictions(e.ns).Evict(e.ctx, &policyv1.Eviction{
@@ -393,13 +484,10 @@ func TestHAPDBEviction(t *testing.T) {
 	t.Logf("second eviction of %s correctly REFUSED by the PDB", ready[1])
 }
 
-func (e *haEnv) setCordon(t *testing.T, node string, unschedulable bool) {
-	t.Helper()
+func (e *haEnv) setCordon(node string, unschedulable bool) error {
 	patch := fmt.Sprintf(`{"spec":{"unschedulable":%v}}`, unschedulable)
 	_, err := e.cs.CoreV1().Nodes().Patch(e.ctx, node, types.StrategicMergePatchType, []byte(patch), metav1.PatchOptions{})
-	if err != nil {
-		t.Logf("warning: patch node %s unschedulable=%v: %v", node, unschedulable, err)
-	}
+	return err
 }
 
 // TestHACacheSyncRolloutGate (#230 item 4): /readyz gates on informer cache-sync, not leadership (#226). A
@@ -415,22 +503,65 @@ func TestHACacheSyncRolloutGate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get ClusterRole %s: %v", crName, err)
 	}
-	deploy := e.deployName(t)
-	// Idempotent: the explicit in-body restore (to assert recovery) and the t.Cleanup failsafe both call this,
-	// but sync.Once collapses them to a single RBAC-restore + rollout — no redundant second rollout, and the
-	// Cleanup still restores if the test fails before the in-body call.
-	var restoreOnce sync.Once
-	restore := func() {
-		restoreOnce.Do(func() {
-			if cur, err := e.cs.RbacV1().ClusterRoles().Get(context.Background(), crName, metav1.GetOptions{}); err == nil {
-				cur.Rules = orig.Rules
-				_, _ = e.cs.RbacV1().ClusterRoles().Update(context.Background(), cur, metav1.UpdateOptions{})
-			}
-			_, _ = e.cs.AppsV1().Deployments(e.ns).Patch(context.Background(), deploy,
-				types.StrategicMergePatchType, []byte(rolloutRestartPatch()), metav1.PatchOptions{})
-		})
+	// Guard against an already-broken baseline (a prior aborted run may have left list/watch stripped): if we
+	// captured a broken ClusterRole as "orig", restoring to it would LOCK IN the breakage. Require the baseline
+	// to currently grant list+watch on the CRD group before we break it.
+	if !clusterRoleGrantsCRDListWatch(orig) {
+		t.Fatalf("ClusterRole %s does not currently grant list+watch on %s — the baseline looks already broken; "+
+			"redeploy the chart (make helm-deploy) before running the HA suite", crName, crdAPIGroup)
 	}
-	t.Cleanup(restore)
+	deploy := e.deployName(t)
+
+	// Reliable, idempotent restore: retry on conflict, and mark "restored" ONLY after BOTH the RBAC update and
+	// the rollout patch succeed — so a transient API error on the in-body restore does not consume the attempt
+	// and leave the ClusterRole permanently broken (the t.Cleanup failsafe then still retries). The in-body
+	// caller fails the test on error; the cleanup reports a CRITICAL if it ultimately cannot restore.
+	var restoreMu sync.Mutex
+	restored := false
+	restore := func() error {
+		restoreMu.Lock()
+		defer restoreMu.Unlock()
+		if restored {
+			return nil
+		}
+		if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			cur, err := e.cs.RbacV1().ClusterRoles().Get(context.Background(), crName, metav1.GetOptions{})
+			if err != nil {
+				return err
+			}
+			cur.Rules = orig.Rules
+			_, err = e.cs.RbacV1().ClusterRoles().Update(context.Background(), cur, metav1.UpdateOptions{})
+			return err
+		}); err != nil {
+			return fmt.Errorf("restore ClusterRole %s: %w", crName, err)
+		}
+		if _, err := e.cs.AppsV1().Deployments(e.ns).Patch(context.Background(), deploy,
+			types.StrategicMergePatchType, []byte(rolloutRestartPatch()), metav1.PatchOptions{}); err != nil {
+			return fmt.Errorf("rollout restart after RBAC restore: %w", err)
+		}
+		restored = true
+		return nil
+	}
+	t.Cleanup(func() {
+		if err := restore(); err != nil {
+			t.Errorf("CRITICAL: cleanup could not restore the manager ClusterRole/rollout — the cluster may be "+
+				"left with broken RBAC: %v", err)
+		}
+	})
+
+	// Record the pre-rollout pod-template-hashes: the healthy (old) generation the gate must NOT tear down, and
+	// the baseline for identifying a NEW-generation (rolled) pod below.
+	oldHashes := map[string]bool{}
+	if pods, err := e.managerPods(); err == nil {
+		for i := range pods {
+			if h := pods[i].Labels["pod-template-hash"]; h != "" {
+				oldHashes[h] = true
+			}
+		}
+	}
+	if len(oldHashes) == 0 {
+		t.Fatal("could not record any pre-rollout pod-template-hash — cannot distinguish new pods from old")
+	}
 
 	// Strip list/watch on the CRD group so a fresh informer cannot sync those caches.
 	broken := orig.DeepCopy()
@@ -449,67 +580,160 @@ func TestHACacheSyncRolloutGate(t *testing.T) {
 		t.Fatalf("rollout restart: %v", err)
 	}
 
-	// Invariant over the window: a NotReady new pod appears (the broken replica the cache-sync /readyz gate
-	// holds back) AND the count of Ready manager pods never drops below 1 (the healthy version is never torn
-	// down under a broken new one). maxUnavailable rounds to 0 for 2 replicas, so old stays Ready while the
-	// surged new pod is stuck NotReady.
+	// Invariant over the window: a NEW-generation pod (a pod-template-hash absent before the rollout) whose
+	// container is RUNNING but which never becomes Ready — i.e. held by the cache-sync /readyz gate, not a
+	// pull/schedule failure — appears, while a Ready pod is preserved throughout. The structural guarantee is
+	// maxUnavailable=0 (asserted by the chart topology check), so kube cannot remove a healthy old pod before a
+	// new one is Ready; this loop is the runtime confirmation. Polled at 1s — the "never below 1 Ready" claim
+	// holds to that sampling resolution.
 	sawGatedNewPod := false
+	sawNewPod := false
 	minReady := 1 << 30
-	deadline := time.Now().Add(90 * time.Second)
+	deadline := time.Now().Add(120 * time.Second)
 	for time.Now().Before(deadline) {
-		ready, notReady, err := e.countReady()
-		if err == nil {
+		if pods, err := e.managerPods(); err == nil {
+			ready, gatedNew, sawNew := scanRolloutGate(pods, oldHashes)
+			if sawNew {
+				sawNewPod = true
+			}
 			if ready < minReady {
 				minReady = ready
 			}
-			if notReady >= 1 && ready >= 1 {
+			if gatedNew && ready >= 1 {
 				sawGatedNewPod = true
 			}
 		}
-		time.Sleep(3 * time.Second)
+		time.Sleep(time.Second)
 	}
 	if !sawGatedNewPod {
-		t.Fatal("expected a NotReady new pod (cache-sync gate holding a broken replica) while a Ready pod is preserved")
+		t.Fatalf("did not observe a RUNNING new-generation pod held NotReady by the cache-sync gate while a "+
+			"Ready pod was preserved (sawNewPod=%v, minReady=%d) — if no new pod appeared the rollout may not "+
+			"have progressed; if it came up Ready the gate failed to hold it", sawNewPod, minReady)
 	}
 	if minReady < 1 {
-		t.Fatalf("healthy version torn down under a broken rollout (min ready %d) — cache-sync gate failed", minReady)
+		t.Fatalf("a healthy pod was torn down under the broken rollout (min ready=%d, 1s resolution) — the "+
+			"cache-sync gate / maxUnavailable=0 guarantee failed", minReady)
 	}
-	t.Logf("cache-sync /readyz gate held: a NotReady new pod was gated while ready pods stayed >= %d", minReady)
+	t.Logf("cache-sync /readyz gate held: a RUNNING but NotReady new-generation pod was gated while ready pods "+
+		"stayed >= %d over the window", minReady)
 
-	// Restore RBAC + roll again, and confirm full recovery (also guaranteed by Cleanup).
-	restore()
+	// Restore RBAC + roll again, and confirm full recovery (the Cleanup is the failsafe).
+	if err := restore(); err != nil {
+		t.Fatalf("restore RBAC + roll: %v", err)
+	}
 	e.waitReadyManagerPods(t)
 	t.Log("recovered: 2 ready manager pods after restoring RBAC")
+}
+
+// scanRolloutGate summarizes one poll of the manager pods during a rollout: ready = count of Ready pods;
+// gatedNew = a NEW-generation pod (pod-template-hash absent from oldHashes) is RUNNING but held NotReady (the
+// cache-sync gate, not a pull/schedule failure); sawNew = any new-generation pod exists at all. Extracted from
+// TestHACacheSyncRolloutGate to keep that test's cyclomatic complexity bounded.
+func scanRolloutGate(pods []corev1.Pod, oldHashes map[string]bool) (ready int, gatedNew, sawNew bool) {
+	for i := range pods {
+		p := &pods[i]
+		if p.DeletionTimestamp != nil {
+			continue
+		}
+		isNew := false
+		if h := p.Labels["pod-template-hash"]; h != "" && !oldHashes[h] {
+			isNew, sawNew = true, true
+		}
+		switch {
+		case podReady(p):
+			ready++
+		case isNew && containerRunning(p):
+			gatedNew = true // started (not a pull/schedule failure) yet held NotReady by the gate
+		}
+	}
+	return ready, gatedNew, sawNew
+}
+
+// containerRunning reports whether any of the pod's containers is currently in the Running state — used to
+// distinguish "started but held NotReady by the readiness gate" from a pull/schedule/create failure.
+func containerRunning(p *corev1.Pod) bool {
+	for _, cs := range p.Status.ContainerStatuses {
+		if cs.State.Running != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// clusterRoleGrantsCRDListWatch reports whether the ClusterRole grants list AND watch on the CRD API group.
+func clusterRoleGrantsCRDListWatch(cr *rbacv1.ClusterRole) bool {
+	for i := range cr.Rules {
+		if ruleHasGroup(&cr.Rules[i], crdAPIGroup) && ruleGrantsVerbs(&cr.Rules[i], "list", "watch") {
+			return true
+		}
+	}
+	return false
 }
 
 func (e *haEnv) deployName(t *testing.T) string {
 	t.Helper()
 	dl, err := e.cs.AppsV1().Deployments(e.ns).List(e.ctx, metav1.ListOptions{LabelSelector: managerSelector})
-	if err != nil || len(dl.Items) == 0 {
-		t.Fatalf("find manager Deployment: err=%v n=%d", err, len(dl.Items))
+	if err != nil {
+		t.Fatalf("list manager Deployments: %v", err)
+	}
+	if len(dl.Items) != 1 {
+		t.Fatalf("expected exactly 1 manager Deployment (%s in %s), got %d", managerSelector, e.ns, len(dl.Items))
 	}
 	return dl.Items[0].Name
 }
 
+// managerClusterRoleName resolves the manager's ClusterRole PRECISELY — from a manager pod's ServiceAccount
+// through the ClusterRoleBindings that bind it to their roleRef — rather than scanning every ClusterRole by a
+// name substring, so a multi-release or multi-operator cluster cannot lead us to break the wrong role. Among
+// the ClusterRoles bound to the SA it returns the one that actually grants list+watch on the CRD group (the
+// informer's RBAC), and fails if that is ambiguous.
 func (e *haEnv) managerClusterRoleName(t *testing.T) string {
 	t.Helper()
-	crl, err := e.cs.RbacV1().ClusterRoles().List(e.ctx, metav1.ListOptions{})
-	if err != nil {
-		t.Fatalf("list ClusterRoles: %v", err)
+	pods, err := e.managerPods()
+	if err != nil || len(pods) == 0 {
+		t.Fatalf("find a manager pod to resolve its ServiceAccount: err=%v n=%d", err, len(pods))
 	}
-	for i := range crl.Items {
-		cr := &crl.Items[i]
-		if !strings.Contains(cr.Name, "manager-role") {
+	sa := pods[0].Spec.ServiceAccountName
+	if sa == "" {
+		t.Fatalf("manager pod %s has no ServiceAccountName", pods[0].Name)
+	}
+	crbs, err := e.cs.RbacV1().ClusterRoleBindings().List(e.ctx, metav1.ListOptions{})
+	if err != nil {
+		t.Fatalf("list ClusterRoleBindings: %v", err)
+	}
+	// Collect the ClusterRoles bound to the manager SA.
+	var bound []string
+	for i := range crbs.Items {
+		crb := &crbs.Items[i]
+		if crb.RoleRef.Kind != "ClusterRole" {
 			continue
 		}
-		for j := range cr.Rules {
-			if ruleHasGroup(&cr.Rules[j], crdAPIGroup) {
-				return cr.Name
+		for _, s := range crb.Subjects {
+			if s.Kind == "ServiceAccount" && s.Name == sa && s.Namespace == e.ns {
+				bound = append(bound, crb.RoleRef.Name)
+				break
 			}
 		}
 	}
-	t.Fatalf("could not find the manager ClusterRole with %s rules", crdAPIGroup)
-	return ""
+	// Pick the bound role that grants list+watch on the CRD group; that uniquely identifies the informer role.
+	match := ""
+	for _, name := range bound {
+		cr, err := e.cs.RbacV1().ClusterRoles().Get(e.ctx, name, metav1.GetOptions{})
+		if err != nil {
+			continue
+		}
+		if clusterRoleGrantsCRDListWatch(cr) {
+			if match != "" && match != name {
+				t.Fatalf("ambiguous: ClusterRoles %s and %s (both bound to SA %s) grant list+watch on %s",
+					match, name, sa, crdAPIGroup)
+			}
+			match = name
+		}
+	}
+	if match == "" {
+		t.Fatalf("no ClusterRole bound to SA %s grants list+watch on %s (bound roles: %v)", sa, crdAPIGroup, bound)
+	}
+	return match
 }
 
 func ruleHasGroup(r *rbacv1.PolicyRule, group string) bool {
@@ -519,6 +743,24 @@ func ruleHasGroup(r *rbacv1.PolicyRule, group string) bool {
 		}
 	}
 	return false
+}
+
+// ruleGrantsVerbs reports whether the rule grants EVERY listed verb (treating "*" as all verbs).
+func ruleGrantsVerbs(r *rbacv1.PolicyRule, verbs ...string) bool {
+	has := func(want string) bool {
+		for _, v := range r.Verbs {
+			if v == want || v == "*" {
+				return true
+			}
+		}
+		return false
+	}
+	for _, want := range verbs {
+		if !has(want) {
+			return false
+		}
+	}
+	return true
 }
 
 func withoutVerbs(vs []string, drop ...string) []string {

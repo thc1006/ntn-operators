@@ -27,3 +27,7 @@ dist/install.yaml
 
 # Codex
 .codex
+
+# Python bytecode (hack/verify_ha_topology*.py)
+__pycache__/
+*.pyc

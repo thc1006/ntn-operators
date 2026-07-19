@@ -546,10 +546,10 @@ func TestEphemerisPushShouldRequeue(t *testing.T) {
 // pushes to the gNB (PushRuntimeUpdate succeeds) but crashes BEFORE its status write persists the push
 // marker, the new leader — reading a status without the marker — re-pushes. isEphemerisPushUpToDate keys the
 // dedup on the persisted EphemerisPushed condition Message (the epoch-derived marker), so a marker that never
-// persisted means the re-push happens; the SAFETY is that it carries the SAME epoch — a level re-assert the
-// gNB dedups by epoch, not a harmful duplicate (no delta, not a satSwitch). We simulate the crash by never
-// writing the marker back to cc.Status between two pushEphemerisUpdateIfNeeded calls, then show the dedup
-// closes once the marker finally persists.
+// persisted means the re-push happens; the SAFETY is that it re-emits a byte-identical, SAME-epoch frame (a
+// level re-assert, no delta) — de-duplicating a repeated same-epoch push is the gNB/OCUDU runtime's job, not
+// something this unit test itself proves. We simulate the crash by never writing the marker back to cc.Status
+// between two pushEphemerisUpdateIfNeeded calls, then show the dedup closes once the marker finally persists.
 func TestPushEphemerisUpdateIfNeeded_CrashBeforeStatusPersists_RepushIsIdempotent(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := ntnv1alpha1.AddToScheme(scheme); err != nil {
@@ -583,13 +583,26 @@ func TestPushEphemerisUpdateIfNeeded_CrashBeforeStatusPersists_RepushIsIdempoten
 	}
 	epoch2 := mock.LastRuntime.EpochUnixMs
 
-	// Safety: the re-push is an idempotent level re-assert — SAME epoch-derived marker, SAME epoch — so the
-	// gNB dedups it by epoch rather than acting on a harmful duplicate.
+	// Safety: the re-push is an idempotent level re-assert — SAME epoch-derived marker, SAME epoch, and (below)
+	// a byte-identical whole frame. Whether the downstream gNB acts on or dedups the repeated same-epoch push is
+	// the runtime's responsibility, not asserted here.
 	if marker1 != marker2 {
 		t.Fatalf("re-push marker must be identical (epoch-keyed idempotent); got %q then %q", marker1, marker2)
 	}
 	if epoch1 != futureMs || epoch2 != futureMs {
 		t.Fatalf("both pushes must carry the same propagated epoch %d; got %d then %d", futureMs, epoch1, epoch2)
+	}
+	// Stronger than marker+epoch: the WHOLE runtime frame (cell, epoch, UL-sync validity, ephemeris payload,
+	// satSwitch) AND the resolved target must be identical across the two pushes. RuntimeHistory/TargetHistory
+	// hold a DEEP COPY of each call, so this compares the actual frames, not an aliased view of the latest one.
+	if len(mock.RuntimeHistory) != 2 || len(mock.TargetHistory) != 2 {
+		t.Fatalf("expected 2 recorded runtime frames + targets; got %d / %d", len(mock.RuntimeHistory), len(mock.TargetHistory))
+	}
+	if !reflect.DeepEqual(mock.RuntimeHistory[0], mock.RuntimeHistory[1]) {
+		t.Fatalf("re-push runtime frame must be byte-identical; got %+v then %+v", mock.RuntimeHistory[0], mock.RuntimeHistory[1])
+	}
+	if !reflect.DeepEqual(mock.TargetHistory[0], mock.TargetHistory[1]) {
+		t.Fatalf("re-push target must be identical; got %+v then %+v", mock.TargetHistory[0], mock.TargetHistory[1])
 	}
 
 	// Once the marker DOES persist (the new leader completes its status write), a further reconcile must NOT
@@ -611,9 +624,10 @@ func TestPushEphemerisUpdateIfNeeded_CrashBeforeStatusPersists_RepushIsIdempoten
 // path): a pending SatSwitchWithResync — the most state-changing runtime payload, and the only surface
 // carrying k_mac (#52) — rides on every runtime push. If the leader crashes after PushRuntimeUpdate but
 // before persisting the marker, the new leader re-pushes with the SAME pending switch at the SAME epoch. This
-// must be an EXACT idempotent duplicate (identical switch incl. k_mac, same epoch-keyed marker) that OCUDU
-// dedups by epoch — NOT a new/mutated delta. This complements the ephemeris-only crash-dedup test above,
-// which only excused the satSwitch case in a comment.
+// must be an EXACT idempotent duplicate (identical switch incl. k_mac, same epoch-keyed marker) — a repeated
+// same-epoch frame, NOT a new/mutated delta (whether OCUDU dedups it by epoch is the runtime's concern, not
+// asserted here). This complements the ephemeris-only crash-dedup test above, which only excused the satSwitch
+// case in a comment.
 func TestPushEphemerisUpdateIfNeeded_CrashBeforeStatus_PendingSatSwitch_IsIdempotent(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := ntnv1alpha1.AddToScheme(scheme); err != nil {
@@ -653,12 +667,20 @@ func TestPushEphemerisUpdateIfNeeded_CrashBeforeStatus_PendingSatSwitch_IsIdempo
 	}
 	sw2 := *mock.LastRuntime.SatSwitch
 
-	// The re-push is an EXACT idempotent duplicate: same epoch-keyed marker and the identical satSwitch (same
-	// k_mac, target ephemeris, epoch) — a repeated same-epoch frame OCUDU dedups, not a new delta.
+	// The re-push is an EXACT idempotent duplicate: same epoch-keyed marker, the identical satSwitch (same
+	// k_mac, target ephemeris, epoch), and a byte-identical whole frame — a repeated same-epoch push, not a new
+	// delta. (Whether OCUDU dedups it by epoch is the runtime's concern, not asserted here.)
 	if marker1 != marker2 {
 		t.Fatalf("re-push marker must be identical; got %q then %q", marker1, marker2)
 	}
 	if !reflect.DeepEqual(sw1, sw2) {
 		t.Fatalf("re-push satSwitch must be an identical duplicate; got %+v then %+v", sw1, sw2)
+	}
+	if len(mock.RuntimeHistory) != 2 {
+		t.Fatalf("expected 2 recorded runtime frames; got %d", len(mock.RuntimeHistory))
+	}
+	if !reflect.DeepEqual(mock.RuntimeHistory[0], mock.RuntimeHistory[1]) {
+		t.Fatalf("re-push runtime frame (incl. satSwitch) must be byte-identical; got %+v then %+v",
+			mock.RuntimeHistory[0], mock.RuntimeHistory[1])
 	}
 }
