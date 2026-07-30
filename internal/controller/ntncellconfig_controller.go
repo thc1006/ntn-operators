@@ -80,7 +80,13 @@ const (
 	ephemerisReasonProviderPushFailed   = "ProviderPushFailed"
 	ephemerisReasonProviderPushRejected = "ProviderPushRejected"
 	ephemerisReasonEphemerisStale       = "EphemerisStale"
-	ephemerisReasonRemoteControlConfig  = "RemoteControlConfigInvalid"
+	// ephemerisReasonRemoteControlCredential is the UNIFORM CR-facing reason for EVERY
+	// remoteControl.tls resolution failure — Secret missing, unreadable, wrong type, unlabelled,
+	// or malformed cert. It deliberately does NOT distinguish "missing/unreadable" from
+	// "present-but-invalid": a split reason (or a split retry cadence, which the per-failure
+	// EphemerisPushErrorsTotal would leak via its increment rate) would let a principal who can
+	// write the NTNCellConfig but not read Secrets probe Secret existence and type (an oracle).
+	ephemerisReasonRemoteControlCredential = "RemoteControlCredentialUnavailable"
 	// ephemerisReasonSelectionAmbiguous fails a push CLOSED when spec.ephemerisNoradID is unset but
 	// the referenced SatelliteEphemeris exposes more than one satellite: the controller refuses to
 	// guess which one to serve (silently pushing the first would switch satellites whenever the
@@ -146,7 +152,7 @@ func ephemerisPushConditionReason(err error) string {
 // versus recovering on its own via a watched change. The reasons below clear only on a spec edit
 // (generation bump) or a SatelliteEphemeris refresh (new marker) — both watched — so a self-requeue
 // would just hammer a still-failing push. Everything else requeues: a transient failure (API GET
-// error, gNB unreachable), AND RemoteControlConfigInvalid, whose fix (a Secret edit) is NOT watched
+// error, gNB unreachable), AND RemoteControlCredentialUnavailable, whose fix (a Secret edit) is NOT watched
 // — the controller watches only NTNCellConfig + SatelliteEphemeris and secrets are get-only by
 // design, so without a self-requeue such a cell recovers only on the next ephemeris heartbeat, and
 // never if the producer stalls. ephemerisPushRequeueInterval sets the cadence.
@@ -163,16 +169,20 @@ func ephemerisPushShouldRequeue(reason string) bool {
 	}
 }
 
-// remoteControlConfigRequeue is the low-frequency self-heal poll for a RemoteControlConfigInvalid
-// failure. Its fix is a Secret edit, which the controller does not watch, so the cell must poll to
-// recover rather than rely on the (possibly absent) SatelliteEphemeris heartbeat fan-out.
+// remoteControlConfigRequeue is the low-frequency self-heal poll for any
+// RemoteControlCredentialUnavailable failure. Its fix is a Secret edit (create / label / repair),
+// which the controller does not watch, so the cell must poll to recover rather than rely on the
+// (possibly absent) SatelliteEphemeris heartbeat fan-out. It is applied UNIFORMLY to every
+// credential failure — including a transient/absent-Secret read error — so the retry cadence
+// carries no signal that distinguishes a missing Secret from a present-but-invalid one; the
+// ~3-minute ephemeris heartbeat remains the fast-recovery path for a genuinely transient error.
 const remoteControlConfigRequeue = 5 * time.Minute
 
-// ephemerisPushRequeueInterval is the backoff for a requeuing push failure: a credential/config
-// error self-heals slowly (its Secret fix is unwatched, so this is a poll, not a hammer); every
-// other requeuing reason is a transient failure that retries tightly.
+// ephemerisPushRequeueInterval is the backoff for a requeuing push failure: a credential error
+// self-heals slowly (its Secret fix is unwatched, so this is a poll, not a hammer); every other
+// requeuing reason is a transient failure that retries tightly.
 func ephemerisPushRequeueInterval(reason string) time.Duration {
-	if reason == ephemerisReasonRemoteControlConfig {
+	if reason == ephemerisReasonRemoteControlCredential {
 		return remoteControlConfigRequeue
 	}
 	return time.Minute
@@ -808,17 +818,14 @@ func (r *NTNCellConfigReconciler) pushRuntimeEphemeris(
 		// SatelliteEphemeris, and secrets are get-only), so a Secret fix does not re-trigger
 		// reconcile. It therefore gets a low-frequency bounded self-heal requeue
 		// (ephemerisPushRequeueInterval) — not a tight per-minute retry, and not no requeue,
-		// which would strand the cell until the next ephemeris heartbeat, if any. A transient
-		// Secret read error stays tight-requeuing.
-		reason := ephemerisReasonProviderPushFailed
-		if errors.Is(tlsErr, errRemoteControlCredentialInvalid) {
-			reason = ephemerisReasonRemoteControlConfig
-		}
-		// Log the specific cause for the operator; surface only a uniform message on the
-		// CR (see errRemoteControlCredentialUnavailable — avoids a Secret existence/type
-		// oracle for a principal that can write the CR but not read Secrets).
+		// which would strand the cell until the next ephemeris heartbeat, if any. EVERY
+		// remoteControl.tls failure — a missing/unreadable Secret and a present-but-invalid one
+		// alike — takes the SAME reason and the SAME cadence, so neither the CR condition nor the
+		// per-failure error metric's increment rate can distinguish them (a Secret existence/type
+		// oracle). The specific cause is logged for the operator (who can read Secrets); the CR
+		// sees only the uniform reason + message.
 		logf.FromContext(ctx).Error(tlsErr, "remoteControl.tls credential could not be resolved", "cell", cc.Name)
-		return false, marker, newEphemerisPushError(reason, errRemoteControlCredentialUnavailable)
+		return false, marker, newEphemerisPushError(ephemerisReasonRemoteControlCredential, errRemoteControlCredentialUnavailable)
 	}
 	target := provider.ResolvedRemoteControl{
 		Endpoint:  spec.Provider.RemoteControl.Endpoint,
@@ -864,13 +871,6 @@ const (
 	// constant); like a service-account token it is a cluster credential, not a gNB one.
 	secretTypeBootstrapToken = "bootstrap.kubernetes.io/token"
 )
-
-// errRemoteControlCredentialInvalid tags a DETERMINISTIC remoteControl.tls config
-// failure (wrong Secret type, missing opt-in label, malformed cert material). The caller
-// does not tight-requeue it like a transient failure; instead it gets a low-frequency
-// self-heal poll (remoteControlConfigRequeue), because its fix is a Secret edit, and the
-// controller does NOT watch Secrets (get-only), so a Secret fix does not re-trigger reconcile.
-var errRemoteControlCredentialInvalid = errors.New("not a usable remote-control credential")
 
 // errRemoteControlCredentialUnavailable is the UNIFORM, CR-facing message for any
 // remoteControl.tls resolution failure. The specific cause (Secret missing / wrong
@@ -927,10 +927,10 @@ func (r *NTNCellConfigReconciler) resolveRemoteControlTLS(
 	// Opaque Secret from holding some other bearer token.
 	switch secret.Type {
 	case corev1.SecretTypeServiceAccountToken, secretTypeBootstrapToken:
-		return nil, "", fmt.Errorf("remoteControl.tls secret %q has type %q — a Kubernetes API credential must not be used as a gNB remote-control secret: %w", t.SecretName, secret.Type, errRemoteControlCredentialInvalid)
+		return nil, "", fmt.Errorf("remoteControl.tls secret %q has type %q — a Kubernetes API credential must not be used as a gNB remote-control secret", t.SecretName, secret.Type)
 	}
 	if secret.Labels[remoteControlCredentialLabel] != "true" {
-		return nil, "", fmt.Errorf("remoteControl.tls secret %q must be labelled %s=true by its owner to be usable as a remote-control credential: %w", t.SecretName, remoteControlCredentialLabel, errRemoteControlCredentialInvalid)
+		return nil, "", fmt.Errorf("remoteControl.tls secret %q must be labelled %s=true by its owner to be usable as a remote-control credential", t.SecretName, remoteControlCredentialLabel)
 	}
 
 	cfg := &tls.Config{MinVersion: tls.VersionTLS12}
@@ -945,7 +945,7 @@ func (r *NTNCellConfigReconciler) resolveRemoteControlTLS(
 	if ca := secret.Data["ca.crt"]; len(ca) > 0 {
 		pool := x509.NewCertPool()
 		if !pool.AppendCertsFromPEM(ca) {
-			return nil, "", fmt.Errorf("remoteControl.tls secret %q: ca.crt is not valid PEM: %w", t.SecretName, errRemoteControlCredentialInvalid)
+			return nil, "", fmt.Errorf("remoteControl.tls secret %q: ca.crt is not valid PEM", t.SecretName)
 		}
 		cfg.RootCAs = pool
 	}
@@ -953,11 +953,11 @@ func (r *NTNCellConfigReconciler) resolveRemoteControlTLS(
 	if t.Mode == "mtls" {
 		crt, key := secret.Data["tls.crt"], secret.Data["tls.key"]
 		if len(crt) == 0 || len(key) == 0 {
-			return nil, "", fmt.Errorf("remoteControl.tls mode=mtls requires tls.crt and tls.key in secret %q: %w", t.SecretName, errRemoteControlCredentialInvalid)
+			return nil, "", fmt.Errorf("remoteControl.tls mode=mtls requires tls.crt and tls.key in secret %q", t.SecretName)
 		}
 		pair, err := tls.X509KeyPair(crt, key)
 		if err != nil {
-			return nil, "", fmt.Errorf("remoteControl.tls secret %q: invalid client certificate/key (%v): %w", t.SecretName, err, errRemoteControlCredentialInvalid)
+			return nil, "", fmt.Errorf("remoteControl.tls secret %q: invalid client certificate/key (%v)", t.SecretName, err)
 		}
 		cfg.Certificates = []tls.Certificate{pair}
 	}
