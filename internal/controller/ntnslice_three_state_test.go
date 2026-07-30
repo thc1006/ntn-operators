@@ -88,7 +88,7 @@ func TestReconcile_MetricsUnreliable_ResetsStreakAndTriggersReadyUnknown(t *test
 	// Seed a recovery/confirmation streak AND a dwell clock from an earlier (reliable)
 	// window, to prove the unreliable reconcile clears the former but keeps the latter.
 	dwell := fixedNow.Add(-30 * time.Second)
-	r.storeFlapState(key, nsObj.UID, slice.AntiFlapState{
+	r.storeFlapState(key, nsObj.UID, nsObj.Generation, slice.AntiFlapState{
 		RecoveryObservedAt:  fixedNow.Add(-200 * time.Second),
 		ConsecutiveDegraded: 2,
 		LastSwitchback:      dwell,
@@ -109,7 +109,7 @@ func TestReconcile_MetricsUnreliable_ResetsStreakAndTriggersReadyUnknown(t *test
 	}
 
 	// H2: recovery + confirmation cleared, dwell preserved.
-	st := r.loadFlapState(key, nsObj.UID)
+	st := r.loadFlapState(key, nsObj.UID, nsObj.Generation)
 	if !st.RecoveryObservedAt.IsZero() {
 		t.Errorf("recovery clock must reset on unreliable metrics (H2), got %v", st.RecoveryObservedAt)
 	}

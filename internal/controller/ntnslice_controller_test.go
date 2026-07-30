@@ -493,7 +493,7 @@ var _ = Describe("NTNSlice Controller", func() {
 			// (reset on re-degradation), not absolute time since failover. Seed the
 			// in-memory recovery clock so terrestrial has been recovered longer than
 			// the 60s delay — the precondition this test asserts.
-			reconciler.storeFlapState(typeNamespacedName, ntnSlice.UID, slice.AntiFlapState{
+			reconciler.storeFlapState(typeNamespacedName, ntnSlice.UID, ntnSlice.Generation, slice.AntiFlapState{
 				RecoveryObservedAt: time.Date(2026, 4, 17, 11, 55, 0, 0, time.UTC),
 			})
 			_, err := reconciler.Reconcile(context.Background(), reconcile.Request{

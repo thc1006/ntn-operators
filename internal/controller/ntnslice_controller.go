@@ -112,21 +112,30 @@ type NTNSliceReconciler struct {
 	flapState map[types.NamespacedName]flapStateEntry
 }
 
-// flapStateEntry pairs a slice's anti-flap state with the UID of the object it belongs to. A
-// same-name NTNSlice recreated with a NEW UID must not inherit the deleted object's counters or
-// min-dwell clock. The NotFound and finalizer cleanups usually drop the old entry first, but a
-// force-deletion (finalizer bypassed) whose DELETE the workqueue coalesces with the recreate's
-// CREATE is delivered as a single reconcile of the new object — the controller never observes the
-// intervening NotFound. Keying on UID as well as name closes that gap regardless of the cleanups.
+// flapStateEntry pairs a slice's anti-flap state with the object identity it was accumulated under:
+// the UID and the spec generation. UID guards a same-name recreate — a new UID must not inherit the
+// deleted object's counters or min-dwell clock; the NotFound and finalizer cleanups usually drop the
+// old entry first, but a force-deletion (finalizer bypassed) whose DELETE the workqueue coalesces
+// with the recreate's CREATE arrives as a single reconcile of the new object — the controller never
+// observes the intervening NotFound, so keying on UID closes that gap regardless of the cleanups.
+// generation guards a spec edit: confirmationSamples promises N CONSECUTIVE samples of the CURRENT
+// policy, so a streak accumulated under a prior generation (an old trigger/threshold/N, or a changed
+// metrics source or hysteresis) must not carry across a policy change — loadFlapState resets the
+// confirmation/recovery clocks on a generation change, keeping only the durable min-dwell clock (a
+// real past hand-back, not an evaluation streak).
 type flapStateEntry struct {
-	uid   types.UID
-	state slice.AntiFlapState
+	uid        types.UID
+	generation int64
+	state      slice.AntiFlapState
 }
 
-// loadFlapState returns the anti-flap state for the object identified by (key, uid), or the zero
-// value when no entry exists OR the stored entry belongs to a different object identity (a stale
-// entry left by a same-name predecessor, which is evicted here).
-func (r *NTNSliceReconciler) loadFlapState(key types.NamespacedName, uid types.UID) slice.AntiFlapState {
+// loadFlapState returns the anti-flap state for the object identified by (key, uid, generation), or
+// the zero value when no entry exists OR the stored entry belongs to a different object identity (a
+// stale entry left by a same-name predecessor, which is evicted here). When the entry matches by UID
+// but was accumulated under a different spec generation, the confirmation/recovery streak is reset
+// (it measured a now-superseded policy) while the durable min-dwell clock is kept; the refreshed
+// entry is written back so the reset holds even on a reconcile path that does not store.
+func (r *NTNSliceReconciler) loadFlapState(key types.NamespacedName, uid types.UID, generation int64) slice.AntiFlapState {
 	r.flapMu.Lock()
 	defer r.flapMu.Unlock()
 	entry, ok := r.flapState[key]
@@ -134,17 +143,29 @@ func (r *NTNSliceReconciler) loadFlapState(key types.NamespacedName, uid types.U
 		delete(r.flapState, key)
 		return slice.AntiFlapState{}
 	}
+	if entry.generation != generation {
+		// Spec edit → the streak measured a superseded policy. Clear the confirmation/recovery
+		// clocks (re-confirm under the new policy) and the observation cursor (a changed metrics
+		// source may carry lower timestamps and must not be gated by the old cursor); keep
+		// LastSwitchback — min-dwell describes a real past transition, not an evaluation streak.
+		entry.state.ConsecutiveDegraded = 0
+		entry.state.RecoveryObservedAt = time.Time{}
+		entry.state.LastCountedObservedAt = time.Time{}
+		entry.generation = generation
+		r.flapState[key] = entry
+	}
 	return entry.state
 }
 
-// storeFlapState persists the updated anti-flap state for the object identified by (key, uid).
-func (r *NTNSliceReconciler) storeFlapState(key types.NamespacedName, uid types.UID, st slice.AntiFlapState) {
+// storeFlapState persists the updated anti-flap state for the object identified by (key, uid,
+// generation).
+func (r *NTNSliceReconciler) storeFlapState(key types.NamespacedName, uid types.UID, generation int64, st slice.AntiFlapState) {
 	r.flapMu.Lock()
 	defer r.flapMu.Unlock()
 	if r.flapState == nil {
 		r.flapState = make(map[types.NamespacedName]flapStateEntry)
 	}
-	r.flapState[key] = flapStateEntry{uid: uid, state: st}
+	r.flapState[key] = flapStateEntry{uid: uid, generation: generation, state: st}
 }
 
 // seedLastSwitchbackFromStatus does a monotonic merge of the durable min-dwell clock into the
@@ -370,6 +391,7 @@ func (r *NTNSliceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	var pendingFlap *slice.AntiFlapState
 	var pendingFlapKey types.NamespacedName
 	var pendingFlapUID types.UID
+	var pendingFlapGeneration int64
 	switch {
 	case !satelliteKnown:
 		// I-13: satellite availability is unknown (transient ephemeris read error).
@@ -414,7 +436,7 @@ func (r *NTNSliceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		}
 
 		flapKey := client.ObjectKeyFromObject(ns)
-		af := r.loadFlapState(flapKey, ns.UID)
+		af := r.loadFlapState(flapKey, ns.UID, ns.Generation)
 		r.seedLastSwitchbackFromStatus(&af, ns, now)
 		var newFlap slice.AntiFlapState
 		result, newFlap = slice.EvaluateFailoverWithAntiFlap(
@@ -431,6 +453,7 @@ func (r *NTNSliceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 			af,
 		)
 		pendingFlap, pendingFlapKey, pendingFlapUID = &newFlap, flapKey, ns.UID
+		pendingFlapGeneration = ns.Generation
 		r.persistLastSwitchbackToStatus(ns, newFlap.LastSwitchback, now)
 	default:
 		// Metrics unreliable but satellite availability known: fail static —
@@ -526,7 +549,7 @@ func (r *NTNSliceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	// never durably recorded. Under-counting a confirmation/recovery sample on a dropped write
 	// only DELAYS the next transition (fail-safe), matching the anti-flap design.
 	if pendingFlap != nil {
-		r.storeFlapState(pendingFlapKey, pendingFlapUID, *pendingFlap)
+		r.storeFlapState(pendingFlapKey, pendingFlapUID, pendingFlapGeneration, *pendingFlap)
 	}
 
 	// Emit the failover counter only after the status write persisted, so a
