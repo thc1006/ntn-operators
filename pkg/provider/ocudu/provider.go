@@ -318,6 +318,14 @@ func (p *Provider) PushEphemerisUpdate(
 			"ConfigMap %s/%s has no ephemeris block to replace",
 			namespace, ConfigMapNameFor(crName))
 	}
+	// No-op when the re-render is byte-identical to what is stored. On the ConfigMap
+	// bootstrap path ApplyCellConfig already wrote this same static spec ephemeris, yet the
+	// push marker keys on the GP fetch time (changes every ~2h), so an unconditional Update
+	// would churn the gNB's config source with identical bytes. Mirrors the ApplyCellConfig
+	// no-op guard (#204-G3).
+	if updated == yamlContent {
+		return nil
+	}
 	cm.Data[configDataKey] = updated
 
 	if err := p.client.Update(ctx, cm); err != nil {
