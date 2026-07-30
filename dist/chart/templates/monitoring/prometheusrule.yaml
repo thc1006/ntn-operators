@@ -113,4 +113,17 @@ spec:
           annotations:
             summary: "Controller {{`{{ $labels.controller }}`}} reconcile error rate is elevated"
             description: "Reconcile errors > 0.1/s for 15m."
+        # The SatelliteEphemeris->NTNCellConfig fan-out mapper's spec.ephemerisRef indexed lookup is
+        # erroring. The index is registered startup-fatal, so this is a cache/index anomaly, not a
+        # missing index. Referencing cells still re-resolve on their own requeue (self-healing), so a
+        # single blip is expected noise; a rate sustained past `for` means the informer cache is
+        # unhealthy. The metric is unlabeled (process-level fault) — the namespace/ephemeris is logged.
+        - alert: NTNEphemerisMapperIndexErrors
+          expr: increase(ntn_operators_ephemeris_mapper_index_error_total[15m]) > 0
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Ephemeris fan-out mapper indexed lookup is erroring"
+            description: "The SatelliteEphemeris->NTNCellConfig mapper's spec.ephemerisRef index lookup has failed in the last 15m (cache/index anomaly, not a missing index). Cells re-resolve on their own requeue, but a sustained rate means the informer cache is unhealthy. See the controller Error log for the affected namespace/ephemeris."
 {{- end }}

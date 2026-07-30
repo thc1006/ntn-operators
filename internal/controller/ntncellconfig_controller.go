@@ -1128,7 +1128,7 @@ func (r *NTNCellConfigReconciler) ephemerisToNTNCellConfig(
 	if err := r.List(ctx, &indexed, client.InNamespace(eph.Namespace),
 		client.MatchingFields{ephemerisRefIndexKey: eph.Name}); err != nil {
 		if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
-			ntnmetrics.EphemerisMapperIndexErrorTotal.With(prometheus.Labels{"namespace": eph.Namespace}).Inc()
+			ntnmetrics.EphemerisMapperIndexErrorTotal.Inc()
 			log.Error(err, "indexed ephemerisRef lookup failed; skipping fan-out (cells re-resolve on requeue)",
 				"ephemeris", eph.Name, "namespace", eph.Namespace)
 		}

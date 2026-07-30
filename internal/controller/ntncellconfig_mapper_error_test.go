@@ -15,7 +15,6 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -66,8 +65,7 @@ func TestEphemerisToNTNCellConfig_IndexedListError_NoFallback(t *testing.T) {
 				Build()
 			r := &NTNCellConfigReconciler{Client: c}
 
-			label := prometheus.Labels{"namespace": tc.ns}
-			before := testutil.ToFloat64(ntnmetrics.EphemerisMapperIndexErrorTotal.With(label))
+			before := testutil.ToFloat64(ntnmetrics.EphemerisMapperIndexErrorTotal)
 
 			eph := &ntnv1alpha1.SatelliteEphemeris{ObjectMeta: metav1.ObjectMeta{Name: "eph-x", Namespace: tc.ns}}
 			reqs := r.ephemerisToNTNCellConfig(context.Background(), eph)
@@ -78,7 +76,7 @@ func TestEphemerisToNTNCellConfig_IndexedListError_NoFallback(t *testing.T) {
 			if listCalls != 1 {
 				t.Errorf("the mapper must not fall back to a second namespace-scan List: want 1 List call, got %d", listCalls)
 			}
-			if got := testutil.ToFloat64(ntnmetrics.EphemerisMapperIndexErrorTotal.With(label)) - before; got != tc.wantMetric {
+			if got := testutil.ToFloat64(ntnmetrics.EphemerisMapperIndexErrorTotal) - before; got != tc.wantMetric {
 				t.Errorf("EphemerisMapperIndexErrorTotal delta = %v, want %v", got, tc.wantMetric)
 			}
 		})

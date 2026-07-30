@@ -230,12 +230,15 @@ var (
 	// a deadline, not a degradation). The mapper drops that one fan-out rather than amplifying the
 	// anomaly into an O(namespace) scan; the referencing cells re-resolve the ephemeris on their own
 	// RequeueAfter, so this counter is observability, not lost work.
-	EphemerisMapperIndexErrorTotal = prometheus.NewCounterVec(
+	//
+	// Unlabeled: the fault is process-level (the shared informer cache), not per-namespace, so a
+	// namespace label would multiply series across a fleet without localizing it; the affected
+	// namespace/ephemeris is in the mapper's Error log. Alerted via NTNEphemerisMapperIndexErrors.
+	EphemerisMapperIndexErrorTotal = prometheus.NewCounter(
 		prometheus.CounterOpts{
 			Name: "ntn_operators_ephemeris_mapper_index_error_total",
 			Help: "spec.ephemerisRef indexed-lookup errors in the ephemeris mapper (excludes context cancel/deadline).",
 		},
-		[]string{"namespace"},
 	)
 )
 

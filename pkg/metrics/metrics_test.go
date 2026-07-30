@@ -40,6 +40,7 @@ func TestMetricsRegistered(t *testing.T) {
 	ReaderQueryDuration.With(prometheus.Labels{"source": "_", "outcome": "_"}).Observe(0)
 	ReaderErrorsTotal.With(prometheus.Labels{"source": "_", "reason": "_"}).Add(0)
 	ReaderStaleUsedTotal.With(prometheus.Labels{"namespace": "_", "name": "_"}).Add(0)
+	EphemerisMapperIndexErrorTotal.Add(0) // label-free counter: no .With(...)
 
 	families, err := metrics.Registry.Gather()
 	if err != nil {
@@ -61,6 +62,7 @@ func TestMetricsRegistered(t *testing.T) {
 		"ntn_operators_reader_query_duration_seconds",
 		"ntn_operators_reader_errors_total",
 		"ntn_operators_reader_stale_value_used_total",
+		"ntn_operators_ephemeris_mapper_index_error_total",
 	}
 	gathered := make(map[string]bool)
 	for _, f := range families {
