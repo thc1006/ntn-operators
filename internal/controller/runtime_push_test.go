@@ -338,11 +338,15 @@ func TestPropagateStates_TruncationCountsCapDropsNotPropagationFailures(t *testi
 	isTruncated := func(eph *ntnv1alpha1.SatelliteEphemeris) bool {
 		return meta.IsStatusConditionTrue(eph.Status.Conditions, ntnv1alpha1.ConditionStatesTruncated)
 	}
+	// The SGP4-failing OMMs get LOWER NORADs than the good ones so propagateStates'
+	// canonicalizeOMMs (dedup + sort by NORAD) keeps them ahead of the cap boundary — i.e.
+	// they are ATTEMPTED and fail, which is the "failures before the cap" scenario this test
+	// pins (they must not be counted as cap-truncated). Good NORADs start at 25544.
 	build := func(nBad, nGood int) []sgp4.OMM {
 		omms := make([]sgp4.OMM, 0, nBad+nGood)
 		for i := range nBad {
 			b := badOMMForTest()
-			b.NoradCatID = 40000 + i
+			b.NoradCatID = 1000 + i
 			omms = append(omms, b)
 		}
 		for i := range nGood {

@@ -54,7 +54,10 @@ type NTNCellConfigSpec struct {
 
 	// ephemerisNoradID selects which satellite's propagated state vector, from the
 	// referenced SatelliteEphemeris (ephemerisRef), to push at runtime (#176). When
-	// unset, the referenced ephemeris's first propagated state is used.
+	// unset, the single tracked satellite's state is used; if the referenced ephemeris
+	// exposes more than one satellite the push fails closed (EphemerisPushed=False,
+	// reason EphemerisSelectionAmbiguous) until this field selects one — the controller
+	// never guesses which satellite to serve.
 	// +optional
 	EphemerisNoradID *int `json:"ephemerisNoradID,omitempty"`
 }

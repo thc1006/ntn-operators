@@ -71,6 +71,12 @@ const (
 	ephemerisReasonProviderPushRejected = "ProviderPushRejected"
 	ephemerisReasonEphemerisStale       = "EphemerisStale"
 	ephemerisReasonRemoteControlConfig  = "RemoteControlConfigInvalid"
+	// ephemerisReasonSelectionAmbiguous fails a push CLOSED when spec.ephemerisNoradID is unset but
+	// the referenced SatelliteEphemeris exposes more than one satellite: the controller refuses to
+	// guess which one to serve (silently pushing the first would switch satellites whenever the
+	// upstream response order changed). Clears when the cell selects a NORAD or the source narrows
+	// to one satellite.
+	ephemerisReasonSelectionAmbiguous = "EphemerisSelectionAmbiguous"
 	// ephemerisReasonInputsStale marks a push HELD because the referenced
 	// SatelliteEphemeris's propagatedStates were computed under DIFFERENT propagation
 	// inputs than the live spec (status.propagatedStatesInputHash != hash(spec)) — a
@@ -605,6 +611,18 @@ func (r *NTNCellConfigReconciler) pushRuntimeEphemeris(
 			fmt.Errorf("SatelliteEphemeris %q propagatedStates were computed under different propagation inputs than the current spec; awaiting re-propagation", eph.Name),
 		)
 	}
+	// Fail CLOSED on an ambiguous implicit selection: with no ephemerisNoradID and more than one
+	// tracked satellite, "the first propagated state" is not a stable choice, so refuse rather than
+	// silently push whichever satellite the upstream happened to list first. spec.satellites.noradIDs
+	// is a tracking filter, not a runtime-target priority, so it is deliberately NOT consulted here.
+	if spec.EphemerisNoradID == nil {
+		if n := uniquePropagatedNorads(eph.Status.PropagatedStates); n > 1 {
+			return false, ephemerisPushMarker(eph), newEphemerisPushError(
+				ephemerisReasonSelectionAmbiguous,
+				fmt.Errorf("SatelliteEphemeris %q exposes %d satellites but this NTNCellConfig sets no spec.ephemerisNoradID; set it to select which satellite to push", eph.Name, n),
+			)
+		}
+	}
 	state := selectPropagatedState(eph.Status.PropagatedStates, spec.EphemerisNoradID)
 	if state == nil {
 		// A referenced satellite that the SatelliteEphemeris rejected as deep-space
@@ -841,8 +859,20 @@ func (r *NTNCellConfigReconciler) resolveRemoteControlTLS(
 	return cfg, string(secret.Data["token"]), nil
 }
 
+// uniquePropagatedNorads counts distinct NORAD IDs among the states. Used to fail closed when a cell
+// selects no ephemerisNoradID against a multi-satellite ephemeris, independent of whether the
+// producer has already de-duplicated (defense in depth across a rolling upgrade).
+func uniquePropagatedNorads(states []ntnv1alpha1.PropagatedState) int {
+	seen := make(map[int]struct{}, len(states))
+	for i := range states {
+		seen[states[i].NoradID] = struct{}{}
+	}
+	return len(seen)
+}
+
 // selectPropagatedState picks the propagated state matching noradID, or the first
-// available when noradID is nil. Returns nil when none match.
+// available when noradID is nil. Returns nil when none match. A nil noradID against a
+// multi-satellite ephemeris is rejected by the caller before this is reached.
 func selectPropagatedState(states []ntnv1alpha1.PropagatedState, noradID *int) *ntnv1alpha1.PropagatedState {
 	if len(states) == 0 {
 		return nil
