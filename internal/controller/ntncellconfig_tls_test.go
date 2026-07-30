@@ -36,6 +36,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	ntnv1alpha1 "github.com/thc1006/ntn-operators/api/v1alpha1"
+	"github.com/thc1006/ntn-operators/pkg/provider"
 )
 
 // selfSignedPEM returns a fresh self-signed cert + key PEM, usable as both a CA
@@ -249,15 +250,64 @@ func TestResolveRemoteControlTLS(t *testing.T) {
 	})
 }
 
-// TestEphemerisPushShouldRequeue_RemoteControlConfigIsPermanent pins that a
-// deterministic remoteControl.tls credential error does NOT tight-requeue: it clears
-// only on a Secret/spec edit (which re-triggers reconcile), so hammering the apiserver
-// every minute would be pointless — unlike a transient ProviderPushFailed.
-func TestEphemerisPushShouldRequeue_RemoteControlConfigIsPermanent(t *testing.T) {
-	if ephemerisPushShouldRequeue(ephemerisReasonRemoteControlConfig) {
-		t.Error("RemoteControlConfigInvalid is a permanent config error and must NOT requeue")
+// TestEphemerisPushRequeue_RemoteControlConfigSelfHeals pins that a deterministic
+// remoteControl.tls credential error requeues on a low-frequency SELF-HEAL poll — not a tight
+// per-minute retry, and not never. Its fix is a Secret edit, which the controller does NOT watch
+// (only NTNCellConfig + SatelliteEphemeris are watched; secrets are get-only), so without a
+// self-requeue the cell recovers only on the next SatelliteEphemeris heartbeat fan-out, and never
+// if the producer stalls. A transient ProviderPushFailed still tight-requeues (control).
+func TestEphemerisPushRequeue_RemoteControlConfigSelfHeals(t *testing.T) {
+	if !ephemerisPushShouldRequeue(ephemerisReasonRemoteControlConfig) {
+		t.Error("RemoteControlConfigInvalid must self-requeue: its Secret fix is not watched, so no requeue would strand the cell")
+	}
+	if got := ephemerisPushRequeueInterval(ephemerisReasonRemoteControlConfig); got != remoteControlConfigRequeue {
+		t.Errorf("credential-config requeue = %v, want %v (a slow self-heal poll, not a tight retry)", got, remoteControlConfigRequeue)
 	}
 	if !ephemerisPushShouldRequeue(ephemerisReasonProviderPushFailed) {
 		t.Error("a transient ProviderPushFailed must still requeue (control)")
+	}
+	if got := ephemerisPushRequeueInterval(ephemerisReasonProviderPushFailed); got != time.Minute {
+		t.Errorf("transient requeue = %v, want 1m (control)", got)
+	}
+}
+
+// TestPushEphemerisUpdateIfNeeded_BadCredentialClassifiesRemoteControlConfig proves the input to
+// the self-heal requeue: an un-opted-in (unlabelled) remoteControl.tls Secret makes the runtime
+// push fail with the RemoteControlConfigInvalid reason. Combined with the classification above,
+// this is the end-to-end guarantee — a bad Secret schedules a bounded self-heal retry rather than
+// stranding the cell, since a Secret edit does not re-trigger reconcile.
+func TestPushEphemerisUpdateIfNeeded_BadCredentialClassifiesRemoteControlConfig(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := ntnv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	eph := ephWithPropagatedState(time.Now().Add(time.Hour).UnixMilli())
+	// An un-opted-in Secret (no owner label) is a deterministic credential-invalid error; it lives
+	// in the ephemeris namespace, where resolveRemoteControlTLS looks it up.
+	badSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "cred", Namespace: eph.Namespace},
+		Data:       map[string][]byte{"ca.crt": []byte("x")},
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(eph, badSecret).Build()
+	r := &NTNCellConfigReconciler{Client: c, APIReader: c}
+
+	cc := ccWithRemoteControl()
+	cc.Spec.Provider.RemoteControl.TLS = &ntnv1alpha1.RemoteControlTLS{Mode: "tls", SecretName: "cred"}
+
+	_, _, err := r.pushEphemerisUpdateIfNeeded(context.Background(), cc, &cc.Spec, &provider.MockProvider{})
+	if err == nil {
+		t.Fatal("an un-opted-in remoteControl.tls Secret must fail the push")
+	}
+	reason := ephemerisPushConditionReason(err)
+	if reason != ephemerisReasonRemoteControlConfig {
+		t.Fatalf("a bad credential must classify as %q, got %q", ephemerisReasonRemoteControlConfig, reason)
+	}
+	// And that reason self-heal-requeues (the Secret fix is unwatched), so the cell is not stranded.
+	if !ephemerisPushShouldRequeue(reason) || ephemerisPushRequeueInterval(reason) != remoteControlConfigRequeue {
+		t.Fatalf("a bad credential must schedule a %v self-heal requeue, got requeue=%v interval=%v",
+			remoteControlConfigRequeue, ephemerisPushShouldRequeue(reason), ephemerisPushRequeueInterval(reason))
 	}
 }
