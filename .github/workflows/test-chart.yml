@@ -83,9 +83,30 @@ jobs:
       - name: Create Kind cluster
         run: kind create cluster
 
-      - name: Build and load image
+      # Build the manager on the host so the compile reuses setup-go's persistent build cache
+      # (~/.cache/go-build, keyed on go.sum and shared across jobs) — a warm cache turns the ~60s
+      # in-container recompile into a few seconds. Go 1.20+ ships no precompiled stdlib, so an
+      # in-container build (make docker-build) has a cold cache every run; the Dockerfile path is still
+      # exercised by the E2E job. CGO_ENABLED=0 keeps it static (runs in distroless); the arch is left
+      # native (= runner = Kind node); ./cmd/ is the package ko ships at release → a functionally
+      # identical binary.
+      - name: Build manager binary (host Go cache)
         run: |
-          make docker-build IMG=controller:latest
+          mkdir -p /tmp/img
+          CGO_ENABLED=0 GOOS=linux go build -o /tmp/img/manager ./cmd/
+
+      # Package the static binary into the same distroless runtime the Dockerfile ships (keep in sync
+      # with Dockerfile's final stage). A /tmp context sidesteps .dockerignore, which excludes bin/.
+      - name: Package + load image into Kind
+        run: |
+          cat > /tmp/img/Dockerfile <<'EOF'
+          FROM gcr.io/distroless/static:nonroot
+          WORKDIR /
+          COPY manager /manager
+          USER 65532:65532
+          ENTRYPOINT ["/manager"]
+          EOF
+          docker build -t controller:latest /tmp/img
           kind load docker-image controller:latest
 
       - name: Install Helm
