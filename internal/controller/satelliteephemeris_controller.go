@@ -1720,6 +1720,26 @@ func (r *SatelliteEphemerisReconciler) obtainOMMs(
 		return ommFetchOutcome{}, &res, err
 	}
 
+	// A cold-start conditional GET can return 304 with an EMPTY body: after a restart only the
+	// cache VALIDATORS were re-seeded into the fetcher (its url-shared body cache is not restored,
+	// since a durable entry holds only THIS CR's filtered subset). Serve THIS CR's restored OMMs —
+	// the 304 confirms they are still current — while keeping the 304 (NotModified) status
+	// semantics, so propagation continues instead of collapsing to zero states. With no restored
+	// cache (e.g. a sibling-primed count-only 304) this falls through to the normal NotModified
+	// handling below, which populates SatelliteCount from the result.
+	if result.NotModified && len(result.OMMs) == 0 {
+		if c, ok := r.matchingCache(req.NamespacedName, eph); ok && len(c.result.OMMs) > 0 {
+			c.result.FetchedAt = result.FetchedAt // 304 confirms freshness; advance the serve clock
+			c.result.NotModified = true           // preserve the 304 status/condition downstream
+			c.nextFetchAttempt = time.Time{}
+			c.lastFetchErr = nil
+			c.fetchFailures = 0
+			r.ommCache.Store(req.NamespacedName, c)
+			log.V(1).Info("conditional GET 304 after cold start; re-serving restored OMMs", "satellites", len(c.result.OMMs))
+			return ommFetchOutcome{result: c.result}, nil, nil
+		}
+	}
+
 	// A successful fetch clears the backoff.
 	r.ommCache.Store(req.NamespacedName, cachedFetch{result: result, fetchKey: fetchKey, uid: eph.UID})
 	// Persist the tracked last-good OMMs durably so a later cold process (restart / leader
