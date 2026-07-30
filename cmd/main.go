@@ -165,6 +165,15 @@ func main() {
 			"Set this only to enable internal CelesTrak mirrors (e.g. air-gapped "+
 			"deployments) or E2E test mock servers. Production clusters with public "+
 			"CelesTrak access should leave this empty.")
+	var remoteControlAllowedHosts string
+	flag.StringVar(&remoteControlAllowedHosts, "remote-control-allowed-endpoint-hosts", "",
+		"Comma-separated list of hostnames a CREDENTIALED NTNCellConfig "+
+			"spec.provider.remoteControl (remoteControl.tls set) may push to. Empty (default) "+
+			"permits any endpoint (opt-in). When set, a credentialed push to a host not on the "+
+			"list is refused BEFORE the credential leaves the operator — an interim confused-deputy "+
+			"boundary (#251) so a principal who can write NTNCellConfig but not read the referenced "+
+			"Secret cannot aim a labelled credential at an arbitrary host. Plaintext pushes "+
+			"(no remoteControl.tls) are never gated.")
 	// Default to the Zap PRODUCTION config (JSON encoder, info level, sampling,
 	// error-level stacktraces) rather than the kubebuilder scaffold's Development
 	// default (console, warning stacktraces, no sampling), so a deployed operator
@@ -277,12 +286,13 @@ func main() {
 		"ocudu": ocudu.NewProvider(mgr.GetClient()).WithAPIReader(mgr.GetAPIReader()),
 	}
 	if err := (&controller.NTNCellConfigReconciler{
-		Client:                  mgr.GetClient(),
-		APIReader:               mgr.GetAPIReader(),
-		Scheme:                  mgr.GetScheme(),
-		Recorder:                mgr.GetEventRecorder("ntncellconfig-controller"),
-		Providers:               providers,
-		MaxConcurrentReconciles: maxConcurrentReconciles,
+		Client:                    mgr.GetClient(),
+		APIReader:                 mgr.GetAPIReader(),
+		Scheme:                    mgr.GetScheme(),
+		Recorder:                  mgr.GetEventRecorder("ntncellconfig-controller"),
+		Providers:                 providers,
+		MaxConcurrentReconciles:   maxConcurrentReconciles,
+		RemoteControlAllowedHosts: netutil.ParseEndpointAllowlist(remoteControlAllowedHosts),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "NTNCellConfig")
 		os.Exit(1)
