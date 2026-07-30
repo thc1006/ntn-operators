@@ -167,7 +167,9 @@ jobs:
           echo "NetworkPolicy egress assertion OK (server-normalized, 'to'-less .spec.egress: 53 TCP+UDP, 443/9090/8001 TCP)"
 
       - name: Deploy manager via Helm
-        run: make helm-deploy IMG=controller:latest HELM_EXTRA_ARGS="--set manager.image.pullPolicy=Never"
+        # ha-ci-values.yaml adds the celestrak-mock host to --ephemeris-allowed-private-hosts so
+        # TestHAOutageContinuityAcrossFailover can warm the ephemeris cache from the in-cluster mock.
+        run: make helm-deploy IMG=controller:latest HELM_EXTRA_ARGS="--set manager.image.pullPolicy=Never --values test/e2e/fixtures/ha-ci-values.yaml"
 
       - name: Check Helm release status
         run: make helm-status

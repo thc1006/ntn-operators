@@ -29,6 +29,7 @@ import (
 	"testing"
 	"time"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	policyv1 "k8s.io/api/policy/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
@@ -37,6 +38,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/util/retry"
@@ -996,4 +998,294 @@ func rolloutRestartPatch() string {
 	// A unique annotation forces a new ReplicaSet rollout without changing behaviour.
 	return fmt.Sprintf(`{"spec":{"template":{"metadata":{"annotations":{"ntn.operators.dev/ha-e2e-restart":%q}}}}}`,
 		time.Now().Format(time.RFC3339Nano))
+}
+
+// ---------------------------------------------------------------------------
+// Durable OMM cache: outage-continuity across leader failover (acceptance test)
+// ---------------------------------------------------------------------------
+
+var satephGVR = schema.GroupVersionResource{Group: crdAPIGroup, Version: "v1alpha1", Resource: "satelliteephemeris"}
+
+const (
+	outageNS      = "default" // the mock Service DNS + --ephemeris-allowed-private-hosts are pinned to default
+	mockName      = "celestrak-mock"
+	mockFixtureCM = "celestrak-mock-fixture"
+	satephName    = "oneweb-constellation"
+
+	// Mirrors internal/controller propagationEpochLead / propagationRefreshInterval (the e2e package
+	// cannot import an internal package). Only used for generous polling budgets, so mild drift is safe.
+	haEpochLead        = 5 * time.Minute
+	haPropagationCycle = 3 * time.Minute
+)
+
+// mockGPJSON is one fresh OMM (EPOCH=now, so within maxEpochAge for the whole run) served as /gp.json.
+func mockGPJSON() string {
+	epoch := time.Now().UTC().Format("2006-01-02T15:04:05.000000")
+	return fmt.Sprintf(`[{"OBJECT_NAME":"ISS (ZARYA)","OBJECT_ID":"1998-067A","EPOCH":%q,`+
+		`"MEAN_MOTION":15.49554387,"ECCENTRICITY":0.000588,"INCLINATION":51.6381,`+
+		`"RA_OF_ASC_NODE":276.7884,"ARG_OF_PERICENTER":282.5765,"MEAN_ANOMALY":192.7824,`+
+		`"EPHEMERIS_TYPE":0,"CLASSIFICATION_TYPE":"U","NORAD_CAT_ID":25544,`+
+		`"ELEMENT_SET_NO":999,"REV_AT_EPOCH":47189,"BSTAR":0.00025892,`+
+		`"MEAN_MOTION_DOT":0.00019394,"MEAN_MOTION_DDOT":0}]`, epoch)
+}
+
+// deployCelestrakMock creates the fixture ConfigMap + nginx Deployment + Service and waits for ready.
+func (e *haEnv) deployCelestrakMock(t *testing.T) {
+	t.Helper()
+	labels := map[string]string{"app.kubernetes.io/name": mockName, "app.kubernetes.io/component": "e2e-fixture"}
+	sel := map[string]string{"app.kubernetes.io/name": mockName}
+
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: mockFixtureCM, Namespace: outageNS, Labels: labels},
+		Data:       map[string]string{"gp.json": mockGPJSON()},
+	}
+	if _, err := e.cs.CoreV1().ConfigMaps(outageNS).Create(e.ctx, cm, metav1.CreateOptions{}); err != nil && !apierrors.IsAlreadyExists(err) {
+		t.Fatalf("create mock fixture configmap: %v", err)
+	}
+
+	replicas := int32(1)
+	dep := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: mockName, Namespace: outageNS, Labels: labels},
+		Spec: appsv1.DeploymentSpec{
+			Replicas: &replicas,
+			Selector: &metav1.LabelSelector{MatchLabels: sel},
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{Labels: labels},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{
+						Name:  "nginx",
+						Image: "nginx:1.27-alpine",
+						Ports: []corev1.ContainerPort{{Name: "http", ContainerPort: 80}},
+						VolumeMounts: []corev1.VolumeMount{{
+							Name: "fixture", MountPath: "/usr/share/nginx/html/gp.json", SubPath: "gp.json", ReadOnly: true,
+						}},
+						ReadinessProbe: &corev1.Probe{
+							ProbeHandler:  corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{Path: "/gp.json", Port: intstr.FromString("http")}},
+							PeriodSeconds: 2, FailureThreshold: 15,
+						},
+					}},
+					Volumes: []corev1.Volume{{
+						Name: "fixture",
+						VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{
+							LocalObjectReference: corev1.LocalObjectReference{Name: mockFixtureCM},
+							Items:                []corev1.KeyToPath{{Key: "gp.json", Path: "gp.json"}},
+						}},
+					}},
+				},
+			},
+		},
+	}
+	if _, err := e.cs.AppsV1().Deployments(outageNS).Create(e.ctx, dep, metav1.CreateOptions{}); err != nil && !apierrors.IsAlreadyExists(err) {
+		t.Fatalf("create mock deployment: %v", err)
+	}
+
+	svc := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Name: mockName, Namespace: outageNS, Labels: labels},
+		Spec: corev1.ServiceSpec{
+			Selector: sel,
+			Ports:    []corev1.ServicePort{{Name: "http", Port: 80, TargetPort: intstr.FromString("http")}},
+		},
+	}
+	if _, err := e.cs.CoreV1().Services(outageNS).Create(e.ctx, svc, metav1.CreateOptions{}); err != nil && !apierrors.IsAlreadyExists(err) {
+		t.Fatalf("create mock service: %v", err)
+	}
+
+	eventually(t, 2*time.Minute, 3*time.Second, "celestrak-mock to become available", func() (bool, string) {
+		d, err := e.cs.AppsV1().Deployments(outageNS).Get(e.ctx, mockName, metav1.GetOptions{})
+		if err != nil {
+			return false, err.Error()
+		}
+		return d.Status.AvailableReplicas >= 1, fmt.Sprintf("available=%d", d.Status.AvailableReplicas)
+	})
+}
+
+// scaleMock sets the mock replica count (0 = simulate a total upstream outage).
+func (e *haEnv) scaleMock(t *testing.T, replicas int32) {
+	t.Helper()
+	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		d, err := e.cs.AppsV1().Deployments(outageNS).Get(e.ctx, mockName, metav1.GetOptions{})
+		if err != nil {
+			return err
+		}
+		d.Spec.Replicas = &replicas
+		_, err = e.cs.AppsV1().Deployments(outageNS).Update(e.ctx, d, metav1.UpdateOptions{})
+		return err
+	}); err != nil {
+		t.Fatalf("scale mock to %d: %v", replicas, err)
+	}
+}
+
+// createOutageSatEph creates a SatelliteEphemeris pointing at the in-cluster mock (no passPrediction —
+// only the propagatedStates heartbeat matters here).
+func (e *haEnv) createOutageSatEph(t *testing.T) {
+	t.Helper()
+	obj := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": crdAPIGroup + "/v1alpha1",
+		"kind":       "SatelliteEphemeris",
+		"metadata":   map[string]any{"name": satephName, "namespace": outageNS},
+		"spec": map[string]any{
+			"source": map[string]any{
+				"type":            "CelesTrak",
+				"url":             "http://celestrak-mock.default.svc.cluster.local/gp.json",
+				"refreshInterval": "4h",
+			},
+		},
+	}}
+	if _, err := e.dyn.Resource(satephGVR).Namespace(outageNS).Create(e.ctx, obj, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("create SatelliteEphemeris: %v", err)
+	}
+}
+
+// satephEpoch returns status.propagatedStates[0].epochUnixMs, ok=false until it exists.
+func (e *haEnv) satephEpoch() (int64, bool) {
+	got, err := e.dyn.Resource(satephGVR).Namespace(outageNS).Get(e.ctx, satephName, metav1.GetOptions{})
+	if err != nil {
+		return 0, false
+	}
+	states, found, err := unstructured.NestedSlice(got.Object, "status", "propagatedStates")
+	if err != nil || !found || len(states) == 0 {
+		return 0, false
+	}
+	first, ok := states[0].(map[string]any)
+	if !ok {
+		return 0, false
+	}
+	epoch, found, err := unstructured.NestedInt64(first, "epochUnixMs")
+	if err != nil || !found {
+		return 0, false
+	}
+	return epoch, true
+}
+
+// waitEpochAdvances blocks until the propagated epoch strictly exceeds beyond, returning the new value.
+func (e *haEnv) waitEpochAdvances(t *testing.T, beyond int64, timeout time.Duration, desc string) int64 {
+	t.Helper()
+	var latest int64
+	eventually(t, timeout, 5*time.Second, desc, func() (bool, string) {
+		ep, ok := e.satephEpoch()
+		if !ok {
+			return false, "no propagated epoch yet"
+		}
+		latest = ep
+		return ep > beyond, fmt.Sprintf("epoch=%d beyond=%d", ep, beyond)
+	})
+	return latest
+}
+
+// cacheConfigMapDigest returns the durable cache ConfigMap's payload digest, ok=false if absent.
+func (e *haEnv) cacheConfigMapDigest() (string, bool) {
+	cm, err := e.cs.CoreV1().ConfigMaps(outageNS).Get(e.ctx, satephName+"-omm-cache", metav1.GetOptions{})
+	if err != nil {
+		return "", false
+	}
+	return cm.Annotations["ntn.operators.dev/omm-digest"], true
+}
+
+// TestHAOutageContinuityAcrossFailover is the MANDATED acceptance test for the durable OMM cache:
+// warm the cache from the mock, force a TOTAL source outage, verify the epoch advances, KILL the
+// current leader, keep the source down beyond propagationEpochLead, and verify the NEW leader —
+// which starts with an EMPTY in-memory cache — restores the last-good OMMs from the durable
+// ConfigMap and KEEPS advancing the epoch (staying in the future = runtime-push ready).
+//
+// This is the only test that proves the property the unit integration test cannot: REAL leader
+// election + a REAL new process + REAL cross-process ConfigMap durability + real RBAC. Without the
+// durable cache the post-failover leader would have nothing to propagate once the last pushed epoch
+// expired, and the final assertions would fail.
+//
+// Precondition: the running chart must set --ephemeris-allowed-private-hosts to include
+// celestrak-mock.default.svc.cluster.local, or the SSRF-safe client blocks the warm fetch (the test
+// then fails fast at the warm step with that hint).
+func TestHAOutageContinuityAcrossFailover(t *testing.T) {
+	e := newHAEnv(t)
+	e.waitReadyManagerPods(t)
+
+	e.deployCelestrakMock(t)
+	e.createOutageSatEph(t)
+	t.Cleanup(func() {
+		bg := context.Background()
+		_ = e.dyn.Resource(satephGVR).Namespace(outageNS).Delete(bg, satephName, metav1.DeleteOptions{})
+		_ = e.cs.AppsV1().Deployments(outageNS).Delete(bg, mockName, metav1.DeleteOptions{})
+		_ = e.cs.CoreV1().Services(outageNS).Delete(bg, mockName, metav1.DeleteOptions{})
+		_ = e.cs.CoreV1().ConfigMaps(outageNS).Delete(bg, mockFixtureCM, metav1.DeleteOptions{})
+		// The <name>-omm-cache ConfigMap is owner-ref'd to the CR, so GC removes it with the CR.
+	})
+
+	// WARM: leader fetches, persists the durable cache, propagates.
+	warm := e.waitEpochAdvances(t, 0, 4*time.Minute,
+		"SatelliteEphemeris to warm — a stall here usually means the chart lacks "+
+			"--ephemeris-allowed-private-hosts=celestrak-mock.default.svc.cluster.local")
+	if _, ok := e.cacheConfigMapDigest(); !ok {
+		t.Fatalf("durable cache ConfigMap %s-omm-cache absent after warm — persist not wired or RBAC-denied", satephName)
+	}
+	t.Logf("warm: epoch=%d, durable cache present", warm)
+
+	// OUTAGE: mock to zero → every upstream fetch now fails.
+	e.scaleMock(t, 0)
+	eventually(t, time.Minute, 3*time.Second, "mock to report zero available replicas", func() (bool, string) {
+		d, err := e.cs.AppsV1().Deployments(outageNS).Get(e.ctx, mockName, metav1.GetOptions{})
+		if err != nil {
+			return false, err.Error()
+		}
+		return d.Status.AvailableReplicas == 0, fmt.Sprintf("available=%d", d.Status.AvailableReplicas)
+	})
+
+	// PRE-FAILOVER: the current leader keeps advancing the epoch from its in-memory cache.
+	preKill := e.waitEpochAdvances(t, warm, haPropagationCycle+3*time.Minute,
+		"epoch to advance under outage before failover (leader serving in-memory cache)")
+	t.Logf("pre-failover: epoch advanced to %d under outage", preKill)
+
+	// KILL THE LEADER: the standby takes over with an EMPTY in-memory cache; source stays DOWN.
+	holder0 := e.waitLeaseHolder(t)
+	if h, err := e.leaseHolder(); err == nil && h != holder0 {
+		holder0 = e.waitLeaseHolder(t)
+	}
+	leader0 := holderPodBase(holder0)
+	killTime := time.Now()
+	t.Logf("killing leader pod=%s while source is DOWN", leader0)
+	if err := e.cs.CoreV1().Pods(e.ns).Delete(e.ctx, leader0, metav1.DeleteOptions{}); err != nil {
+		t.Fatalf("delete leader pod: %v", err)
+	}
+	eventually(t, 90*time.Second, time.Second, "lease to fail over to a new holder", func() (bool, string) {
+		h, err := e.leaseHolder()
+		if err != nil {
+			return false, err.Error()
+		}
+		if h == "" || h == holder0 {
+			return false, "holder still " + h
+		}
+		return true, ""
+	})
+	e.waitReadyManagerPods(t)
+	newHolder, _ := e.leaseHolder()
+	t.Logf("failed over to new leader holder=%s", newHolder)
+
+	// THE PROOF: source STILL down, new leader started cold. Require ONE advance immediately (restore
+	// worked) and then a FURTHER advance only after more than propagationEpochLead of wall time has
+	// elapsed since the kill — by then the epoch pushed before the kill has expired, so the continued
+	// advance can ONLY come from the new leader re-propagating the RESTORED durable cache. (The
+	// window-expired → fetch-fails → fallback path cannot be reached in an e2e because minRefreshInterval
+	// clamps the fetch window to 2h; it is covered deterministically by the unit integration test.)
+	adv1 := e.waitEpochAdvances(t, preKill, 4*time.Minute,
+		"first epoch advance after cold failover (durable-cache restore)")
+
+	var adv2 int64
+	eventually(t, haEpochLead+3*haPropagationCycle, 5*time.Second,
+		"epoch to keep advancing until beyond the epoch-lead window after cold failover",
+		func() (bool, string) {
+			ep, ok := e.satephEpoch()
+			if !ok {
+				return false, "no propagated epoch"
+			}
+			adv2 = ep
+			elapsed := time.Since(killTime)
+			return ep > adv1 && elapsed >= haEpochLead,
+				fmt.Sprintf("epoch=%d adv1=%d elapsedSinceKill=%s", ep, adv1, elapsed.Round(time.Second))
+		})
+	t.Logf("post-failover under sustained outage: epoch %d -> %d over %s", adv1, adv2, time.Since(killTime).Round(time.Second))
+
+	// PUSH-READY: OCUDU ntn_config_update requires a FUTURE epoch, so a runtime push consumer always
+	// has valid, non-expired ephemeris to send.
+	if nowMs := time.Now().UnixMilli(); adv2 <= nowMs {
+		t.Fatalf("post-failover epoch %d is not in the future (now=%d) — runtime push would have no valid ephemeris", adv2, nowMs)
+	}
 }
