@@ -107,7 +107,7 @@ func TestReconcile_StatusConflict_DoesNotAdvanceConfirmation(t *testing.T) {
 	meta.SetStatusCondition(&eph.Status.Conditions, metav1.Condition{
 		Type: ntnv1alpha1.ConditionPassesPredicted, Status: metav1.ConditionTrue, Reason: "Predicted",
 	})
-	confirm := 2
+	confirm := int32(2)
 	nsObj := &ntnv1alpha1.NTNSlice{
 		ObjectMeta: metav1.ObjectMeta{Name: "s", Namespace: "default", UID: "slice-uid-1", Generation: 1},
 		Spec: ntnv1alpha1.NTNSliceSpec{
