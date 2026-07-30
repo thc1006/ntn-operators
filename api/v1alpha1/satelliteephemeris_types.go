@@ -136,6 +136,13 @@ type PassWindow struct {
 	// satellite is the name or NORAD ID of the satellite.
 	Satellite string `json:"satellite"`
 
+	// noradID is the satellite's NORAD catalog number — the canonical key that maps this window
+	// to its propagatedStates entry, so a consumer (NTNSlice) can gate pass availability on the
+	// backing element set's delivery freshness (same contract as the runtime push). 0 only for
+	// windows written before this field existed (freshness then treated as unverifiable).
+	// +optional
+	NoradID int `json:"noradID,omitempty"`
+
 	// groundStation is the name of the GroundStationLifecycle resource.
 	GroundStation string `json:"groundStation"`
 

@@ -297,9 +297,9 @@ func (r *NTNSliceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	// Step 3: Check satellite availability via SatelliteEphemeris. satelliteKnown is
 	// false on a transient ephemeris read error — availability is unknown and the
 	// current path is held rather than switched off satellite (I-13).
-	satelliteAvailable, satelliteKnown := r.checkSatelliteAvailability(ctx, ns, now)
+	satelliteAvailable, satelliteKnown, satelliteDetail := r.checkSatelliteAvailability(ctx, ns, now)
 	log.V(1).Info("satellite availability", "available", satelliteAvailable, "known", satelliteKnown,
-		"ephemerisRef", ns.Spec.SatellitePath.EphemerisRef)
+		"ephemerisRef", ns.Spec.SatellitePath.EphemerisRef, "detail", satelliteDetail)
 
 	// FailoverReady tracks whether quality-driven failover can operate. When metrics
 	// are reliable it reflects satellite availability; when they are not,
@@ -316,8 +316,11 @@ func (r *NTNSliceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 			c = metav1.Condition{Status: metav1.ConditionTrue, Reason: "SatelliteAvailable",
 				Message: "Satellite pass window active"}
 		default:
-			c = metav1.Condition{Status: metav1.ConditionFalse, Reason: "SatelliteUnavailable",
-				Message: "No satellite pass window active or SatelliteEphemeris not found"}
+			msg := satelliteDetail
+			if msg == "" {
+				msg = "No satellite pass window active or SatelliteEphemeris not found"
+			}
+			c = metav1.Condition{Status: metav1.ConditionFalse, Reason: "SatelliteUnavailable", Message: msg}
 		}
 		c.Type = ntnv1alpha1.ConditionFailoverReady
 		c.ObservedGeneration = ns.Generation
@@ -773,20 +776,20 @@ func (r *NTNSliceReconciler) checkSatelliteAvailability(
 	ctx context.Context,
 	ns *ntnv1alpha1.NTNSlice,
 	now time.Time,
-) (available, known bool) {
+) (available, known bool, detail string) {
 	eph := &ntnv1alpha1.SatelliteEphemeris{}
 	key := client.ObjectKey{Namespace: ns.Namespace, Name: ns.Spec.SatellitePath.EphemerisRef}
 	if err := r.Get(ctx, key, eph); err != nil {
 		if apierrors.IsNotFound(err) {
 			// Dangling ephemerisRef: no ephemeris to drive the satellite path. This
 			// is a genuine (persistent) signal, not a transient blip — allow switchback.
-			return false, true
+			return false, true, "referenced SatelliteEphemeris not found"
 		}
 		// Transient read error: availability is UNKNOWN. Do NOT force a switch off
 		// satellite; the caller holds the current path (I-13).
 		logf.FromContext(ctx).Error(err, "failed to get SatelliteEphemeris; holding current path",
 			"ref", ns.Spec.SatellitePath.EphemerisRef)
-		return false, false
+		return false, false, ""
 	}
 
 	// The pass windows are trustworthy ONLY when the producer's most recent prediction SUCCEEDED. If
@@ -796,14 +799,49 @@ func (r *NTNSliceReconciler) checkSatelliteAvailability(
 	// completes the SatelliteEphemeris(producer) -> NTNSlice(consumer) pass-status contract (ADR 0006 /
 	// #234): the producer leaves PassesPredicted=True only while NextPassWindows reflects the live inputs.
 	if !meta.IsStatusConditionTrue(eph.Status.Conditions, ntnv1alpha1.ConditionPassesPredicted) {
-		return false, false
+		return false, false, ""
 	}
-	for _, pw := range eph.Status.NextPassWindows {
-		if !pw.AOS.After(now) && pw.LOS.After(now) {
-			return true, true // currently in a pass window
+
+	// An active pass makes the satellite AVAILABLE unless its backing element set is present but too
+	// STALE to DELIVER — the same sourceEpochFresh (maxEpochAge) gate NTNCellConfig enforces at the
+	// runtime push. Without this the two consumers of PropagatedStates disagree during a >maxEpochAge
+	// outage: NTNSlice fails over to a satellite whose stale ephemeris NTNCellConfig then refuses to push
+	// (a control-plane split that strands traffic on an unconfigurable path). Pass prediction is itself
+	// SGP4 propagation, so an element set too stale to push is equally untrustworthy for the window.
+	// Correlate by NORAD — the canonical key; PropagatedState.Satellite is a truncated, non-unique name.
+	//
+	// Scope: only a PRESENT-but-stale state demotes the window (that IS the reported split — NTNCellConfig
+	// has the state but refuses it). A window whose satellite has a fresh state, no state, or predates the
+	// noradID field stays available: a window and its propagatedState are produced together from one
+	// reconcile's OMMs, so "window but no state" is not the stale-outage case this closes.
+	stale := make(map[int]bool)
+	for i := range eph.Status.PropagatedStates {
+		ps := &eph.Status.PropagatedStates[i]
+		if sourceEpochFresh(now, time.UnixMilli(ps.SourceEpochUnixMs)) != nil {
+			stale[ps.NoradID] = true
 		}
 	}
-	return false, true // prediction current, no active pass — a genuine end-of-pass signal
+	activeDeliverable, activeStale := false, false
+	for i := range eph.Status.NextPassWindows {
+		pw := &eph.Status.NextPassWindows[i]
+		if pw.AOS.After(now) || !pw.LOS.After(now) {
+			continue // not currently in this window
+		}
+		if pw.NoradID != 0 && stale[pw.NoradID] {
+			activeStale = true // overhead but its element set is too stale to deliver
+		} else {
+			activeDeliverable = true
+		}
+	}
+	switch {
+	case activeDeliverable:
+		return true, true, "" // a deliverable satellite is overhead (fresh wins over any stale sibling)
+	case activeStale:
+		return false, true, fmt.Sprintf(
+			"satellite overhead but its element set is stale beyond the %s freshness bound — not deliverable to the gNB", maxEpochAge)
+	default:
+		return false, true, "no active satellite pass window"
+	}
 }
 
 // now returns the current time (injectable for testing).
