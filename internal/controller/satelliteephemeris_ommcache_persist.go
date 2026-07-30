@@ -46,6 +46,10 @@ const (
 	ommCacheAnnDigest    = "ntn.operators.dev/omm-digest"     // sha256 of the payload
 	ommCacheAnnUID       = "ntn.operators.dev/omm-owner-uid"  // delete-recreate guard
 	ommCacheAnnCount     = "ntn.operators.dev/omm-count"
+	// Origin cache validators, re-seeded into a cold CelesTrak fetcher on restore so the first
+	// post-restart fetch is a conditional GET (304), not a full re-download.
+	ommCacheAnnETag         = "ntn.operators.dev/omm-etag"
+	ommCacheAnnLastModified = "ntn.operators.dev/omm-last-modified"
 
 	ommCacheConfigMapSuffix = "-omm-cache"
 	maxOMMCacheBytes        = 900 * 1024 // under the 1 MiB ConfigMap limit; larger sets skip persist
@@ -127,7 +131,7 @@ func (r *SatelliteEphemerisReconciler) persistOMMCache(
 	switch {
 	case apierrors.IsNotFound(getErr):
 		cm = &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: key.Namespace, Name: key.Name}}
-		stampOMMCache(cm, eph, fetchKey, digest, len(omms), string(data), result.FetchedAt)
+		stampOMMCache(cm, eph, fetchKey, digest, len(omms), string(data), result.FetchedAt, result.ETag, result.LastModified)
 		if err := controllerutil.SetControllerReference(eph, cm, r.Scheme); err != nil {
 			log.V(1).Info("omm-cache: owner ref failed; skipping persist", "err", err.Error())
 			return
@@ -141,7 +145,7 @@ func (r *SatelliteEphemerisReconciler) persistOMMCache(
 		if cm.Annotations[ommCacheAnnDigest] == digest && cm.Data[ommCacheDataKey] != "" {
 			return // unchanged
 		}
-		stampOMMCache(cm, eph, fetchKey, digest, len(omms), string(data), result.FetchedAt)
+		stampOMMCache(cm, eph, fetchKey, digest, len(omms), string(data), result.FetchedAt, result.ETag, result.LastModified)
 		_ = controllerutil.SetControllerReference(eph, cm, r.Scheme) // adopt for GC if pre-existing
 		if err := r.Update(ctx, cm); err != nil {
 			log.V(1).Info("omm-cache: update failed; skipping persist", "err", err.Error())
@@ -149,7 +153,7 @@ func (r *SatelliteEphemerisReconciler) persistOMMCache(
 	}
 }
 
-func stampOMMCache(cm *corev1.ConfigMap, eph *ntnv1alpha1.SatelliteEphemeris, fetchKey, digest string, count int, data string, fetchedAt time.Time) {
+func stampOMMCache(cm *corev1.ConfigMap, eph *ntnv1alpha1.SatelliteEphemeris, fetchKey, digest string, count int, data string, fetchedAt time.Time, etag, lastModified string) {
 	if cm.Labels == nil {
 		cm.Labels = map[string]string{}
 	}
@@ -162,7 +166,19 @@ func stampOMMCache(cm *corev1.ConfigMap, eph *ntnv1alpha1.SatelliteEphemeris, fe
 	cm.Annotations[ommCacheAnnDigest] = digest
 	cm.Annotations[ommCacheAnnUID] = string(eph.UID)
 	cm.Annotations[ommCacheAnnCount] = strconv.Itoa(count)
+	// Keep the validators in lockstep with the body: clear a stale one when the origin
+	// stops sending it, so a restore never seeds a validator that no longer matches the data.
+	setOrClearAnn(cm.Annotations, ommCacheAnnETag, etag)
+	setOrClearAnn(cm.Annotations, ommCacheAnnLastModified, lastModified)
 	cm.Data = map[string]string{ommCacheDataKey: data}
+}
+
+func setOrClearAnn(ann map[string]string, key, val string) {
+	if val != "" {
+		ann[key] = val
+		return
+	}
+	delete(ann, key)
 }
 
 // restoreOMMCache hydrates the in-memory cache from the persisted ConfigMap when it is cold for
@@ -205,6 +221,23 @@ func (r *SatelliteEphemerisReconciler) restoreOMMCache(
 		fetchKey: fetchKey,
 		uid:      eph.UID,
 	})
+	// Re-seed the cold CelesTrak fetcher's cache validators so the first fetch this process
+	// makes is a conditional GET (304) rather than a full re-download. Only the validators are
+	// seeded (never the url-shared body — see SeedConditionalCache); a resulting post-restart
+	// 304 re-serves the entry stored just above, in obtainOMMs.
+	if eph.Spec.Source.Type == "CelesTrak" {
+		if seeder, ok := r.Fetcher.(conditionalCacheSeeder); ok {
+			seeder.SeedConditionalCache(eph.Spec.Source.URL,
+				cm.Annotations[ommCacheAnnETag], cm.Annotations[ommCacheAnnLastModified])
+		}
+	}
 	log.Info("omm-cache: hydrated last-good OMMs after cold start", "satellites", len(omms))
 	return true
+}
+
+// conditionalCacheSeeder is implemented by a GPFetcher that can restore cache validators
+// (ETag / Last-Modified) after a cold start so its first fetch is a conditional GET. Only the
+// CelesTrak fetcher implements it; the type assertion no-ops for any other fetcher.
+type conditionalCacheSeeder interface {
+	SeedConditionalCache(url, etag, lastModified string)
 }

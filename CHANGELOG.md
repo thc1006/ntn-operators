@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Durable conditional-GET validators for the OMM cache (polite restart/failover refetch).** The
+  CelesTrak fetcher already used an in-memory `If-None-Match` conditional GET, but the ETag was lost on
+  a process restart or leader failover, so the first post-failover fetch re-downloaded the full GP body.
+  The last-good OMM cache ConfigMap (ADR-0007) now also persists the origin's `ETag` and `Last-Modified`
+  validators; on cold-start restore they are re-seeded into the fetcher (`SeedConditionalCache`) so the
+  first fetch this process makes is a conditional GET — a `304 Not Modified` when the data is unchanged,
+  which is politer to CelesTrak (Dr. Kelso's usage policy) and cheaper. Only the validators are
+  re-seeded, never the body: the fetcher's OMM cache is keyed by URL and shared across every CR fetching
+  that URL, whereas a durable entry holds only that CR's filtered/capped subset. A resulting cold-start
+  `304` therefore returns no body, and the reconciler re-serves the restoring CR's own cache — continuity
+  (`status.propagatedStates` keeps advancing) is preserved with the `NotModified` status semantics
+  intact. `If-Modified-Since` is also sent when only a `Last-Modified` validator is available, so an
+  origin that emits no `ETag` can still answer `304`. CelesTrak-only; Space-Track is unaffected.
+
 ### Security
 
 - **External OMM `OBJECT_NAME` can no longer amplify the SatelliteEphemeris status past the etcd object

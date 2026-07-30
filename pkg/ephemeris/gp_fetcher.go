@@ -190,6 +190,11 @@ type GPFetchResult struct {
 	SatelliteCount int
 	FetchedAt      time.Time
 	NotModified    bool // true when server returned 304 (ETag matched)
+	// ETag / LastModified are the origin's cache validators for this body, surfaced so a
+	// caller can persist them and re-seed a cold fetcher (SeedConditionalCache) after a
+	// restart — making the first post-restart fetch a conditional GET, not a full download.
+	ETag         string
+	LastModified string
 }
 
 // GPFetcher defines the interface for fetching GP (General Perturbations) data.
@@ -204,9 +209,10 @@ type GPFetcher interface {
 // re-derive time-dependent data (e.g., pass predictions) even when
 // upstream data has not changed.
 type CelesTrakFetcher struct {
-	httpClient *http.Client
-	etagCache  sync.Map // url -> string (ETag)
-	ommCache   sync.Map // url -> []sgp4.OMM
+	httpClient   *http.Client
+	etagCache    sync.Map // url -> string (ETag)
+	lastModCache sync.Map // url -> string (Last-Modified)
+	ommCache     sync.Map // url -> []sgp4.OMM
 }
 
 // NewCelesTrakFetcher creates a new fetcher with the given HTTP client.
@@ -222,6 +228,32 @@ func NewCelesTrakFetcher(httpClient *http.Client) *CelesTrakFetcher {
 	}
 }
 
+// SeedConditionalCache restores a prior fetch's cache validators (ETag / Last-Modified) for url
+// so the FIRST fetch after a process restart or leader failover issues a conditional GET
+// (304-capable) instead of re-downloading the full body. It deliberately seeds NO OMM body: the
+// url-keyed body cache is shared across every CR fetching that url, and a durable restore only
+// holds THIS CR's filtered/capped subset — seeding it would hand a co-url CR with a different
+// NORAD selector the wrong 304 body. On a post-restart 304 the fetcher therefore returns an empty
+// OMM set (NotModified=true) and the reconciler re-serves its own per-CR cache. LoadOrStore never
+// clobbers a live in-memory validator with older restored data.
+func (f *CelesTrakFetcher) SeedConditionalCache(url, etag, lastModified string) {
+	if url == "" {
+		return
+	}
+	if etag != "" {
+		f.etagCache.LoadOrStore(url, etag)
+	}
+	if lastModified != "" {
+		f.lastModCache.LoadOrStore(url, lastModified)
+	}
+}
+
+// stringOrEmpty unwraps a sync.Map value that is a string, or "" when absent/other-typed.
+func stringOrEmpty(v any) string {
+	s, _ := v.(string)
+	return s
+}
+
 // Fetch retrieves OMM JSON from the given URL.
 // It uses conditional GET (If-None-Match) when a cached ETag exists.
 // Returns ErrRateLimited on HTTP 403 (CelesTrak bandwidth policy).
@@ -235,9 +267,16 @@ func (f *CelesTrakFetcher) Fetch(ctx context.Context, url string) (GPFetchResult
 	}
 	req.Header.Set("User-Agent", userAgent)
 
-	// Set conditional GET header if we have a cached ETag.
+	// Conditional GET: prefer the strong ETag validator (If-None-Match); also send the
+	// Last-Modified validator (If-Modified-Since) so an origin that emits only Last-Modified
+	// still answers 304. Per RFC 9110 the origin evaluates If-None-Match first, so sending
+	// both is safe. Either header may come from a durable restore (SeedConditionalCache) so
+	// the FIRST fetch after a restart is conditional rather than a full re-download.
 	if etag, ok := f.etagCache.Load(url); ok {
 		req.Header.Set("If-None-Match", etag.(string))
+	}
+	if lastMod, ok := f.lastModCache.Load(url); ok {
+		req.Header.Set("If-Modified-Since", lastMod.(string))
 	}
 
 	resp, err := f.httpClient.Do(req)
@@ -250,16 +289,23 @@ func (f *CelesTrakFetcher) Fetch(ctx context.Context, url string) (GPFetchResult
 
 	switch resp.StatusCode {
 	case http.StatusNotModified:
-		log.V(2).Info("ETag cache hit (304)", "url", url, "duration", time.Since(fetchStart))
+		log.V(2).Info("conditional GET hit (304)", "url", url, "duration", time.Since(fetchStart))
 		var cached []sgp4.OMM
 		if v, ok := f.ommCache.Load(url); ok {
 			cached = v.([]sgp4.OMM)
 		}
+		// cached is empty when only the validators were restored into a cold fetcher
+		// (SeedConditionalCache seeds no body); the reconciler then re-serves its own
+		// per-CR cache for THIS object, which is why the body is not seeded here.
+		etag, _ := f.etagCache.Load(url)
+		lastMod, _ := f.lastModCache.Load(url)
 		return GPFetchResult{
 			OMMs:           cached,
 			SatelliteCount: len(cached),
 			FetchedAt:      now,
 			NotModified:    true,
+			ETag:           stringOrEmpty(etag),
+			LastModified:   stringOrEmpty(lastMod),
 		}, nil
 
 	case http.StatusOK:
@@ -276,11 +322,16 @@ func (f *CelesTrakFetcher) Fetch(ctx context.Context, url string) (GPFetchResult
 			return GPFetchResult{}, fmt.Errorf("parsing OMM JSON: %w", err)
 		}
 
-		// Cache OMMs before ETag so that a concurrent 304 path always
-		// finds the OMM data when it observes the new ETag.
+		// Cache OMMs before the validators so that a concurrent 304 path always
+		// finds the OMM data when it observes the new ETag / Last-Modified.
 		f.ommCache.Store(url, omms)
-		if newETag := resp.Header.Get("ETag"); newETag != "" {
+		newETag := resp.Header.Get("ETag")
+		newLastMod := resp.Header.Get("Last-Modified")
+		if newETag != "" {
 			f.etagCache.Store(url, newETag)
+		}
+		if newLastMod != "" {
+			f.lastModCache.Store(url, newLastMod)
 		}
 
 		log.V(1).Info("fetch complete", "satellites", len(omms), "bytes", len(body), "duration", time.Since(fetchStart))
@@ -288,6 +339,8 @@ func (f *CelesTrakFetcher) Fetch(ctx context.Context, url string) (GPFetchResult
 			OMMs:           omms,
 			SatelliteCount: len(omms),
 			FetchedAt:      now,
+			ETag:           newETag,
+			LastModified:   newLastMod,
 		}, nil
 
 	case http.StatusForbidden, http.StatusTooManyRequests:
