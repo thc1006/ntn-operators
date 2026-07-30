@@ -1,0 +1,10 @@
+# Helm values for the HA E2E CI deploy (test-chart.yml). Adds the in-cluster
+# celestrak-mock host to --ephemeris-allowed-private-hosts so
+# TestHAOutageContinuityAcrossFailover can warm the SatelliteEphemeris cache from
+# it — the SSRF-safe GP fetch client blocks private-IP hosts by default. Setting
+# manager.args replaces the chart default, so --leader-elect is repeated here
+# (HA needs leader election). The other TestHA* tests are unaffected.
+manager:
+  args:
+    - --leader-elect
+    - --ephemeris-allowed-private-hosts=celestrak-mock.default.svc.cluster.local

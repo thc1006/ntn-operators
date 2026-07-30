@@ -834,6 +834,11 @@ func (r *SatelliteEphemerisReconciler) acquireOMMs(
 ) (ommFetchOutcome, *ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
+	// Cold-start / failover continuity: hydrate last-good OMMs from the persisted ConfigMap
+	// before deciding fetch-vs-serve, so a restart mid-outage still re-propagates. No-ops when
+	// warm or when nothing valid is persisted.
+	r.restoreOMMCache(ctx, req, eph, fetchInputKey(eph.Spec))
+
 	switch c, why := r.cacheServe(req.NamespacedName, eph, now, effectiveInterval); why {
 	case cacheServeWindow:
 		log.V(1).Info("re-propagating from cached OMMs; GP source not contacted",
@@ -1642,6 +1647,10 @@ func (r *SatelliteEphemerisReconciler) obtainOMMs(
 
 	// A successful fetch clears the backoff.
 	r.ommCache.Store(req.NamespacedName, cachedFetch{result: result, fetchKey: fetchKey, uid: eph.UID})
+	// Persist the tracked last-good OMMs durably so a later cold process (restart / leader
+	// failover) can re-propagate through a sustained upstream outage. Best-effort; never fails
+	// the reconcile.
+	r.persistOMMCache(ctx, eph, result, fetchKey)
 	return ommFetchOutcome{result: result}, nil, nil
 }
 
