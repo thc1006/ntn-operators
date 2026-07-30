@@ -161,8 +161,12 @@ type PathSpec struct {
 type SatellitePathSpec struct {
 	PathSpec `json:",inline"`
 
-	// ephemerisRef is the name of the SatelliteEphemeris resource
-	// used to determine satellite pass availability.
+	// ephemerisRef is the name of the SatelliteEphemeris resource used to determine
+	// satellite pass availability. The referenced ephemeris is treated as a
+	// CONSTELLATION POOL: the satellite path is available whenever ANY tracked member
+	// is overhead and deliverable — the slice is deliberately not pinned to one NORAD,
+	// because LEO members hand over. Which member a given cell broadcasts is
+	// NTNCellConfig.ephemerisNoradID's concern, not this path's. See ADR-0008.
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=253
 	EphemerisRef string `json:"ephemerisRef"`

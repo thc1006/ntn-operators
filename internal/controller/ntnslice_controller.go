@@ -792,6 +792,10 @@ func (r *NTNSliceReconciler) checkSatelliteAvailability(
 		return false, false, ""
 	}
 
+	// Availability is CONSTELLATION-POOL-level: the path is available if ANY tracked member is overhead
+	// and deliverable. NTNSlice is not pinned to a NORAD (satellitePath has none), because LEO members
+	// hand over; which member a cell broadcasts is NTNCellConfig.ephemerisNoradID's concern. See ADR-0008.
+	//
 	// The pass windows are trustworthy ONLY when the producer's most recent prediction SUCCEEDED. If
 	// PassesPredicted is not True — absent (never predicted), Unknown (recomputing after an input change
 	// or a no-OMM failure), or False (PredictionFailed) — pass availability is UNKNOWN, so hold the
