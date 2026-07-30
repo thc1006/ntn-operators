@@ -117,6 +117,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Kubernetes libraries bumped to v0.36.3 (K8s 1.36.3).** `k8s.io/api`, `k8s.io/client-go`, and the
+  transitive `k8s.io/apiextensions-apiserver` / `k8s.io/apiserver` / `k8s.io/component-base` /
+  `k8s.io/kms` are now v0.36.3 (`k8s.io/apimachinery` was already there), aligning the whole k8s.io
+  stack to the latest 1.36 patch. `sigs.k8s.io/controller-runtime` stays at v0.24.1 (still the latest,
+  compatible with k8s.io v0.36). A within-minor patch bump: no code changes, generated manifests
+  unchanged, full unit+envtest suite green. envtest runs against Kubernetes **1.36.2** — the newest
+  1.36.x envtest binary published upstream (no 1.36.3 envtest yet); the `ENVTEST_K8S_VERSION`
+  derivation is minor-pinned (`1.36`) so it tracks the latest patch automatically. The Kind e2e cluster
+  is unchanged — upstream has not yet published a `kindest/node:v1.36.x` image, so e2e stays on 1.35.x
+  until it does.
+
 - **Pass-prediction failures now carry a specific `PassesPredicted=False` reason instead of a blanket
   `PredictionFailed`.** The failure event gate keys on `(Status, Reason, ObservedGeneration)` and
   deliberately ignores the message, so two different root causes at the same generation (e.g. a
