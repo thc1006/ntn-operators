@@ -419,7 +419,7 @@ var _ = Describe("NTNSlice Controller", func() {
 		AfterEach(func() { deleteSlice() })
 
 		It("holds terrestrial until N consecutive degraded samples confirm", func() {
-			confirmN := 2
+			confirmN := int32(2)
 			spec := baseSpec()
 			spec.FailoverPolicy.ConfirmationSamples = &confirmN
 			ntnSlice := &ntnv1alpha1.NTNSlice{

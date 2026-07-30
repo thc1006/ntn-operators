@@ -98,6 +98,7 @@ spec:
                       resets on any healthy reliable sample; losing it on a controller restart or
                       leader-election handoff only re-requires confirmation (a DELAY), never causes
                       a spurious switch.
+                    format: int32
                     maximum: 10
                     minimum: 1
                     type: integer
@@ -119,9 +120,16 @@ spec:
                       bounds sub-minute ping-pong after a hand-back. It is a soft, bounded delay
                       — a genuinely failing terrestrial still fails over once the dwell elapses,
                       so it never indefinitely blocks a real failover. 0 (the default) disables
-                      it; 30s–120s is a sane range relative to a LEO pass.
+                      it; 30s–120s is a sane range relative to a LEO pass. A negative value would
+                      silently disable the dwell (elapsed < negative is never true), so admission
+                      bounds it to [0s, 24h].
                     format: duration
                     type: string
+                    x-kubernetes-validations:
+                    - message: minTerrestrialDwell must be a non-negative duration
+                        no greater than 24h
+                      rule: duration(self) >= duration('0s') && duration(self) <=
+                        duration('24h')
                   sessionContinuity:
                     default: true
                     description: sessionContinuity preserves active sessions during
@@ -131,9 +139,16 @@ spec:
                     default: 60s
                     description: |-
                       switchbackDelay is how long to wait after terrestrial recovers
-                      before switching back (prevents flapping).
+                      before switching back (prevents flapping). A negative value is meaningless
+                      here, so admission bounds it to [0s, 24h] (24h is a fat-finger ceiling, far
+                      above any LEO-pass-relative value).
                     format: duration
                     type: string
+                    x-kubernetes-validations:
+                    - message: switchbackDelay must be a non-negative duration no
+                        greater than 24h
+                      rule: duration(self) >= duration('0s') && duration(self) <=
+                        duration('24h')
                   triggers:
                     description: |-
                       triggers defines conditions that initiate failover (OR logic).
