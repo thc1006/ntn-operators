@@ -311,3 +311,50 @@ func TestPushEphemerisUpdateIfNeeded_BadCredentialClassifiesRemoteControlConfig(
 			remoteControlConfigRequeue, ephemerisPushShouldRequeue(reason), ephemerisPushRequeueInterval(reason))
 	}
 }
+
+// TestPushEphemerisUpdateIfNeeded_SecretFixRecovers is the end-to-end coverage the review asked for
+// on the RemoteControlConfigInvalid self-heal (#282): patch ONLY the Secret and observe recovery. A
+// remoteControl.tls Secret missing the opt-in label fails the push as a credential-config error;
+// adding the label (no spec edit, no ephemeris change) makes the very next push — which is exactly
+// what the 5m self-heal requeue re-runs — succeed. That is what lets the cell recover even when the
+// SatelliteEphemeris producer is stalled (no heartbeat fan-out to enqueue it).
+func TestPushEphemerisUpdateIfNeeded_SecretFixRecovers(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := ntnv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	certPEM, _ := selfSignedPEM(t)
+	eph := ephWithPropagatedState(time.Now().Add(time.Hour).UnixMilli())
+	// Valid cert material, but NOT opted in (no owner label) → RemoteControlConfigInvalid.
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "cred", Namespace: eph.Namespace},
+		Data:       map[string][]byte{"ca.crt": certPEM},
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(eph, secret).Build()
+	r := &NTNCellConfigReconciler{Client: c, APIReader: c}
+	cc := ccWithRemoteControl()
+	cc.Spec.Provider.RemoteControl.TLS = &ntnv1alpha1.RemoteControlTLS{Mode: "tls", SecretName: "cred"}
+
+	// Push 1: the un-opted-in Secret fails the push as a credential-config error.
+	if _, _, err := r.pushEphemerisUpdateIfNeeded(context.Background(), cc, &cc.Spec, &provider.MockProvider{}); err == nil ||
+		ephemerisPushConditionReason(err) != ephemerisReasonRemoteControlConfig {
+		t.Fatalf("push 1: want a RemoteControlConfigInvalid failure, got %v", err)
+	}
+
+	// Patch ONLY the Secret — add the opt-in label. No spec edit, no ephemeris change.
+	secret.Labels = map[string]string{remoteControlCredentialLabel: "true"}
+	if err := c.Update(context.Background(), secret); err != nil {
+		t.Fatalf("patch secret: %v", err)
+	}
+
+	// Push 2 (what the 5m self-heal requeue re-runs): the now-opted-in Secret resolves → recovered.
+	mock := &provider.MockProvider{}
+	pushed, _, err := r.pushEphemerisUpdateIfNeeded(context.Background(), cc, &cc.Spec, mock)
+	if err != nil || !pushed || mock.RuntimeCalls != 1 {
+		t.Fatalf("push 2 (post-Secret-fix) must recover with a successful push; got pushed=%v err=%v calls=%d",
+			pushed, err, mock.RuntimeCalls)
+	}
+}
