@@ -126,24 +126,40 @@ func ephemerisPushConditionReason(err error) string {
 	return ephemerisReasonPushFailed
 }
 
+// ephemerisPushShouldRequeue reports whether a failed push needs a self-requeue to recover,
+// versus recovering on its own via a watched change. The reasons below clear only on a spec edit
+// (generation bump) or a SatelliteEphemeris refresh (new marker) — both watched — so a self-requeue
+// would just hammer a still-failing push. Everything else requeues: a transient failure (API GET
+// error, gNB unreachable), AND RemoteControlConfigInvalid, whose fix (a Secret edit) is NOT watched
+// — the controller watches only NTNCellConfig + SatelliteEphemeris and secrets are get-only by
+// design, so without a self-requeue such a cell recovers only on the next ephemeris heartbeat, and
+// never if the producer stalls. ephemerisPushRequeueInterval sets the cadence.
 func ephemerisPushShouldRequeue(reason string) bool {
 	switch reason {
 	case ephemerisReasonRefNotFound,
 		ephemerisReasonPayloadMissing,
 		ephemerisReasonEphemerisStale,
 		ephemerisReasonInputsStale,
-		ephemerisReasonRemoteControlConfig,
 		ephemerisReasonProviderPushRejected:
-		// These clear only on an external change — a spec edit (generation bump)
-		// or a SatelliteEphemeris refresh (new marker) — both of which re-trigger
-		// reconcile via generation/watch. A tight requeue would just hammer a
-		// permanently-failing push (e.g. the gNB rejecting a bad config, or a
-		// stale/missing propagated state) until that external change happens.
 		return false
 	default:
-		// Transient failures (API GET error, gNB unreachable) — retry.
 		return true
 	}
+}
+
+// remoteControlConfigRequeue is the low-frequency self-heal poll for a RemoteControlConfigInvalid
+// failure. Its fix is a Secret edit, which the controller does not watch, so the cell must poll to
+// recover rather than rely on the (possibly absent) SatelliteEphemeris heartbeat fan-out.
+const remoteControlConfigRequeue = 5 * time.Minute
+
+// ephemerisPushRequeueInterval is the backoff for a requeuing push failure: a credential/config
+// error self-heals slowly (its Secret fix is unwatched, so this is a poll, not a hammer); every
+// other requeuing reason is a transient failure that retries tightly.
+func ephemerisPushRequeueInterval(reason string) time.Duration {
+	if reason == ephemerisReasonRemoteControlConfig {
+		return remoteControlConfigRequeue
+	}
+	return time.Minute
 }
 
 // +kubebuilder:rbac:groups=ntn.operators.dev,resources=ntncellconfigs,verbs=get;list;watch;create;update;patch;delete
@@ -393,7 +409,7 @@ func (r *NTNCellConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			if !ephemerisPushShouldRequeue(reason) {
 				return ctrl.Result{}, nil
 			}
-			return ctrl.Result{RequeueAfter: time.Minute}, nil
+			return ctrl.Result{RequeueAfter: ephemerisPushRequeueInterval(reason)}, nil
 		}
 		if pushed {
 			meta.SetStatusCondition(&cc.Status.Conditions, metav1.Condition{
@@ -706,10 +722,14 @@ func (r *NTNCellConfigReconciler) pushRuntimeEphemeris(
 	// referenced Secret; nil TLSConfig keeps the plaintext ws:// behavior (N-12).
 	tlsConfig, authToken, tlsErr := r.resolveRemoteControlTLS(ctx, eph.Namespace, spec.Provider.RemoteControl)
 	if tlsErr != nil {
-		// A deterministic credential/config error (wrong Secret type, missing opt-in
-		// label, malformed cert) is PERMANENT — it clears only on a Secret/spec edit,
-		// which re-triggers reconcile, so classify it non-requeuing instead of hammering
-		// the apiserver every minute. A transient Secret read error stays requeuing.
+		// A deterministic credential/config error (wrong Secret type, missing opt-in label,
+		// malformed cert) does not clear on retry — only on a Secret or spec edit. The spec is
+		// watched, but the Secret is NOT (the controller watches only NTNCellConfig +
+		// SatelliteEphemeris, and secrets are get-only), so a Secret fix does not re-trigger
+		// reconcile. It therefore gets a low-frequency bounded self-heal requeue
+		// (ephemerisPushRequeueInterval) — not a tight per-minute retry, and not no requeue,
+		// which would strand the cell until the next ephemeris heartbeat, if any. A transient
+		// Secret read error stays tight-requeuing.
 		reason := ephemerisReasonProviderPushFailed
 		if errors.Is(tlsErr, errRemoteControlCredentialInvalid) {
 			reason = ephemerisReasonRemoteControlConfig
@@ -748,10 +768,10 @@ const (
 )
 
 // errRemoteControlCredentialInvalid tags a DETERMINISTIC remoteControl.tls config
-// failure (wrong Secret type, missing opt-in label, malformed cert material). The
-// caller classifies it as permanent — it clears only on a Secret/spec edit (which
-// re-triggers reconcile via generation or the ephemeris fan-out), so it must not
-// tight-requeue like a transient failure would.
+// failure (wrong Secret type, missing opt-in label, malformed cert material). The caller
+// does not tight-requeue it like a transient failure; instead it gets a low-frequency
+// self-heal poll (remoteControlConfigRequeue), because its fix is a Secret edit, and the
+// controller does NOT watch Secrets (get-only), so a Secret fix does not re-trigger reconcile.
 var errRemoteControlCredentialInvalid = errors.New("not a usable remote-control credential")
 
 // errRemoteControlCredentialUnavailable is the UNIFORM, CR-facing message for any
