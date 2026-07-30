@@ -133,7 +133,9 @@ type SatelliteEphemerisSpec struct {
 
 // PassWindow represents a predicted contact opportunity between a satellite and ground station.
 type PassWindow struct {
-	// satellite is the name or NORAD ID of the satellite.
+	// satellite is the satellite's display name (externally sourced OMM ObjectName), bounded and
+	// rune-safe. The canonical identity is noradID; treat this as a label only.
+	// +kubebuilder:validation:MaxLength=64
 	Satellite string `json:"satellite"`
 
 	// noradID is the satellite's NORAD catalog number — the canonical key that maps this window

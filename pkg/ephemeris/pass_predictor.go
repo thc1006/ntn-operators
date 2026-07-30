@@ -32,6 +32,27 @@ import (
 // to stay within etcd object size limits (~1.5 MB).
 const MaxPassWindows = 500
 
+// MaxSatelliteNameLen bounds the externally-sourced OMM ObjectName wherever it is persisted or
+// surfaced (pass windows, propagated states, condition/error messages). OMM data is CR-controlled
+// (the source URL is), so an unbounded name — copied into up to MaxPassWindows windows — could
+// amplify a bounded input into a status object past the etcd limit. Measured in runes to match the
+// CRD maxLength (code points). The canonical satellite identity is the NORAD ID; the name is a label.
+const MaxSatelliteNameLen = 64
+
+// BoundedSatelliteLabel truncates an external satellite name to MaxSatelliteNameLen runes. Rune-safe:
+// it never splits a multi-byte rune (byte truncation would, yielding U+FFFD replacement chars on
+// JSON marshal). Shared by pass windows, propagated states, and error/condition messages so one
+// external name cannot inflate the status object.
+func BoundedSatelliteLabel(name string) string {
+	if len(name) <= MaxSatelliteNameLen { // byte length <= max ⇒ rune count <= max
+		return name
+	}
+	if r := []rune(name); len(r) > MaxSatelliteNameLen {
+		return string(r[:MaxSatelliteNameLen])
+	}
+	return name
+}
+
 // DefaultStepSeconds is the propagation step size for pass prediction.
 const DefaultStepSeconds = 60
 
@@ -242,7 +263,7 @@ func predictSingle(
 	tle, err := omm.ToTLE()
 	if err != nil {
 		return nil, fmt.Errorf("converting OMM to TLE for %s (NORAD %d): %w",
-			omm.ObjectName, omm.NoradCatID, err)
+			BoundedSatelliteLabel(omm.ObjectName), omm.NoradCatID, err)
 	}
 
 	passes, err := tle.GeneratePasses(
@@ -286,7 +307,7 @@ func predictSingle(
 			continue
 		}
 		results = append(results, PassResult{
-			Satellite:     omm.ObjectName,
+			Satellite:     BoundedSatelliteLabel(omm.ObjectName),
 			NoradID:       omm.NoradCatID,
 			GroundStation: gs.Name,
 			AOS:           aos,
