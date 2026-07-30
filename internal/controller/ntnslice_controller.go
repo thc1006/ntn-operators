@@ -27,6 +27,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -283,6 +284,12 @@ func (r *NTNSliceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 
 	now := r.now()
 
+	// Snapshot status before the quality/availability/failover evaluation mutates it, so the
+	// terminal write can be skipped when this reconcile changed nothing (see Step 8). Only durable
+	// anti-flap state (LastSwitchbackTime) lives in status and so is captured here; the in-memory
+	// streak (storeFlapState) is committed regardless and does not gate the write.
+	oldStatus := ns.Status.DeepCopy()
+
 	// Step 2: Read path-quality metrics and determine whether they are reliable
 	// enough to drive a switch. Unreliable metrics fail static in Step 4 (the engine
 	// is replaced by EvaluateSafeHold, which holds the current path but still honors
@@ -503,8 +510,12 @@ func (r *NTNSliceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	r.applySecurityStatus(ns)
 	r.applyBillingStatus(ns, activePath)
 
-	// Step 8: Update status.
-	if err := r.Status().Update(ctx, ns); err != nil {
+	// Step 8: Persist status, but only when it changed or an event is queued — a steady-state
+	// (DecisionStay, no switchback) reconcile re-derives identical status, so an unconditional
+	// Update would churn every watcher each requeue (#204-G3; matches #271 / GroundStation). The
+	// storeFlapState / FailoverTotal / event blocks below are unchanged: each fires only on a real
+	// transition (⟹ statusChanged) or a queued event, so the durable write always precedes them.
+	if err := r.persistStatusIfChanged(ctx, ns, oldStatus, pending); err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -548,6 +559,19 @@ func (r *NTNSliceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	}
 
 	return ctrl.Result{RequeueAfter: sliceRequeueInterval}, nil
+}
+
+// persistStatusIfChanged writes ns.Status only when it differs from oldStatus or an event is
+// queued, so a no-op reconcile does not churn the object (#204-G3). A queued event forces the
+// write so the WO-20 emit-after-persist discipline holds. Split out of Reconcile to keep that
+// function under the cyclomatic-complexity budget.
+func (r *NTNSliceReconciler) persistStatusIfChanged(
+	ctx context.Context, ns *ntnv1alpha1.NTNSlice, oldStatus *ntnv1alpha1.NTNSliceStatus, pending []deferredEvent,
+) error {
+	if equality.Semantic.DeepEqual(oldStatus, &ns.Status) && len(pending) == 0 {
+		return nil
+	}
+	return r.Status().Update(ctx, ns)
 }
 
 // applyQoSStatus sets the QoS-related status fields and conditions.
