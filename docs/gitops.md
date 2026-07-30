@@ -33,9 +33,14 @@ does not perform controller-side spec defaulting.
 
 Derived/effective configuration — the applied K_offset, the resolved ephemeris
 (ECEF) pushed to the gNB, effective cell parameters, pass windows, failover
-state — is written to `.status`, never back into `.spec`. Argo CD excludes
-`status` from diffing by default, and Flux does not manage it, so these values
-never register as drift.
+state — is written to `.status`, never back into `.spec`. The NTN CRs are
+CustomResourceDefinitions, and Argo CD excludes CRD `.status` from diffing on
+every supported version — the v2.x default (`resource.compareoptions.ignoreResourceStatusField: crd`)
+and the Argo CD 3.0 default (`all`, broadened from CRDs to every resource) both
+cover CRDs — while Flux does not manage `.status`, so these values never register
+as drift. (A cluster that overrode the default to `none` would need an explicit
+`/status` ignore rule; the 3.0 broadening is called out in Argo CD's v2.14→3.0
+upgrade notes.)
 
 ## Do not GitOps-manage operator-generated artifacts
 
