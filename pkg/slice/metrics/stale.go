@@ -43,8 +43,9 @@ type staleCache struct {
 }
 
 type staleEntry struct {
-	metrics slice.Metrics
-	freshAt time.Time
+	metrics    slice.Metrics
+	freshAt    time.Time
+	observedAt time.Time // source sample time; replayed unchanged so a replay is not a new observation
 }
 
 // NewStaleCache returns a Reader that remembers the last fresh observation
@@ -68,7 +69,7 @@ func (c *staleCache) Read(ctx context.Context, ns *ntnv1alpha1.NTNSlice) (Result
 	if err == nil {
 		freshAt := c.now()
 		c.mu.Lock()
-		c.cache[ns.UID] = staleEntry{metrics: res.Metrics, freshAt: freshAt}
+		c.cache[ns.UID] = staleEntry{metrics: res.Metrics, freshAt: freshAt, observedAt: res.ObservedAt}
 		c.mu.Unlock()
 		res.LastFreshAt = freshAt
 		return res, nil
@@ -97,5 +98,5 @@ func (c *staleCache) Read(ctx context.Context, ns *ntnv1alpha1.NTNSlice) (Result
 	ntnmetrics.ReaderStaleUsedTotal.With(prometheus.Labels{
 		"namespace": ns.Namespace, "name": ns.Name,
 	}).Inc()
-	return Result{Metrics: cached.metrics, Stale: true, LastFreshAt: cached.freshAt}, nil
+	return Result{Metrics: cached.metrics, Stale: true, LastFreshAt: cached.freshAt, ObservedAt: cached.observedAt}, nil
 }

@@ -15,6 +15,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -70,6 +71,33 @@ func TestStaleCache_FirstSuccess_Cached(t *testing.T) {
 	}
 	if got.Metrics.RSRP != -95 {
 		t.Errorf("got %v want -95", got.Metrics.RSRP)
+	}
+}
+
+// TestStaleCache_ReplayPreservesObservedAt pins #203-M3's plumbing: a stale-cache replay must carry
+// the ORIGINAL observation's source timestamp, not a new one, so the anti-flap engine sees the same
+// ObservedAt and does not count the replay as a fresh confirmation.
+func TestStaleCache_ReplayPreservesObservedAt(t *testing.T) {
+	obs := time.Date(2026, 4, 17, 12, 0, 0, 0, time.UTC)
+	inner := &scriptedReader{script: []scriptStep{
+		{res: metrics.Result{Metrics: slice.Metrics{RSRP: -95}, ObservedAt: obs}},
+		{err: metrics.ErrNoMetrics},
+	}}
+	c := metrics.NewStaleCache(inner)
+	fresh, err := c.Read(context.Background(), nsWithUID("u1"))
+	if err != nil || !fresh.ObservedAt.Equal(obs) {
+		t.Fatalf("fresh read must carry the source ObservedAt %v, got %v (err=%v)", obs, fresh.ObservedAt, err)
+	}
+	stale, err := c.Read(context.Background(), nsWithUID("u1"))
+	if err != nil {
+		t.Fatalf("stale replay error: %v", err)
+	}
+	if !stale.Stale {
+		t.Fatal("replay must be marked stale")
+	}
+	if !stale.ObservedAt.Equal(obs) {
+		t.Fatalf("a stale replay must preserve the original ObservedAt %v, got %v — else the anti-flap "+
+			"would treat the replay as a new observation (#203-M3)", obs, stale.ObservedAt)
 	}
 }
 

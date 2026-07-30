@@ -34,11 +34,52 @@ const afSwitchbackDelay = 60 * time.Second
 // immediately, exactly like the un-gated engine.
 func TestAntiFlap_OptInPreservesImmediateFailover(t *testing.T) {
 	res, _ := EvaluateFailoverWithAntiFlap(
-		context.Background(), PathTerrestrial, triggers, afDegraded, true,
+		context.Background(), PathTerrestrial, triggers, afDegraded, time.Time{}, true,
 		afSwitchbackDelay, now, 0, AntiFlapConfig{}, AntiFlapState{},
 	)
 	if res.Decision != DecisionFailover {
 		t.Fatalf("zero-config must fail over immediately, got %s (%s)", res.Decision, res.Reason)
+	}
+}
+
+// TestAntiFlap_ReplayedObservationDoesNotConfirm pins #203-M3: confirmationSamples must count
+// DISTINCT observations, not reconcile calls. A single degraded observation replayed by the stale
+// cache (same ObservedAt) during a metrics-source outage must NOT accumulate confirmations into a
+// failover; only genuinely new observations (advancing ObservedAt) count. Mutation: drop the
+// `observedAt.After(st.LastCountedObservedAt)` gate → the replays each increment the counter, reach
+// the threshold, and the "replay must hold" assertion fails.
+func TestAntiFlap_ReplayedObservationDoesNotConfirm(t *testing.T) {
+	cfg := AntiFlapConfig{ConfirmationSamples: 3}
+	var st AntiFlapState
+	eval := func(observedAt time.Time) FailoverResult {
+		var res FailoverResult
+		res, st = EvaluateFailoverWithAntiFlap(
+			context.Background(), PathTerrestrial, triggers, afDegraded, observedAt, true,
+			afSwitchbackDelay, now, 0, cfg, st,
+		)
+		return res
+	}
+
+	obs := now // the single degraded observation's source timestamp
+	// t=0: one fresh degraded observation → 1/3, hold terrestrial.
+	if res := eval(obs); res.Decision != DecisionStay || st.ConsecutiveDegraded != 1 {
+		t.Fatalf("first observation: want Stay 1/3, got %s count=%d", res.Decision, st.ConsecutiveDegraded)
+	}
+	// A metrics-source outage replays the SAME observation (same ObservedAt) every reconcile. It must
+	// HOLD at 1/3 and never fail over — the bug was that each replay incremented the counter (#203-M3).
+	for i := range 5 {
+		if res := eval(obs); res.Decision != DecisionStay || st.ConsecutiveDegraded != 1 {
+			t.Fatalf("replay %d must hold at 1/3 (a replay is not a new confirmation), got %s count=%d",
+				i, res.Decision, st.ConsecutiveDegraded)
+		}
+	}
+	// Two more DISTINCT observations (advancing ObservedAt) reach 3/3 → a real sustained degradation
+	// still fails over, so the gate only suppresses replays, not genuine confirmations.
+	if res := eval(obs.Add(1 * time.Second)); res.Decision != DecisionStay || st.ConsecutiveDegraded != 2 {
+		t.Fatalf("second distinct observation: want Stay 2/3, got %s count=%d", res.Decision, st.ConsecutiveDegraded)
+	}
+	if res := eval(obs.Add(2 * time.Second)); res.Decision != DecisionFailover {
+		t.Fatalf("third distinct observation must fail over (3/3), got %s count=%d", res.Decision, st.ConsecutiveDegraded)
 	}
 }
 
@@ -51,7 +92,7 @@ func TestAntiFlap_NConsecutiveConfirmation(t *testing.T) {
 	eval := func(m Metrics) FailoverResult {
 		var res FailoverResult
 		res, st = EvaluateFailoverWithAntiFlap(
-			context.Background(), PathTerrestrial, triggers, m, true,
+			context.Background(), PathTerrestrial, triggers, m, time.Time{}, true,
 			afSwitchbackDelay, now, 0, cfg, st,
 		)
 		return res
@@ -92,7 +133,7 @@ func TestAntiFlap_MinDwellBlocksRefailover(t *testing.T) {
 	eval := func(at time.Time) FailoverResult {
 		var res FailoverResult
 		res, st = EvaluateFailoverWithAntiFlap(
-			context.Background(), PathTerrestrial, triggers, afDegraded, true,
+			context.Background(), PathTerrestrial, triggers, afDegraded, time.Time{}, true,
 			afSwitchbackDelay, at, 0, cfg, st,
 		)
 		return res
@@ -117,7 +158,7 @@ func TestAntiFlap_SwitchbackTimerResetsOnRedegrade(t *testing.T) {
 	eval := func(m Metrics, at time.Time) FailoverResult {
 		var res FailoverResult
 		res, st = EvaluateFailoverWithAntiFlap(
-			context.Background(), PathSatellite, triggers, m, true,
+			context.Background(), PathSatellite, triggers, m, time.Time{}, true,
 			afSwitchbackDelay, at, 0, AntiFlapConfig{}, st,
 		)
 		return res

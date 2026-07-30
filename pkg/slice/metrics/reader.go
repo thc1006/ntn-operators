@@ -43,10 +43,20 @@ var ErrNoMetrics = errors.New("metrics: no value available")
 // the current read; for a stale return it is the timestamp of the previous
 // successful read. A zero value means the reader does not track freshness
 // (e.g., annotationReader, which has no notion of "out of date").
+//
+// ObservedAt is the SOURCE timestamp of the underlying observation (for Prometheus,
+// model.Sample.Timestamp), NOT the read time — so a stale-cache replay carries the
+// original observation's timestamp, and a reachable source that keeps returning the
+// same (stalled-scrape) sample carries an unchanged timestamp. The anti-flap engine
+// counts a confirmation only when ObservedAt advances, so a replayed or duplicate
+// observation cannot falsely satisfy confirmationSamples (#203-M3). A zero value means
+// the reader cannot supply a source timestamp; the engine then falls back to counting
+// each call (the prior behavior).
 type Result struct {
 	Metrics     slice.Metrics
 	Stale       bool
 	LastFreshAt time.Time
+	ObservedAt  time.Time
 }
 
 // Reader produces path quality measurements for a single NTNSlice.

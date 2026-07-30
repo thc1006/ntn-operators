@@ -88,6 +88,30 @@ func TestPrometheusReader_AllScalars_ReturnsParsedMetrics(t *testing.T) {
 	}
 }
 
+// TestPrometheusReader_ObservedAtFromSampleTimestamp pins #203-M3's plumbing: the reader must carry
+// the SOURCE sample timestamp (model.Sample.Timestamp) through Result.ObservedAt — it was previously
+// discarded — so the anti-flap engine can tell a new observation from a stalled-scrape duplicate.
+func TestPrometheusReader_ObservedAtFromSampleTimestamp(t *testing.T) {
+	obs := time.Date(2026, 4, 17, 12, 0, 0, 0, time.UTC)
+	ts := model.TimeFromUnixNano(obs.UnixNano())
+	client := &fakeQueryClient{
+		responses: map[string]model.Value{
+			"rsrp_query":    model.Vector{&model.Sample{Value: -100, Timestamp: ts}},
+			"latency_query": model.Vector{&model.Sample{Value: 40, Timestamp: ts}},
+			"loss_query":    model.Vector{&model.Sample{Value: 0.5, Timestamp: ts}},
+		},
+	}
+	r := metrics.NewPrometheusReader(client, defaultConfig())
+	got, err := r.Read(context.Background(), sliceCR())
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if !got.ObservedAt.Equal(obs) {
+		t.Fatalf("ObservedAt must be the source sample timestamp %v, got %v (the reader must not discard "+
+			"model.Sample.Timestamp, #203-M3)", obs, got.ObservedAt)
+	}
+}
+
 func TestPrometheusReader_VectorWithOneSample_Parsed(t *testing.T) {
 	client := &fakeQueryClient{
 		responses: map[string]model.Value{
