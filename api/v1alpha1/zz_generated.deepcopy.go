@@ -168,7 +168,7 @@ func (in *FailoverPolicy) DeepCopyInto(out *FailoverPolicy) {
 	out.SwitchbackDelay = in.SwitchbackDelay
 	if in.ConfirmationSamples != nil {
 		in, out := &in.ConfirmationSamples, &out.ConfirmationSamples
-		*out = new(int)
+		*out = new(int32)
 		**out = **in
 	}
 	out.MinTerrestrialDwell = in.MinTerrestrialDwell

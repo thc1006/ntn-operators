@@ -194,9 +194,12 @@ type FailoverPolicy struct {
 	Triggers []string `json:"triggers"`
 
 	// switchbackDelay is how long to wait after terrestrial recovers
-	// before switching back (prevents flapping).
+	// before switching back (prevents flapping). A negative value is meaningless
+	// here, so admission bounds it to [0s, 24h] (24h is a fat-finger ceiling, far
+	// above any LEO-pass-relative value).
 	// +kubebuilder:default="60s"
 	// +kubebuilder:validation:Format=duration
+	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('0s') && duration(self) <= duration('24h')",message="switchbackDelay must be a non-negative duration no greater than 24h"
 	SwitchbackDelay metav1.Duration `json:"switchbackDelay,omitempty"`
 
 	// sessionContinuity preserves active sessions during failover.
@@ -227,15 +230,18 @@ type FailoverPolicy struct {
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=10
 	// +optional
-	ConfirmationSamples *int `json:"confirmationSamples,omitempty"`
+	ConfirmationSamples *int32 `json:"confirmationSamples,omitempty"`
 
 	// minTerrestrialDwell is the minimum time the terrestrial path must be held
 	// after a switchback before another failover to satellite may be taken. It
 	// bounds sub-minute ping-pong after a hand-back. It is a soft, bounded delay
 	// — a genuinely failing terrestrial still fails over once the dwell elapses,
 	// so it never indefinitely blocks a real failover. 0 (the default) disables
-	// it; 30s–120s is a sane range relative to a LEO pass.
+	// it; 30s–120s is a sane range relative to a LEO pass. A negative value would
+	// silently disable the dwell (elapsed < negative is never true), so admission
+	// bounds it to [0s, 24h].
 	// +kubebuilder:validation:Format=duration
+	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('0s') && duration(self) <= duration('24h')",message="minTerrestrialDwell must be a non-negative duration no greater than 24h"
 	// +optional
 	MinTerrestrialDwell metav1.Duration `json:"minTerrestrialDwell,omitempty"`
 }

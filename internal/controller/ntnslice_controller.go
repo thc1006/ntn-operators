@@ -432,7 +432,7 @@ func (r *NTNSliceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 			MinTerrestrialDwell: ns.Spec.FailoverPolicy.MinTerrestrialDwell.Duration,
 		}
 		if ns.Spec.FailoverPolicy.ConfirmationSamples != nil {
-			afCfg.ConfirmationSamples = *ns.Spec.FailoverPolicy.ConfirmationSamples
+			afCfg.ConfirmationSamples = int(*ns.Spec.FailoverPolicy.ConfirmationSamples)
 		}
 
 		flapKey := client.ObjectKeyFromObject(ns)
