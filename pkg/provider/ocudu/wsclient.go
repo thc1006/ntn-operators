@@ -312,8 +312,14 @@ func pushNTNConfigUpdate(
 	// same-host redirect — so a gNB/proxy 302 from wss:// to http://same-host would
 	// resend the bearer over cleartext. ErrUseLastResponse stops the client at the
 	// 30x, before it re-sends anything, on both the wss and plaintext paths.
+	// A fresh Transport on BOTH schemes so neither inherits http.DefaultTransport's
+	// Proxy=ProxyFromEnvironment: the gNB endpoint is operator-authored, so routing the push through
+	// HTTP(S)_PROXY would be proxy-amplified SSRF — a CR could reach proxy-only networks the Pod cannot
+	// and make the NetworkPolicy-visible peer the proxy, not the gNB. A fresh Transport has Proxy=nil.
+	transport := &http.Transport{}
 	dialOpts := &websocket.DialOptions{
 		HTTPClient: &http.Client{
+			Transport: transport,
 			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
 				return http.ErrUseLastResponse
 			},
@@ -321,7 +327,7 @@ func pushNTNConfigUpdate(
 	}
 	if target.TLSConfig != nil {
 		scheme = "wss://"
-		dialOpts.HTTPClient.Transport = &http.Transport{TLSClientConfig: target.TLSConfig}
+		transport.TLSClientConfig = target.TLSConfig
 		if target.AuthToken != "" {
 			dialOpts.HTTPHeader = http.Header{"Authorization": {"Bearer " + target.AuthToken}}
 		}
