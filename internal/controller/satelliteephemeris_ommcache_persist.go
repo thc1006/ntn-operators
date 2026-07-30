@@ -208,9 +208,9 @@ func (r *SatelliteEphemerisReconciler) restoreOMMCache(
 	if cm.Annotations[ommCacheAnnUID] != string(eph.UID) || cm.Annotations[ommCacheAnnFetchKey] != fetchKey {
 		return false // orphaned by delete-recreate, or a different source — do not restore
 	}
-	omms, err := sgp4.ParseOMMs([]byte(data))
+	omms, err := ephemeris.ParseValidOMMs(log, []byte(data))
 	if err != nil || len(omms) == 0 {
-		log.V(1).Info("omm-cache: payload unparseable; ignoring", "err", err)
+		log.V(1).Info("omm-cache: payload unparseable or fully invalid; ignoring", "err", err)
 		return false
 	}
 	// Unknown fetch time → zero, i.e. very old, so the next reconcile fetches and only serves

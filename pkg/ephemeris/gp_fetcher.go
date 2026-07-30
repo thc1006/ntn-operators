@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -317,7 +318,7 @@ func (f *CelesTrakFetcher) Fetch(ctx context.Context, url string) (GPFetchResult
 			return GPFetchResult{}, fmt.Errorf("response body exceeds %d bytes limit", maxResponseBody)
 		}
 
-		omms, err := sgp4.ParseOMMs(body)
+		omms, err := ParseValidOMMs(log, body)
 		if err != nil {
 			return GPFetchResult{}, fmt.Errorf("parsing OMM JSON: %w", err)
 		}
@@ -357,4 +358,67 @@ func (f *CelesTrakFetcher) Fetch(ctx context.Context, url string) (GPFetchResult
 	default:
 		return GPFetchResult{}, fmt.Errorf("%w: HTTP %d from %s", ErrBadResponse, resp.StatusCode, url)
 	}
+}
+
+// ParseValidOMMs parses OMM JSON and drops any element set whose orbital elements are non-finite or
+// physically out of range (see validOMM), so a malformed-but-valid-JSON member never reaches the OMM
+// cache or SGP4 — where it would propagate to NaN/garbage positions that flow into SIB19. It is the
+// single validated entry point for turning OMM bytes into element sets, shared by the CelesTrak fetch,
+// the Space-Track fetch, and the durable-cache restore so none of them can bypass validation (#227).
+func ParseValidOMMs(log logr.Logger, body []byte) ([]sgp4.OMM, error) {
+	omms, err := sgp4.ParseOMMs(body)
+	if err != nil {
+		return nil, err
+	}
+	return filterValidOMMs(log, omms), nil
+}
+
+// filterValidOMMs returns the element sets whose orbital elements are finite and physically in range,
+// dropping the rest. It logs a single line when anything was dropped (fetches are hours apart, so this
+// is not spammy) so a source data-quality regression is visible rather than silently propagated.
+func filterValidOMMs(log logr.Logger, omms []sgp4.OMM) []sgp4.OMM {
+	out := omms[:0:0] // fresh backing array; do not alias the caller's slice
+	dropped := 0
+	for _, o := range omms {
+		if err := validOMM(o); err != nil {
+			dropped++
+			log.V(1).Info("dropping malformed element set", "norad", o.NoradCatID, "object", o.ObjectName, "reason", err.Error())
+			continue
+		}
+		out = append(out, o)
+	}
+	if dropped > 0 {
+		log.Info("dropped malformed element sets", "dropped", dropped, "kept", len(out))
+	}
+	return out
+}
+
+// validOMM reports why an OMM's orbital elements are unusable, or nil when they are sound. SGP4 would
+// otherwise turn a non-finite or out-of-range set into NaN/garbage positions (eccentricity >= 1 is a
+// non-elliptical orbit SGP4 does not model; a non-positive mean motion is a malformed set). Angles are
+// only checked for finiteness — SGP4 normalises them modulo 360°. Epoch validity is NOT re-checked here:
+// the controller's source-epoch freshness/future-skew gate already rejects an absurd or stale epoch.
+func validOMM(o sgp4.OMM) error {
+	for _, e := range []struct {
+		name string
+		v    float64
+	}{
+		{"MEAN_MOTION", o.MeanMotion}, {"ECCENTRICITY", o.Eccentricity}, {"INCLINATION", o.Inclination},
+		{"RA_OF_ASC_NODE", o.RAOfAscNode}, {"ARG_OF_PERICENTER", o.ArgOfPericenter}, {"MEAN_ANOMALY", o.MeanAnomaly},
+		{"BSTAR", o.BStar}, {"MEAN_MOTION_DOT", o.MeanMotionDot}, {"MEAN_MOTION_DDOT", o.MeanMotionDDot},
+	} {
+		if math.IsNaN(e.v) || math.IsInf(e.v, 0) {
+			return fmt.Errorf("%s is not finite (%v)", e.name, e.v)
+		}
+	}
+	if o.MeanMotion <= 0 {
+		return fmt.Errorf("MEAN_MOTION %v must be positive", o.MeanMotion)
+	}
+	if o.Eccentricity < 0 || o.Eccentricity >= 1 {
+		return fmt.Errorf("ECCENTRICITY %v outside [0,1)", o.Eccentricity)
+	}
+	if o.Inclination < 0 || o.Inclination > 180 {
+		return fmt.Errorf("INCLINATION %v outside [0,180]", o.Inclination)
+	}
+	return nil
 }

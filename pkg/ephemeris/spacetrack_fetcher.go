@@ -30,7 +30,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/akhenakh/sgp4"
 	"github.com/go-logr/logr"
 	"golang.org/x/net/publicsuffix"
 )
@@ -199,7 +198,7 @@ func (f *SpaceTrackFetcher) FetchWithCredentials(
 	}
 
 	// Parse OMM JSON outside the lock — no shared state needed.
-	return parseGPResult(body, now)
+	return parseGPResult(logr.FromContextOrDiscard(ctx), body, now)
 }
 
 // doLogin authenticates with SpaceTrack via POST to /ajaxauth/login.
@@ -344,9 +343,10 @@ func (f *SpaceTrackFetcher) doFetchGPRaw(ctx context.Context, gpURL string) ([]b
 	}
 }
 
-// parseGPResult parses raw OMM JSON into a GPFetchResult. Does not require the mutex.
-func parseGPResult(body []byte, now time.Time) (GPFetchResult, error) {
-	omms, err := sgp4.ParseOMMs(body)
+// parseGPResult parses raw OMM JSON into a GPFetchResult, dropping non-finite / out-of-range element
+// sets (ParseValidOMMs) so the Space-Track path validates the same as CelesTrak. Does not require the mutex.
+func parseGPResult(log logr.Logger, body []byte, now time.Time) (GPFetchResult, error) {
+	omms, err := ParseValidOMMs(log, body)
 	if err != nil {
 		return GPFetchResult{}, fmt.Errorf("parsing OMM JSON: %w", err)
 	}
