@@ -119,7 +119,13 @@ func (p *Provider) Cleanup(ctx context.Context, owner *ntnv1alpha1.NTNCellConfig
 	if !metav1.IsControlledBy(cm, owner) {
 		return nil
 	}
-	return client.IgnoreNotFound(p.client.Delete(ctx, cm))
+	// Delete under a UID precondition so the ownership check and the delete hit the SAME object: a
+	// same-name ConfigMap recreated (new UID) between the cached Get and here must not be deleted. A
+	// UID-mismatch Conflict propagates so the finalizer requeues and re-evaluates. UID, not
+	// resourceVersion — the Get is cached, so a stale RV would spuriously Conflict on any benign update;
+	// the UID is stable for the object's life.
+	uid := cm.GetUID()
+	return client.IgnoreNotFound(p.client.Delete(ctx, cm, client.Preconditions{UID: &uid}))
 }
 
 // NewProvider creates an OCUDU Provider with the given K8s client.
