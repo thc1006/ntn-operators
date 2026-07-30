@@ -498,9 +498,14 @@ func (r *NTNCellConfigReconciler) handleFinalizer(
 							return true, ctrl.Result{}, err // retry on transient errors
 						}
 					} else if metav1.IsControlledBy(cm, cc) {
-						if err := r.Delete(ctx, cm); client.IgnoreNotFound(err) != nil {
+						// UID precondition: the ownership check and the delete must hit the SAME object — a
+						// same-name recreate (new UID) between the cached Get and here must not be deleted.
+						// UID not resourceVersion (the Get is cached → a stale RV would spuriously Conflict).
+						// A UID-mismatch Conflict propagates below, keeping the finalizer. Mirrors ocudu Cleanup.
+						uid := cm.GetUID()
+						if err := r.Delete(ctx, cm, client.Preconditions{UID: &uid}); client.IgnoreNotFound(err) != nil {
 							log.Error(err, "Failed to delete ConfigMap during best-effort finalization")
-							return true, ctrl.Result{}, err // retry on transient errors
+							return true, ctrl.Result{}, err // retry on transient errors (incl. UID-precondition Conflict)
 						}
 						log.Info("Deleted orphaned ConfigMap via configMapRef", "configmap", cmKey)
 					} else {
