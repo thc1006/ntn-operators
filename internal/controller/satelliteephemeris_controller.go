@@ -190,6 +190,7 @@ func (r *SatelliteEphemerisReconciler) Reconcile(ctx context.Context, req ctrl.R
 			ntnmetrics.GPSatelliteCount.DeletePartialMatch(prometheus.Labels{"namespace": req.Namespace, "ephemeris": req.Name})
 			ntnmetrics.GPDeepSpaceRejectedCount.DeletePartialMatch(prometheus.Labels{"namespace": req.Namespace, "ephemeris": req.Name})
 			ntnmetrics.EphemerisEpochStaleCount.DeletePartialMatch(prometheus.Labels{"namespace": req.Namespace, "ephemeris": req.Name})
+			ntnmetrics.EphemerisPropagationFailedCount.DeletePartialMatch(prometheus.Labels{"namespace": req.Namespace, "ephemeris": req.Name})
 			ntnmetrics.GPFetchReady.DeletePartialMatch(prometheus.Labels{"namespace": req.Namespace, "ephemeris": req.Name})
 			r.ommCache.Delete(req.NamespacedName)
 		}
@@ -1093,6 +1094,8 @@ func (r *SatelliteEphemerisReconciler) propagateStates(
 
 	states := make([]ntnv1alpha1.PropagatedState, 0, min(len(omms), maxPropagatedStates))
 	skippedByCap := 0
+	propagationFailures := 0
+	var failedNorads []int // bounded sample of NORADs that failed SGP4, for the condition message
 	for i := range omms {
 		if len(states) >= maxPropagatedStates {
 			// The cap is reached; the remaining OMMs are NOT attempted. This is the
@@ -1138,7 +1141,17 @@ func (r *SatelliteEphemerisReconciler) propagateStates(
 
 		ecef, err := ephemeris.PropagateToECEF(omms[i], epoch)
 		if err != nil {
-			continue // skip satellites whose SGP4 propagation fails / goes out of range
+			// SGP4 propagation failed (OMM->TLE, propagation, or ECEF range). The satellite is
+			// dropped from propagatedStates; count + surface it (PropagationFailed) so it is not
+			// mistaken for a generic downstream EphemerisPayloadMissing. Log carries only the NORAD
+			// and the classified error, never the external ObjectName.
+			propagationFailures++
+			if len(failedNorads) < propagationFailedExamples {
+				failedNorads = append(failedNorads, omms[i].NoradCatID)
+			}
+			logf.FromContext(ctx).Info("skipping satellite: SGP4 propagation to ECEF failed",
+				"norad", omms[i].NoradCatID, "err", err.Error())
+			continue
 		}
 		// ObjectName comes from external GP data; bound it (rune-safe) so a malformed/huge
 		// name can't bloat the status object past the etcd size limit — shared with pass windows.
@@ -1154,7 +1167,46 @@ func (r *SatelliteEphemerisReconciler) propagateStates(
 	truncEvent := r.reportStatesTruncated(eph, len(omms), skippedByCap)
 	r.reportEphemerisEpochStale(eph, staleEpochs, len(omms))
 	r.reportSourceEpochRejected(eph, unparseableEpochs, futureEpochs, len(omms))
+	r.reportPropagationFailed(eph, propagationFailures, len(omms), failedNorads)
 	return truncEvent
+}
+
+// propagationFailedExamples bounds how many NORAD IDs the PropagationFailed condition message names.
+const propagationFailedExamples = 3
+
+// reportPropagationFailed sets the PropagationFailed condition + metric: True when one or more tracked
+// element sets passed the epoch checks but failed SGP4 propagation to ECEF and were dropped from
+// propagatedStates. The message carries only a bounded reason and up to propagationFailedExamples NORAD
+// IDs — never raw external fields. Condition-only (no event), like reportEphemerisEpochStale, so the
+// 3-minute re-propagation cadence does not make it noisy.
+func (r *SatelliteEphemerisReconciler) reportPropagationFailed(eph *ntnv1alpha1.SatelliteEphemeris, failed, total int, exampleNorads []int) {
+	c := metav1.Condition{
+		Type:               ntnv1alpha1.ConditionPropagationFailed,
+		Status:             metav1.ConditionFalse,
+		Reason:             "PropagationOK",
+		Message:            "All tracked element sets propagated to ECEF successfully",
+		ObservedGeneration: eph.Generation,
+	}
+	if failed > 0 {
+		c.Status = metav1.ConditionTrue
+		c.Reason = "PropagationFailed"
+		msg := fmt.Sprintf("%d of %d tracked element set(s) failed SGP4 propagation to ECEF (conversion, propagation, or ECEF range) and were dropped from propagatedStates",
+			failed, total)
+		if len(exampleNorads) > 0 {
+			parts := make([]string, len(exampleNorads))
+			for i, n := range exampleNorads {
+				parts[i] = fmt.Sprintf("%d", n)
+			}
+			suffix := ""
+			if failed > len(exampleNorads) {
+				suffix = ", ..."
+			}
+			msg += fmt.Sprintf("; e.g. NORAD %s%s", strings.Join(parts, ", "), suffix)
+		}
+		c.Message = msg
+	}
+	meta.SetStatusCondition(&eph.Status.Conditions, c)
+	ntnmetrics.EphemerisPropagationFailedCount.With(prometheus.Labels{"namespace": eph.Namespace, "ephemeris": eph.Name}).Set(float64(failed))
 }
 
 // reportSourceEpochRejected surfaces element sets the producer refused BEFORE SGP4 — an

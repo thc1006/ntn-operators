@@ -288,6 +288,14 @@ const (
 	// means every tracked element set has a parseable, plausibly-dated epoch. Distinct from
 	// EphemerisEpochStale, which covers merely OLD (but still propagated) element sets.
 	ConditionSourceEpochRejected = "SourceEpochRejected"
+	// ConditionPropagationFailed is True when one or more tracked element sets passed the epoch
+	// checks but FAILED SGP4 propagation to ECEF (OMM->TLE conversion, propagation, or ECEF range
+	// validation). Such a satellite produces NO propagated state, so a cell selecting it reports a
+	// bare EphemerisPayloadMissing; this condition (and ntn_operators_ephemeris_propagation_failed_count)
+	// tells the operator the cause is a non-propagatable element set. The message carries only a
+	// bounded reason and example NORAD IDs, never raw external fields. Distinct from
+	// SourceEpochRejected (refused BEFORE propagation) and UnsupportedOrbitRegime (deep-space).
+	ConditionPropagationFailed = "PropagationFailed"
 	// ConditionRefreshIntervalClamped is True when spec.source.refreshInterval was
 	// outside [2h, 24h] and the controller clamped it (Reason BelowMinimum /
 	// AboveMaximum). False (Reason WithinBounds) means the controller evaluated the
