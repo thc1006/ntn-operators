@@ -308,7 +308,7 @@ func TestPushEphemerisUpdateIfNeeded_BadCredentialClassifiesRemoteControlCredent
 }
 
 // TestPushEphemerisUpdateIfNeeded_SecretFixRecovers is the end-to-end coverage the review asked for
-// on the RemoteControlConfigInvalid self-heal (#282): patch ONLY the Secret and observe recovery. A
+// on the RemoteControlCredentialUnavailable self-heal (#282): patch ONLY the Secret and observe recovery. A
 // remoteControl.tls Secret missing the opt-in label fails the push as a credential-config error;
 // adding the label (no spec edit, no ephemeris change) makes the very next push — which is exactly
 // what the 5m self-heal requeue re-runs — succeed. That is what lets the cell recover even when the
@@ -323,7 +323,7 @@ func TestPushEphemerisUpdateIfNeeded_SecretFixRecovers(t *testing.T) {
 	}
 	certPEM, _ := selfSignedPEM(t)
 	eph := ephWithPropagatedState(time.Now().Add(time.Hour).UnixMilli())
-	// Valid cert material, but NOT opted in (no owner label) → RemoteControlConfigInvalid.
+	// Valid cert material, but NOT opted in (no owner label) → RemoteControlCredentialUnavailable.
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: "cred", Namespace: eph.Namespace},
 		Data:       map[string][]byte{"ca.crt": certPEM},
