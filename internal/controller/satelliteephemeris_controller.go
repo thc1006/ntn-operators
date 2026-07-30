@@ -1431,6 +1431,7 @@ func (r *SatelliteEphemerisReconciler) predictPasses(
 	for _, p := range passes {
 		windows = append(windows, ntnv1alpha1.PassWindow{
 			Satellite:     p.Satellite,
+			NoradID:       p.NoradID,
 			GroundStation: p.GroundStation,
 			AOS:           metav1.Time{Time: p.AOS},
 			LOS:           metav1.Time{Time: p.LOS},

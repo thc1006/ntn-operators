@@ -160,6 +160,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **NTNSlice no longer fails over to a satellite whose ephemeris is too stale to deliver.** NTNSlice
+  keyed satellite availability on the producer's `PassesPredicted` condition plus an active pass window,
+  while NTNCellConfig gates the runtime push on the element set's source-epoch freshness
+  (`sourceEpochFresh` / `maxEpochAge`). During a `>maxEpochAge` upstream outage the two consumers of
+  `PropagatedStates` disagreed: pass prediction kept succeeding off the stale, drifting OMM so NTNSlice
+  reported the satellite available and steered traffic onto it, but NTNCellConfig then refused to push
+  its stale ephemeris to the gNB — a control-plane split that stranded traffic on an unconfigurable
+  path. `checkSatelliteAvailability` now demotes an active window whose satellite has a present-but-stale
+  propagated state (correlated by NORAD — `PassWindow` gains a `noradID` field), so both consumers share
+  one freshness contract; the `FailoverReady=SatelliteUnavailable` message cites the staleness.
+  Mutation-tested, including an end-to-end reconcile proving a fired terrestrial trigger does not fail
+  over to a stale satellite.
+
 - **Runtime satellite selection is now deterministic and fails closed instead of silently switching
   satellites.** `SatelliteEphemeris` propagated states inherited the upstream response order
   (`FilterOMMs` preserves it; no dedup, no sort), so with a multi-satellite ephemeris and no
@@ -342,6 +355,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrade notes
 
+- **A satellite whose element set is stale beyond `maxEpochAge` now holds NTNSlice on terrestrial**
+  instead of failing over to it — previously NTNSlice could steer traffic onto a satellite whose stale
+  ephemeris NTNCellConfig refused to push. No action needed; refresh the `SatelliteEphemeris` source to
+  restore satellite availability. `PassWindow` gains an optional `noradID` field (additive, backward
+  compatible; existing windows repopulate it on the next prediction).
 - **Runtime push now fails closed for a multi-satellite ephemeris with no `ephemerisNoradID`.** An
   existing `NTNCellConfig` on the runtime-push path that left `spec.ephemerisNoradID` unset while its
   referenced `SatelliteEphemeris` tracks more than one satellite will now hold with

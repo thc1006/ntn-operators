@@ -299,6 +299,13 @@ spec:
                         the pass in degrees (string, e.g., "72.5").
                       pattern: ^-?[0-9]+\.?[0-9]*$
                       type: string
+                    noradID:
+                      description: |-
+                        noradID is the satellite's NORAD catalog number — the canonical key that maps this window
+                        to its propagatedStates entry, so a consumer (NTNSlice) can gate pass availability on the
+                        backing element set's delivery freshness (same contract as the runtime push). 0 only for
+                        windows written before this field existed (freshness then treated as unverifiable).
+                      type: integer
                     satellite:
                       description: satellite is the name or NORAD ID of the satellite.
                       type: string

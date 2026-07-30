@@ -46,6 +46,7 @@ type GroundStation struct {
 // PassResult holds a predicted pass window.
 type PassResult struct {
 	Satellite     string
+	NoradID       int
 	GroundStation string
 	AOS           time.Time
 	LOS           time.Time
@@ -286,6 +287,7 @@ func predictSingle(
 		}
 		results = append(results, PassResult{
 			Satellite:     omm.ObjectName,
+			NoradID:       omm.NoradCatID,
 			GroundStation: gs.Name,
 			AOS:           aos,
 			LOS:           los,
