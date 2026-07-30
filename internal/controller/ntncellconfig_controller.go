@@ -49,6 +49,7 @@ import (
 
 	ntnv1alpha1 "github.com/thc1006/ntn-operators/api/v1alpha1"
 	ntnmetrics "github.com/thc1006/ntn-operators/pkg/metrics"
+	"github.com/thc1006/ntn-operators/pkg/netutil"
 	"github.com/thc1006/ntn-operators/pkg/provider"
 )
 
@@ -64,6 +65,11 @@ type NTNCellConfigReconciler struct {
 	Recorder                events.EventRecorder
 	Providers               map[string]provider.NTNProvider
 	MaxConcurrentReconciles int
+	// RemoteControlAllowedHosts gates the endpoint a CREDENTIALED remoteControl.tls push may target
+	// (#251 confused-deputy containment). Empty = permit-all (opt-in), so existing deployments are
+	// unaffected; when set, a credentialed push to a host not on the list is refused before the
+	// credential is sent. Plaintext pushes are never gated. Interim boundary — see ADR-0009.
+	RemoteControlAllowedHosts netutil.EndpointAllowlist
 }
 
 const (
@@ -761,6 +767,22 @@ func (r *NTNCellConfigReconciler) pushRuntimeEphemeris(
 			update.SatSwitch = spec.NTN.SatSwitchWithResync
 		}
 	}
+	// Confused-deputy containment (#251): when a credential is attached, the destination must be on the
+	// admin allow-list. Checked BEFORE the Secret is read, so a non-allowlisted endpoint is refused
+	// without touching the credential — no needless Secret read, and (unlike a post-resolve check) no
+	// "Secret is valid" oracle: the refusal is identical whether or not the Secret resolves. The endpoint
+	// is CR-author-controlled, so without this a principal who can write NTNCellConfig but not read the
+	// Secret could aim a labelled credential at an attacker host and exfiltrate it. Empty allow-list =
+	// opt-in (Check permits all); plaintext pushes (no rc.TLS) are never gated (nothing to exfiltrate).
+	// See ADR-0009. The synthetic https:// prefix lets EndpointAllowlist.Check parse the host:port
+	// endpoint (the CRD forbids a scheme in the field).
+	if rc := spec.Provider.RemoteControl; rc.TLS != nil {
+		if err := r.RemoteControlAllowedHosts.Check("https://" + rc.Endpoint); err != nil {
+			logf.FromContext(ctx).Error(err, "refusing to send a remoteControl.tls credential to an "+
+				"endpoint outside --remote-control-allowed-endpoint-hosts", "cell", cc.Name, "endpoint", rc.Endpoint)
+			return false, marker, newEphemerisPushError(ephemerisReasonRemoteControlConfig, errRemoteControlEndpointNotAllowed)
+		}
+	}
 	// Resolve opt-in transport security (wss:// + shared secret / mTLS) from the
 	// referenced Secret; nil TLSConfig keeps the plaintext ws:// behavior (N-12).
 	tlsConfig, authToken, tlsErr := r.resolveRemoteControlTLS(ctx, eph.Namespace, spec.Provider.RemoteControl)
@@ -841,6 +863,12 @@ var errRemoteControlCredentialInvalid = errors.New("not a usable remote-control 
 // on the CR condition/event: it would otherwise let a principal who can write the CR
 // but not read Secrets probe Secret existence and type (an oracle).
 var errRemoteControlCredentialUnavailable = errors.New("referenced remote-control credential is unavailable or not authorized")
+
+// errRemoteControlEndpointNotAllowed tags a credentialed push whose endpoint is outside the operator's
+// --remote-control-allowed-endpoint-hosts allow-list (#251). Unlike the credential-unavailable message
+// this is NOT a Secret oracle — the endpoint is CR-author-set and already known to the writer — so it
+// names the endpoint. It is deterministic (config), so it self-heals on a spec/flag change, not a retry.
+var errRemoteControlEndpointNotAllowed = errors.New("remoteControl.tls endpoint is not in the operator's remote-control allow-list")
 
 // resolveRemoteControlTLS builds the TLS config and bearer token for the runtime
 // push from the Secret referenced by remoteControl.tls. It reads the Secret from
