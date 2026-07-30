@@ -29,6 +29,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -115,6 +116,9 @@ func (r *GroundStationLifecycleReconciler) Reconcile(ctx context.Context, req ct
 	}
 
 	previousPhase := gs.Status.Phase
+	// Snapshot status before the health/firmware evaluation mutates it, so the terminal write
+	// can be skipped when this reconcile changed nothing (see Step 7).
+	oldStatus := gs.Status.DeepCopy()
 	requeueAfter := r.healthCheckInterval(gs)
 
 	// Step 2: Find matching Node.
@@ -168,9 +172,15 @@ func (r *GroundStationLifecycleReconciler) Reconcile(ctx context.Context, req ct
 		}).Set(val)
 	}
 
-	// Step 7: Update status.
-	if err := r.Status().Update(ctx, gs); err != nil {
-		return ctrl.Result{}, err
+	// Step 7: Update status — only when something changed, or an event is queued. A steady-state
+	// reconcile re-derives identical Phase + conditions, so an unconditional Update would rewrite
+	// byte-identical status and churn every watcher each requeue cycle (#204-G3; matches the
+	// NTNCellConfig #271 guard). A pending event forces the write so WO-20 emit-after-persist still
+	// holds (Step 8 announces only what was durably recorded).
+	if !equality.Semantic.DeepEqual(oldStatus, &gs.Status) || len(pending) > 0 {
+		if err := r.Status().Update(ctx, gs); err != nil {
+			return ctrl.Result{}, err
+		}
 	}
 
 	// Step 8: Emit queued events only after the status persisted (WO-20 / N-1): a
