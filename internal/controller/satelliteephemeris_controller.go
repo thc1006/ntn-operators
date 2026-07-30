@@ -1342,6 +1342,58 @@ func (r *SatelliteEphemerisReconciler) reportOrbitRegime(
 	return ""
 }
 
+// Pass-prediction failure reasons for the PassesPredicted=False condition. Kept stable and
+// low-cardinality so the message-insensitive episode gate (conditionEpisodeChanged) still emits a
+// fresh Warning when the ROOT CAUSE changes — an absent ground station later created with an invalid
+// latitude is a NEW episode, not a message-only churn. The varying detail stays in the message.
+const (
+	reasonPredictionFailed             = "PredictionFailed" // generic fallback (untagged / transient read)
+	reasonGroundStationNotFound        = "GroundStationNotFound"
+	reasonInvalidGroundStationLocation = "InvalidGroundStationLocation"
+	reasonInvalidPredictionConfig      = "InvalidPredictionConfig"
+	reasonPredictionComputationFailed  = "PredictionComputationFailed"
+)
+
+// predictionError tags a pass-prediction failure with the stable Reason its PassesPredicted=False
+// condition should carry, so the caller classifies without string-matching the message. Mirrors
+// ephemerisPushError. Unwrap keeps errors.Is working through the tag, so the caller's
+// context.Canceled/DeadlineExceeded short-circuit still fires before any classification.
+type predictionError struct {
+	reason string
+	err    error
+}
+
+func (e *predictionError) Error() string {
+	if e == nil || e.err == nil {
+		return ""
+	}
+	return e.err.Error()
+}
+
+func (e *predictionError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.err
+}
+
+func newPredictionError(reason string, err error) error {
+	if err == nil {
+		return nil
+	}
+	return &predictionError{reason: reason, err: err}
+}
+
+// predictionConditionReason extracts the tagged reason, defaulting to the generic
+// reasonPredictionFailed for an untagged error (e.g. a transient ground-station read).
+func predictionConditionReason(err error) string {
+	var pe *predictionError
+	if errors.As(err, &pe) && pe.reason != "" {
+		return pe.reason
+	}
+	return reasonPredictionFailed
+}
+
 // handlePassPrediction runs pass prediction (when configured) and returns the
 // post-persist event notes: passNote (Normal, success) and passFailNote (Warning,
 // failure), each non-empty only on a real PassesPredicted-condition transition, so
@@ -1367,17 +1419,20 @@ func (r *SatelliteEphemerisReconciler) handlePassPrediction(
 		}
 		logf.FromContext(ctx).Error(err, "pass prediction failed")
 		eph.Status.NextPassWindows = nil // clear stale pass data
-		// Gate on the failure EPISODE (Status/Reason/Generation, ignoring the varying
-		// error Message) and defer the event to after the status persists (like
-		// reportOrbitRegime), so a rolled-back status update does not fire — and a
-		// message-only change does not re-fire — a PredictionFailed event.
+		// Classify the root cause into a stable Reason (predictPasses tags it) so a DIFFERENT
+		// cause is a new episode even when the message-insensitive gate ignores the message —
+		// e.g. an absent ground station later created with an invalid latitude. Gate on the
+		// failure EPISODE (Status/Reason/Generation) and defer the event to after the status
+		// persists (like reportOrbitRegime), so a rolled-back status update does not fire — and a
+		// same-reason message-only change does not re-fire — a failure event.
+		failReason := predictionConditionReason(err)
 		failEpisode := conditionEpisodeChanged(
 			meta.FindStatusCondition(eph.Status.Conditions, ntnv1alpha1.ConditionPassesPredicted),
-			metav1.ConditionFalse, "PredictionFailed", eph.Generation)
+			metav1.ConditionFalse, failReason, eph.Generation)
 		meta.SetStatusCondition(&eph.Status.Conditions, metav1.Condition{
 			Type:               ntnv1alpha1.ConditionPassesPredicted,
 			Status:             metav1.ConditionFalse,
-			Reason:             "PredictionFailed",
+			Reason:             failReason,
 			Message:            err.Error(),
 			ObservedGeneration: eph.Generation,
 		})
@@ -1408,7 +1463,12 @@ func (r *SatelliteEphemerisReconciler) predictPasses(
 	for _, gsName := range pp.GroundStations {
 		gs := &ntnv1alpha1.GroundStationLifecycle{}
 		if err := r.Get(ctx, client.ObjectKey{Namespace: eph.Namespace, Name: gsName}, gs); err != nil {
-			return "", fmt.Errorf("ground station %q not found: %w", gsName, err)
+			// A genuine absence is a distinct, stable root cause; any other read error (transient
+			// API failure, or a context error propagated by the caller) keeps the generic reason.
+			if apierrors.IsNotFound(err) {
+				return "", newPredictionError(reasonGroundStationNotFound, fmt.Errorf("ground station %q not found", gsName))
+			}
+			return "", newPredictionError(reasonPredictionFailed, fmt.Errorf("getting ground station %q: %w", gsName, err))
 		}
 		// A ground station under deletion (finalizer still holding the object) is being torn down — its
 		// contact windows can no longer be relied on, so exclude it from the sweep exactly as if it were
@@ -1420,17 +1480,17 @@ func (r *SatelliteEphemerisReconciler) predictPasses(
 		}
 		lat, err := ephemeris.ParseGeoCoord(gs.Spec.Deployment.Location.Lat)
 		if err != nil {
-			return "", fmt.Errorf("invalid latitude for %q: %w", gsName, err)
+			return "", newPredictionError(reasonInvalidGroundStationLocation, fmt.Errorf("invalid latitude for %q: %w", gsName, err))
 		}
 		lon, err := ephemeris.ParseGeoCoord(gs.Spec.Deployment.Location.Lon)
 		if err != nil {
-			return "", fmt.Errorf("invalid longitude for %q: %w", gsName, err)
+			return "", newPredictionError(reasonInvalidGroundStationLocation, fmt.Errorf("invalid longitude for %q: %w", gsName, err))
 		}
 		alt := 0.0
 		if gs.Spec.Deployment.Location.Alt != "" {
 			alt, err = ephemeris.ParseGeoCoord(gs.Spec.Deployment.Location.Alt)
 			if err != nil {
-				return "", fmt.Errorf("invalid altitude for %q: %w", gsName, err)
+				return "", newPredictionError(reasonInvalidGroundStationLocation, fmt.Errorf("invalid altitude for %q: %w", gsName, err))
 			}
 		}
 		stations = append(stations, ephemeris.GroundStation{
@@ -1444,7 +1504,7 @@ func (r *SatelliteEphemerisReconciler) predictPasses(
 	// Parse minElevation.
 	minEl, err := ephemeris.ParseElevation(pp.MinElevation)
 	if err != nil {
-		return "", fmt.Errorf("invalid minElevation: %w", err)
+		return "", newPredictionError(reasonInvalidPredictionConfig, fmt.Errorf("invalid minElevation: %w", err))
 	}
 
 	// Resolve the effective horizon (default when unset, clamped to maxPassHorizon otherwise):
@@ -1453,7 +1513,7 @@ func (r *SatelliteEphemerisReconciler) predictPasses(
 	// ratcheting-safe; MaxPassWindows already caps the stored output.
 	horizon, clamped, err := effectivePassHorizon(pp.Horizon.Duration)
 	if err != nil {
-		return "", err
+		return "", newPredictionError(reasonInvalidPredictionConfig, err)
 	}
 
 	// Build NORAD filter from SatelliteSelector.
@@ -1467,7 +1527,7 @@ func (r *SatelliteEphemerisReconciler) predictPasses(
 	// effectiveInterval (2–24h) in the past, which would start the window stale (#200-C3).
 	passes, err := ephemeris.PredictPasses(ctx, fetchResult.OMMs, stations, minEl, horizon, noradFilter, now)
 	if err != nil {
-		return "", fmt.Errorf("computing passes: %w", err)
+		return "", newPredictionError(reasonPredictionComputationFailed, fmt.Errorf("computing passes: %w", err))
 	}
 
 	// Convert to CRD PassWindow format.

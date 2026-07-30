@@ -912,7 +912,7 @@ var _ = Describe("SatelliteEphemeris Controller", func() {
 		})
 		AfterEach(func() { deleteResource() })
 
-		It("should set PredictionFailed condition but still update fetch status", func() {
+		It("should set GroundStationNotFound condition but still update fetch status", func() {
 			mock := &mockGPFetcher{
 				result: ephemeris.GPFetchResult{
 					OMMs:           []sgp4.OMM{testISSOMM()},
@@ -938,7 +938,7 @@ var _ = Describe("SatelliteEphemeris Controller", func() {
 			predCond := meta.FindStatusCondition(updated.Status.Conditions, ntnv1alpha1.ConditionPassesPredicted)
 			Expect(predCond).NotTo(BeNil())
 			Expect(predCond.Status).To(Equal(metav1.ConditionFalse))
-			Expect(predCond.Reason).To(Equal("PredictionFailed"))
+			Expect(predCond.Reason).To(Equal("GroundStationNotFound"))
 		})
 	})
 
