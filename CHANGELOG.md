@@ -39,6 +39,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `MaxLength=64` as a defense-in-depth apiserver gate; and the canonical satellite identity is the NORAD ID
   (the name is a display label only). The rune-safe truncation also fixes a latent byte truncation that
   could split a multibyte rune into a U+FFFD replacement char. Mutation-tested with a 1 MB `OBJECT_NAME`.
+- **A `wss://`→plaintext `http://` handshake redirect can no longer leak the shared secret.** A
   gNB/proxy `302` from `wss://` to a plaintext `http://` on the same host could
   otherwise make the client re-send the `Authorization: Bearer` shared secret over
   cleartext (`coder/websocket` follows redirects by default, and Go preserves the
@@ -47,7 +48,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`remoteControl.tls` Secret handling hardened (partial confused-deputy mitigation).**
   The operator reads the referenced Secret with its own cluster-wide `secrets get`, on
   behalf of whoever authored the `NTNCellConfig`; a principal who can write the CR (but
-  not read Secrets) could otherwise point the operator at an arbitrary namespace Secret
+  not read Secrets) could otherwise point the operator at an arbitrary Secret in the same namespace
   and have its `token` shipped to a CR-controlled endpoint. Two gates raise the bar: the
   Secret's **owner** must label it `ntn.operators.dev/remote-control-credential: "true"`,
   and a `kubernetes.io/service-account-token` / `bootstrap.kubernetes.io/token` Secret is
@@ -423,8 +424,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Breaking (`remoteControl.tls`):** an existing remote-control credential Secret must
   gain the label `ntn.operators.dev/remote-control-credential: "true"` (set by the
   Secret owner), or the runtime push reports `EphemerisPushed=False` with reason
-  `RemoteControlConfigInvalid` (a permanent, non-tight-requeuing error that clears when
-  the Secret is fixed). Add the label before upgrading. Note the opt-in is
+  `RemoteControlCredentialUnavailable`. Because the referenced Secret is not watched, the push
+  retries on a bounded ~5-minute self-heal poll (not a tight per-minute loop), so after
+  you add the label the cell recovers within ~5 minutes on its own — no spec edit or
+  operator restart needed. Add the label before upgrading. Note the opt-in is
   namespace-scoped; a per-CR grant is a future hardening.
 - **Runtime push is fail-closed for one reconcile cycle after upgrade.** Existing
   `SatelliteEphemeris` objects have no `status.propagatedStatesInputHash` until the
