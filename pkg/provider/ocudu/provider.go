@@ -244,10 +244,12 @@ func (p *Provider) ApplyCellConfig(
 
 // GetCellStatus derives status by reading the ConfigMap in the given namespace.
 func (p *Provider) GetCellStatus(
-	ctx context.Context, crName, namespace string,
+	ctx context.Context, owner *ntnv1alpha1.NTNCellConfig,
 ) (*ntnv1alpha1.NTNCellConfigStatus, error) {
 	status := &ntnv1alpha1.NTNCellConfigStatus{}
 
+	crName := owner.GetName()
+	namespace := owner.GetNamespace()
 	if namespace == "" {
 		return status, fmt.Errorf("namespace must not be empty")
 	}
@@ -259,6 +261,13 @@ func (p *Provider) GetCellStatus(
 			return status, nil
 		}
 		return status, fmt.Errorf("reading ConfigMap %s/%s: %w", namespace, ConfigMapNameFor(crName), err)
+	}
+
+	// Verify ownership before reporting status: a same-name ConfigMap the operator does not control
+	// (e.g. a foreign object created between ApplyCellConfig and this read-back) must NOT be reported as
+	// the CR's applied config. Mirrors Cleanup / PushEphemerisUpdate.
+	if !metav1.IsControlledBy(cm, owner) {
+		return status, fmt.Errorf("%w: %s/%s", provider.ErrConfigMapNotOwned, namespace, ConfigMapNameFor(crName))
 	}
 
 	status.ConfigMapRef = cm.Name

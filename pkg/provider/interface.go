@@ -118,8 +118,11 @@ type NTNProvider interface {
 		ctx context.Context, owner *ntnv1alpha1.NTNCellConfig, spec *ntnv1alpha1.NTNCellConfigSpec, scheme *runtime.Scheme,
 	) error
 
-	// GetCellStatus returns the current applied configuration status.
-	GetCellStatus(ctx context.Context, crName, namespace string) (*ntnv1alpha1.NTNCellConfigStatus, error)
+	// GetCellStatus returns the applied configuration status for owner's ConfigMap. It verifies the
+	// ConfigMap is controller-owned by owner (metav1.IsControlledBy) before trusting it, so a same-name
+	// foreign object squatting the name — e.g. one created between ApplyCellConfig and this read-back —
+	// is never reported as the CR's applied config (ErrConfigMapNotOwned).
+	GetCellStatus(ctx context.Context, owner *ntnv1alpha1.NTNCellConfig) (*ntnv1alpha1.NTNCellConfigStatus, error)
 
 	// PushEphemerisUpdate pushes fresh ephemeris data to the backend by rewriting
 	// the bootstrap ConfigMap (the gNB must reload). Kept as the baseline path. It

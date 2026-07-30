@@ -323,7 +323,7 @@ func TestGetCellStatus_ReturnsAppliedConfig(t *testing.T) {
 		t.Fatalf("ApplyCellConfig: %v", err)
 	}
 
-	status, err := p.GetCellStatus(ctx, "test-cr", "ntn-system")
+	status, err := p.GetCellStatus(ctx, ownerFor("test-cr"))
 	if err != nil {
 		t.Fatalf("GetCellStatus error: %v", err)
 	}
@@ -339,7 +339,7 @@ func TestGetCellStatus_NoConfigMap(t *testing.T) {
 	p := newTestProvider(t)
 	ctx := context.Background()
 
-	status, err := p.GetCellStatus(ctx, "test-cr", "ntn-system")
+	status, err := p.GetCellStatus(ctx, ownerFor("test-cr"))
 	if err != nil {
 		t.Fatalf("GetCellStatus should not error: %v", err)
 	}
@@ -415,9 +415,12 @@ func TestConfigMapNameFor_Short(t *testing.T) {
 }
 
 func TestGetCellStatus_MissingGeoNtn(t *testing.T) {
-	// ConfigMap exists but missing geo_ntn.yml key.
-	scheme := runtime.NewScheme()
-	_ = corev1.AddToScheme(scheme)
+	// ConfigMap exists AND is owned by the CR, but is missing the geo_ntn.yml key — so the missing-key
+	// error (not the ownership check) is what fires.
+	scheme := ownerScheme(t)
+	owner := &ntnv1alpha1.NTNCellConfig{
+		ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "ns", UID: types.UID("uid-test")},
+	}
 	cm := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      ConfigMapNameFor("test"),
@@ -428,11 +431,44 @@ func TestGetCellStatus_MissingGeoNtn(t *testing.T) {
 		},
 		Data: map[string]string{}, // missing geo_ntn.yml
 	}
+	if err := controllerutil.SetControllerReference(owner, cm, scheme); err != nil {
+		t.Fatalf("SetControllerReference: %v", err)
+	}
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(cm).Build()
 	p := &Provider{client: c}
-	_, err := p.GetCellStatus(context.Background(), "test", "ns")
+	_, err := p.GetCellStatus(context.Background(), owner)
 	if err == nil {
 		t.Fatal("expected error for missing geo_ntn.yml")
+	}
+}
+
+// TestGetCellStatus_ForeignConfigMapNotReported pins the ownership check: a same-name ConfigMap the CR
+// does NOT control — e.g. a foreign object that replaced the CR's ConfigMap between ApplyCellConfig and
+// this read-back — must not be reported as the CR's applied config. It returns ErrConfigMapNotOwned and
+// leaves status.ConfigMapRef empty, so the caller does not set ConfigApplied=True off a foreign object.
+func TestGetCellStatus_ForeignConfigMapNotReported(t *testing.T) {
+	scheme := ownerScheme(t)
+	owner := ownerFor("test-cr") // UID uid-test-cr
+	// A same-name ConfigMap controlled by a DIFFERENT CR.
+	foreignOwner := &ntnv1alpha1.NTNCellConfig{
+		ObjectMeta: metav1.ObjectMeta{Name: "intruder", Namespace: "ntn-system", UID: types.UID("uid-intruder")},
+	}
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: ConfigMapNameFor("test-cr"), Namespace: "ntn-system"},
+		Data:       map[string]string{configDataKey: "who: foreign"},
+	}
+	if err := controllerutil.SetControllerReference(foreignOwner, cm, scheme); err != nil {
+		t.Fatalf("SetControllerReference: %v", err)
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(cm).Build()
+	p := &Provider{client: c}
+
+	status, err := p.GetCellStatus(context.Background(), owner)
+	if !errors.Is(err, provider.ErrConfigMapNotOwned) {
+		t.Fatalf("a foreign same-name ConfigMap must return ErrConfigMapNotOwned, got %v", err)
+	}
+	if status.ConfigMapRef != "" {
+		t.Errorf("a foreign ConfigMap must not populate status.ConfigMapRef, got %q", status.ConfigMapRef)
 	}
 }
 
