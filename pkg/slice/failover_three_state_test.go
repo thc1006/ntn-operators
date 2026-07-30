@@ -93,7 +93,7 @@ func TestAntiFlap_DeadBandDoesNotConsumeSwitchbackDelay(t *testing.T) {
 
 	// Sit in the dead-band longer than the switchback delay. The recovery clock must
 	// stay unset — the dead-band is not recovery.
-	res, st = EvaluateFailoverWithAntiFlap(context.Background(), PathSatellite, trg, deadBand,
+	res, st = EvaluateFailoverWithAntiFlap(context.Background(), PathSatellite, trg, deadBand, time.Time{},
 		true, 60*time.Second, now, margin, AntiFlapConfig{}, st)
 	if res.Decision != DecisionStay {
 		t.Fatalf("dead-band must stay on satellite, got %s: %s", res.Decision, res.Reason)
@@ -101,7 +101,7 @@ func TestAntiFlap_DeadBandDoesNotConsumeSwitchbackDelay(t *testing.T) {
 	if !st.RecoveryObservedAt.IsZero() {
 		t.Fatal("the recovery clock must NOT start in the dead-band (H3)")
 	}
-	res, st = EvaluateFailoverWithAntiFlap(context.Background(), PathSatellite, trg, deadBand,
+	res, st = EvaluateFailoverWithAntiFlap(context.Background(), PathSatellite, trg, deadBand, time.Time{},
 		true, 60*time.Second, now.Add(120*time.Second), margin, AntiFlapConfig{}, st)
 	if !st.RecoveryObservedAt.IsZero() {
 		t.Fatal("still in dead-band 120s later: the recovery clock must remain unset (H3)")
@@ -109,7 +109,7 @@ func TestAntiFlap_DeadBandDoesNotConsumeSwitchbackDelay(t *testing.T) {
 
 	// Cross the margin. The clock starts NOW, so the 60s delay is not yet elapsed → hold.
 	tCross := now.Add(121 * time.Second)
-	res, st = EvaluateFailoverWithAntiFlap(context.Background(), PathSatellite, trg, recovered,
+	res, st = EvaluateFailoverWithAntiFlap(context.Background(), PathSatellite, trg, recovered, time.Time{},
 		true, 60*time.Second, tCross, margin, AntiFlapConfig{}, st)
 	if res.Decision != DecisionStay {
 		t.Fatalf("the switchback delay must be measured from the past-hysteresis recovery, not the "+
@@ -120,7 +120,7 @@ func TestAntiFlap_DeadBandDoesNotConsumeSwitchbackDelay(t *testing.T) {
 	}
 
 	// After a full switchback delay of continuous past-hysteresis recovery → switchback.
-	res, _ = EvaluateFailoverWithAntiFlap(context.Background(), PathSatellite, trg, recovered,
+	res, _ = EvaluateFailoverWithAntiFlap(context.Background(), PathSatellite, trg, recovered, time.Time{},
 		true, 60*time.Second, tCross.Add(60*time.Second), margin, AntiFlapConfig{}, st)
 	if res.Decision != DecisionSwitchback {
 		t.Fatalf("after switchbackDelay of continuous past-hysteresis recovery, expected Switchback, got %s: %s",
@@ -237,7 +237,7 @@ func TestAntiFlap_InitToTerrestrial_DoesNotStartDwell(t *testing.T) {
 	cfg := AntiFlapConfig{MinTerrestrialDwell: 90 * time.Second}
 	healthy := Metrics{RSRP: -90, LatencyMs: 20, PacketLossPercent: 0.1}
 
-	res, st := EvaluateFailoverWithAntiFlap(context.Background(), PathUnavailable, triggers, healthy,
+	res, st := EvaluateFailoverWithAntiFlap(context.Background(), PathUnavailable, triggers, healthy, time.Time{},
 		true, 60*time.Second, now, 0, cfg, AntiFlapState{})
 	if res.Decision != DecisionSwitchback {
 		t.Fatalf("init from unavailable → terrestrial expected Switchback, got %s: %s", res.Decision, res.Reason)
@@ -248,7 +248,7 @@ func TestAntiFlap_InitToTerrestrial_DoesNotStartDwell(t *testing.T) {
 
 	// A real degradation immediately after must be free to fail over, not dwell-blocked.
 	degraded := Metrics{RSRP: -130, LatencyMs: 20, PacketLossPercent: 0.1}
-	res2, _ := EvaluateFailoverWithAntiFlap(context.Background(), PathTerrestrial, triggers, degraded,
+	res2, _ := EvaluateFailoverWithAntiFlap(context.Background(), PathTerrestrial, triggers, degraded, time.Time{},
 		true, 60*time.Second, now.Add(time.Second), 0, cfg, st)
 	if res2.Decision != DecisionFailover {
 		t.Fatalf("a real degradation after init must fail over (not be dwell-blocked), got %s: %s",

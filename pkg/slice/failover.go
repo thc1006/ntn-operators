@@ -639,6 +639,13 @@ type AntiFlapState struct {
 	// available satellite (a quality-driven, ping-pong-prone hand-back — NOT a
 	// pass-ended forced switchback). Min-dwell is measured from here.
 	LastSwitchback time.Time
+	// LastCountedObservedAt is the source timestamp (Result.ObservedAt) of the most recent
+	// observation that advanced the anti-flap state. A degraded/recovered sample updates the
+	// counters only when its ObservedAt is newer than this, so a stale-cache replay or a
+	// stalled-scrape duplicate (same or older timestamp) HOLDS the state instead of falsely
+	// confirming it — making confirmationSamples count DISTINCT observations, not reconcile
+	// calls (#203-M3). Zero when no timestamped observation has been counted yet.
+	LastCountedObservedAt time.Time
 }
 
 // terrestrialDegraded reports whether any valid, live (non-inert) trigger fires
@@ -716,6 +723,7 @@ func EvaluateFailoverWithAntiFlap(
 	currentPath PathType,
 	triggers []string,
 	metrics Metrics,
+	observedAt time.Time,
 	satelliteAvailable bool,
 	switchbackDelay time.Duration,
 	now time.Time,
@@ -729,21 +737,30 @@ func EvaluateFailoverWithAntiFlap(
 	//    metric). The recovery clock advances ONLY while confirmed-recovered, so the
 	//    switchback delay measures continuous PAST-hysteresis recovery and never counts
 	//    dead-band or unknown-metric time as recovery (H3/C1).
-	switch {
-	case terrestrialDegraded(triggers, metrics):
-		st.ConsecutiveDegraded++
-		st.RecoveryObservedAt = time.Time{} // re-degraded → reset the switchback clock
-	case terrestrialConfirmedRecovered(triggers, metrics, hysteresisMargin):
-		st.ConsecutiveDegraded = 0
-		if st.RecoveryObservedAt.IsZero() {
-			st.RecoveryObservedAt = now // a fresh continuous past-hysteresis streak begins
+	// Only a genuinely NEW observation advances the confirmation/recovery clocks. A replayed
+	// stale-cache value or a stalled-scrape duplicate (same or older source timestamp) carries no
+	// new information, so it HOLDS the counters: otherwise confirmationSamples would count reconcile
+	// calls, not distinct observations, and a metrics-source outage could replay one degraded sample
+	// N times into a failover (#203-M3). A zero ObservedAt (a reader that cannot supply a source
+	// timestamp) falls back to counting every call, preserving the prior behavior.
+	if observedAt.IsZero() || observedAt.After(st.LastCountedObservedAt) {
+		switch {
+		case terrestrialDegraded(triggers, metrics):
+			st.ConsecutiveDegraded++
+			st.RecoveryObservedAt = time.Time{} // re-degraded → reset the switchback clock
+		case terrestrialConfirmedRecovered(triggers, metrics, hysteresisMargin):
+			st.ConsecutiveDegraded = 0
+			if st.RecoveryObservedAt.IsZero() {
+				st.RecoveryObservedAt = now // a fresh continuous past-hysteresis streak begins
+			}
+		default:
+			// Dead-band or unknown metric: neither degraded nor confirmed recovered. Break
+			// the recovery streak so a later confirmed recovery must re-accumulate the full
+			// switchback delay. (The evaluator independently holds on satellite here.)
+			st.ConsecutiveDegraded = 0
+			st.RecoveryObservedAt = time.Time{}
 		}
-	default:
-		// Dead-band or unknown metric: neither degraded nor confirmed recovered. Break
-		// the recovery streak so a later confirmed recovery must re-accumulate the full
-		// switchback delay. (The evaluator independently holds on satellite here.)
-		st.ConsecutiveDegraded = 0
-		st.RecoveryObservedAt = time.Time{}
+		st.LastCountedObservedAt = observedAt
 	}
 
 	// 2. Run the base engine, measuring the switchback delay from the recovery

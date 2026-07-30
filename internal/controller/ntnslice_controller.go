@@ -299,7 +299,7 @@ func (r *NTNSliceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	// write persists (WO-20 / N-1), so a rolled-back Status().Update never announces
 	// (then re-announces on retry) a transition that did not become durable.
 	var pending []deferredEvent
-	metrics, qualityReliable := r.readPathQuality(ctx, ns, now, &pending)
+	metrics, observedAt, qualityReliable := r.readPathQuality(ctx, ns, now, &pending)
 
 	// Step 3: Check satellite availability via SatelliteEphemeris. satelliteKnown is
 	// false on a transient ephemeris read error — availability is unknown and the
@@ -422,6 +422,7 @@ func (r *NTNSliceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 			currentPath,
 			ns.Spec.FailoverPolicy.Triggers,
 			metrics,
+			observedAt,
 			satelliteAvailable,
 			ns.Spec.FailoverPolicy.SwitchbackDelay.Duration,
 			now,
@@ -644,7 +645,7 @@ func (r *NTNSliceReconciler) applyBillingStatus(ns *ntnv1alpha1.NTNSlice, active
 // the degraded conditions and returns qualityReliable=false so the caller fails
 // static (findings.md B-4/I-8). It mutates conditions on ns in memory; the caller
 // persists them once at the end of the reconcile.
-func (r *NTNSliceReconciler) readPathQuality(ctx context.Context, ns *ntnv1alpha1.NTNSlice, now time.Time, pending *[]deferredEvent) (slice.Metrics, bool) {
+func (r *NTNSliceReconciler) readPathQuality(ctx context.Context, ns *ntnv1alpha1.NTNSlice, now time.Time, pending *[]deferredEvent) (slice.Metrics, time.Time, bool) {
 	log := logf.FromContext(ctx)
 
 	reader, err := r.readerProvider().For(ns)
@@ -657,7 +658,7 @@ func (r *NTNSliceReconciler) readPathQuality(ctx context.Context, ns *ntnv1alpha
 		}
 		log.Error(err, "failed to build metrics reader; failing static", "reason", reason)
 		r.setMetricsDegraded(ns, reason, err.Error())
-		return slice.Metrics{}, false
+		return slice.Metrics{}, time.Time{}, false
 	}
 	readResult, err := reader.Read(ctx, ns)
 	if err != nil {
@@ -667,7 +668,7 @@ func (r *NTNSliceReconciler) readPathQuality(ctx context.Context, ns *ntnv1alpha
 		}
 		log.Info("metrics unavailable; failing static (holding current path)", "reason", reason, "err", err.Error())
 		r.setMetricsDegraded(ns, reason, err.Error())
-		return slice.Metrics{}, false
+		return slice.Metrics{}, time.Time{}, false
 	}
 
 	// Fresh read: record freshness. The stale Event is emitted only on the
@@ -686,7 +687,7 @@ func (r *NTNSliceReconciler) readPathQuality(ctx context.Context, ns *ntnv1alpha
 			ObservedGeneration: ns.Generation,
 		})
 		log.V(2).Info("metrics read", "rsrp", readResult.Metrics.RSRP, "latencyMs", readResult.Metrics.LatencyMs, "packetLossPercent", readResult.Metrics.PacketLossPercent, "stale", false)
-		return readResult.Metrics, true
+		return readResult.Metrics, readResult.ObservedAt, true
 	}
 
 	age := now.Sub(readResult.LastFreshAt)
@@ -705,7 +706,7 @@ func (r *NTNSliceReconciler) readPathQuality(ctx context.Context, ns *ntnv1alpha
 	if age <= metricsMaxStaleness {
 		// Stale but within the freshness bound — still usable for a decision.
 		log.V(2).Info("metrics read", "rsrp", readResult.Metrics.RSRP, "latencyMs", readResult.Metrics.LatencyMs, "packetLossPercent", readResult.Metrics.PacketLossPercent, "stale", true)
-		return readResult.Metrics, true
+		return readResult.Metrics, readResult.ObservedAt, true
 	}
 
 	// Too stale to drive a switch → fail static. Surface it like the other
@@ -720,7 +721,7 @@ func (r *NTNSliceReconciler) readPathQuality(ctx context.Context, ns *ntnv1alpha
 		Message:            fmt.Sprintf("Metrics stale beyond %s; quality-driven failover suspended (fail static)", metricsMaxStaleness),
 		ObservedGeneration: ns.Generation,
 	})
-	return slice.Metrics{}, false
+	return slice.Metrics{}, time.Time{}, false
 }
 
 // setMetricsDegraded records that path-quality metrics are unusable for a switch

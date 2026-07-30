@@ -123,6 +123,7 @@ func (r *prometheusReader) Read(ctx context.Context, ns *ntnv1alpha1.NTNSlice) (
 		{r.queries.LatencyMs, func(v float64) { m.LatencyMs = v }, func() { m.LatencyMissing = false }},
 		{r.queries.PacketLossPercent, func(v float64) { m.PacketLossPercent = v }, func() { m.PacketLossMissing = false }},
 	}
+	var observedAt time.Time
 	for _, f := range fields {
 		if f.query == "" {
 			continue
@@ -131,15 +132,21 @@ func (r *prometheusReader) Read(ctx context.Context, ns *ntnv1alpha1.NTNSlice) (
 		// fetch, not the whole Read. A slow query burning the whole budget
 		// must not starve the other metrics.
 		qctx, cancel := context.WithTimeout(ctx, r.timeout)
-		v, err := r.fetch(qctx, f.query)
+		v, ts, err := r.fetch(qctx, f.query)
 		cancel()
 		if err != nil {
 			return Result{}, err
 		}
 		f.set(v)
 		f.present() // real value obtained → the field is present (I-10)
+		// The observation instant is the freshest per-metric sample time: it advances only
+		// when the source produced a new scrape for at least one queried metric, so a stalled
+		// scrape (same samples re-returned) leaves it unchanged.
+		if ts.After(observedAt) {
+			observedAt = ts
+		}
 	}
-	return Result{Metrics: m}, nil
+	return Result{Metrics: m, ObservedAt: observedAt}, nil
 }
 
 // fetch issues a single instant query, extracts a finite float64, and
@@ -148,7 +155,7 @@ func (r *prometheusReader) Read(ctx context.Context, ns *ntnv1alpha1.NTNSlice) (
 // on every non-success path. Empty vectors and non-finite values surface
 // as ErrNoMetrics so the caller sees a uniform "this metric is
 // unobservable" signal.
-func (r *prometheusReader) fetch(ctx context.Context, q string) (result float64, err error) {
+func (r *prometheusReader) fetch(ctx context.Context, q string) (result float64, observedAt time.Time, err error) {
 	start := time.Now()
 	var reason string
 	defer func() {
@@ -168,21 +175,23 @@ func (r *prometheusReader) fetch(ctx context.Context, q string) (result float64,
 	v, qerr := r.client.Query(ctx, q, r.now())
 	if qerr != nil {
 		reason = reasonQueryError
-		return 0, fmt.Errorf("prometheusReader: query %q: %w", q, qerr)
+		return 0, time.Time{}, fmt.Errorf("prometheusReader: query %q: %w", q, qerr)
 	}
 	switch value := v.(type) {
 	case *model.Scalar:
 		f := float64(value.Value)
 		if math.IsNaN(f) || math.IsInf(f, 0) {
 			reason = reasonNonFinite
-			return 0, fmt.Errorf("prometheusReader: query %q non-finite (%v): %w", q, f, ErrNoMetrics)
+			return 0, time.Time{}, fmt.Errorf("prometheusReader: query %q non-finite (%v): %w", q, f, ErrNoMetrics)
 		}
-		return f, nil
+		// value.Timestamp is the SOURCE sample time (the query evaluation instant for a
+		// scalar), returned so the anti-flap engine can tell a new observation from a replay.
+		return f, value.Timestamp.Time(), nil
 	case model.Vector:
 		switch len(value) {
 		case 0:
 			reason = reasonEmptyVector
-			return 0, fmt.Errorf("prometheusReader: query %q empty vector: %w", q, ErrNoMetrics)
+			return 0, time.Time{}, fmt.Errorf("prometheusReader: query %q empty vector: %w", q, ErrNoMetrics)
 		case 1:
 			// fall through to finite check below
 		default:
@@ -191,18 +200,20 @@ func (r *prometheusReader) fetch(ctx context.Context, q string) (result float64,
 			// user to reduce it with avg() / max() / a more specific
 			// selector is safer than picking value[0] nondeterministically.
 			reason = reasonAmbiguousVector
-			return 0, fmt.Errorf(
+			return 0, time.Time{}, fmt.Errorf(
 				"prometheusReader: query %q returned %d samples, expected exactly one: %w",
 				q, len(value), ErrNoMetrics)
 		}
 		f := float64(value[0].Value)
 		if math.IsNaN(f) || math.IsInf(f, 0) {
 			reason = reasonNonFinite
-			return 0, fmt.Errorf("prometheusReader: query %q non-finite (%v): %w", q, f, ErrNoMetrics)
+			return 0, time.Time{}, fmt.Errorf("prometheusReader: query %q non-finite (%v): %w", q, f, ErrNoMetrics)
 		}
-		return f, nil
+		// value[0].Timestamp is the source scrape time of the selected sample — the identity
+		// of THIS observation, which a stalled scrape or a stale-cache replay leaves unchanged.
+		return f, value[0].Timestamp.Time(), nil
 	default:
 		reason = reasonUnsupportedType
-		return 0, fmt.Errorf("prometheusReader: query %q unsupported result type %T: %w", q, v, ErrNoMetrics)
+		return 0, time.Time{}, fmt.Errorf("prometheusReader: query %q unsupported result type %T: %w", q, v, ErrNoMetrics)
 	}
 }
