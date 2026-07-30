@@ -27,6 +27,7 @@ import (
 	"net"
 	"time"
 
+	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -198,6 +199,12 @@ func (r *NTNCellConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	if err := r.Get(ctx, req.NamespacedName, cc); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
+
+	// Snapshot the persisted status so the terminal write below can be skipped when this reconcile
+	// leaves it byte-for-byte unchanged (e.g. an ephemeris-watch fan-out that finds the config
+	// already applied and the marker fresh). Avoids a no-op status update on the hot path
+	// (producer-side churn, #188).
+	oldStatus := cc.Status.DeepCopy()
 
 	// Step 2: Look up provider from registry (may be nil).
 	prov := r.Providers[cc.Spec.Provider.Type]
@@ -420,8 +427,15 @@ func (r *NTNCellConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		}).Set(1)
 	}
 
-	if err := r.Status().Update(ctx, cc); err != nil {
-		return ctrl.Result{}, err
+	// Skip the write when this reconcile did not change the status (an ephemeris-watch fan-out or a
+	// periodic requeue that found nothing to do): a byte-identical Status().Update is producer churn
+	// the API server, admission and the watch stream still process. The events below stay
+	// episode-gated, so they self-limit independently of whether the write happened, and the state
+	// they describe is already persisted.
+	if !equality.Semantic.DeepEqual(oldStatus, &cc.Status) {
+		if err := r.Status().Update(ctx, cc); err != nil {
+			return ctrl.Result{}, err
+		}
 	}
 
 	if configApplyChanged {

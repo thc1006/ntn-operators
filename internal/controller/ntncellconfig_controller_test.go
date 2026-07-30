@@ -34,6 +34,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
@@ -550,6 +551,36 @@ var _ = Describe("NTNCellConfig Controller", func() {
 			Expect(mock.EphemerisCalls).To(Equal(1))
 		})
 
+		It("should not re-write status on a steady no-op reconcile (#188 producer churn)", func() {
+			createReferencedEphemeris()
+			createCellConfig()
+
+			// Count Status().Update REQUESTS rather than checking resourceVersion: the API server
+			// short-circuits a byte-identical status write (no version bump), so resourceVersion
+			// cannot see the redundant request the controller still sends through API handling,
+			// validation and admission. Wrap the envtest client to count the calls the reconciler makes.
+			statusUpdates := 0
+			reconciler := &NTNCellConfigReconciler{
+				Client:    &countingStatusClient{Client: k8sClient, statusUpdates: &statusUpdates},
+				Scheme:    k8sClient.Scheme(),
+				Recorder:  events.NewFakeRecorder(10),
+				Providers: map[string]provider.NTNProvider{"ocudu": &provider.MockProvider{}},
+			}
+
+			// Drive the config to steady state (applied + pushed, then settled).
+			for range 3 {
+				_, err := reconciler.Reconcile(context.Background(), reconcile.Request{NamespacedName: cellNN})
+				Expect(err).NotTo(HaveOccurred())
+			}
+
+			// A further reconcile that changes nothing must issue no status write request.
+			statusUpdates = 0
+			result, err := reconciler.Reconcile(context.Background(), reconcile.Request{NamespacedName: cellNN})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(Equal(5 * time.Minute))
+			Expect(statusUpdates).To(Equal(0), "a steady no-op reconcile must not issue a Status().Update request")
+		})
+
 		It("should keep ConfigApplied true and set EphemerisPushed=false when push fails", func() {
 			createReferencedEphemeris()
 			createCellConfig()
@@ -839,3 +870,25 @@ var _ = Describe("NTNCellConfig Controller", func() {
 		})
 	})
 })
+
+// countingStatusClient wraps a client.Client and counts Status().Update requests so a test can
+// assert a steady no-op reconcile issues none. resourceVersion cannot detect the request: the API
+// server short-circuits a byte-identical status write without bumping the version.
+type countingStatusClient struct {
+	client.Client
+	statusUpdates *int
+}
+
+func (c *countingStatusClient) Status() client.SubResourceWriter {
+	return &countingStatusWriter{SubResourceWriter: c.Client.Status(), n: c.statusUpdates}
+}
+
+type countingStatusWriter struct {
+	client.SubResourceWriter
+	n *int
+}
+
+func (w *countingStatusWriter) Update(ctx context.Context, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+	*w.n++
+	return w.SubResourceWriter.Update(ctx, obj, opts...)
+}
