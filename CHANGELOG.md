@@ -25,6 +25,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **Optional admin allowlist for the `remoteControl.endpoint` the operator will dial (SSRF egress lever, #299).**
+  `NTNCellConfig.spec.provider.remoteControl.endpoint` is a free-form `host:port` chosen by whoever writes
+  the CR, and the operator opens a WebSocket to it from its own in-cluster identity — so a principal with
+  `NTNCellConfig` write but no network access could aim it at arbitrary cluster-internal services (port/
+  service probing, WS interaction). A new operator flag `--remote-control-allowed-endpoint-hosts` (comma-
+  separated bare hosts; IPv6 without brackets) restricts which endpoint hosts the runtime push may target.
+  It is admin-controlled and tenant-immutable (a process flag, not a CR field). **Empty (the default)
+  permits any endpoint, so existing deployments are unchanged.** Unlike the GP-fetch SSRF guard, this is an
+  allowlist rather than a private-IP block: the legitimate gNB target is normally a localhost sidecar or an
+  in-cluster ClusterIP, both of which a private-IP denylist would wrongly reject. A disallowed endpoint
+  fails the push closed with reason `RemoteControlEndpointNotAllowed` **before** any Secret read (so it never
+  triggers a credential resolution) and does not self-requeue (it clears on a watched spec edit). This is
+  the app-layer half of #299; pair it with an operator egress NetworkPolicy for network-layer enforcement.
+
 - **External OMM `OBJECT_NAME` can no longer amplify the SatelliteEphemeris status past the etcd object
   limit.** `PropagatedState.satellite` was already bounded (MaxLength 64), but `PassWindow.satellite`
   copied the full external name into up to `MaxPassWindows` (500) windows, the pass-prediction

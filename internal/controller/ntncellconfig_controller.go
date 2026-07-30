@@ -49,6 +49,7 @@ import (
 
 	ntnv1alpha1 "github.com/thc1006/ntn-operators/api/v1alpha1"
 	ntnmetrics "github.com/thc1006/ntn-operators/pkg/metrics"
+	"github.com/thc1006/ntn-operators/pkg/netutil"
 	"github.com/thc1006/ntn-operators/pkg/provider"
 )
 
@@ -59,11 +60,19 @@ type NTNCellConfigReconciler struct {
 	// remoteControl.tls Secret. The cached client would need secrets list;watch to
 	// start an informer (and would then cache every Secret in the cluster); an
 	// uncached Get needs only secrets get. Falls back to the cached client if unset.
-	APIReader               client.Reader
-	Scheme                  *runtime.Scheme
-	Recorder                events.EventRecorder
-	Providers               map[string]provider.NTNProvider
-	MaxConcurrentReconciles int
+	APIReader client.Reader
+	Scheme    *runtime.Scheme
+	Recorder  events.EventRecorder
+	Providers map[string]provider.NTNProvider
+	// RemoteControlEndpointAllowlist, when non-empty, restricts which hosts a
+	// spec.provider.remoteControl.endpoint may target — an admin-controlled,
+	// tenant-immutable egress gate (operator flag, not a CR field). Empty (the
+	// default) permits any endpoint, preserving pre-flag behavior. Unlike the GP
+	// fetch path (netutil's private-IP block), the legitimate remote-control
+	// target is ALWAYS private (a localhost sidecar or an in-cluster ClusterIP),
+	// so an allowlist — not a private-IP denylist — is the fit here (see #299).
+	RemoteControlEndpointAllowlist netutil.EndpointAllowlist
+	MaxConcurrentReconciles        int
 }
 
 const (
@@ -75,6 +84,13 @@ const (
 	ephemerisReasonProviderPushRejected = "ProviderPushRejected"
 	ephemerisReasonEphemerisStale       = "EphemerisStale"
 	ephemerisReasonRemoteControlConfig  = "RemoteControlConfigInvalid"
+	// ephemerisReasonRemoteControlEndpointNotAllowed fails a push CLOSED when the
+	// operator's --remote-control-allowed-endpoint-hosts allowlist is set and the
+	// cell's remoteControl.endpoint host is not in it. Permanent (clears only on a
+	// spec edit — watched — or an operator restart with a new allowlist), so it
+	// does not self-requeue. Checked BEFORE the Secret read, so a disallowed
+	// endpoint never triggers a credential resolution.
+	ephemerisReasonRemoteControlEndpointNotAllowed = "RemoteControlEndpointNotAllowed"
 	// ephemerisReasonSelectionAmbiguous fails a push CLOSED when spec.ephemerisNoradID is unset but
 	// the referenced SatelliteEphemeris exposes more than one satellite: the controller refuses to
 	// guess which one to serve (silently pushing the first would switch satellites whenever the
@@ -150,7 +166,8 @@ func ephemerisPushShouldRequeue(reason string) bool {
 		ephemerisReasonPayloadMissing,
 		ephemerisReasonEphemerisStale,
 		ephemerisReasonInputsStale,
-		ephemerisReasonProviderPushRejected:
+		ephemerisReasonProviderPushRejected,
+		ephemerisReasonRemoteControlEndpointNotAllowed:
 		return false
 	default:
 		return true
@@ -761,6 +778,13 @@ func (r *NTNCellConfigReconciler) pushRuntimeEphemeris(
 			update.SatSwitch = spec.NTN.SatSwitchWithResync
 		}
 	}
+	// Egress gate (SSRF, #299): when the admin has set an allowlist, refuse to dial
+	// an endpoint host outside it — BEFORE the Secret read, so a disallowed endpoint
+	// never causes a credential resolution. A permanent config error (clears on a
+	// watched spec edit), so it does not self-requeue.
+	if err := r.checkRemoteControlEndpointAllowed(spec.Provider.RemoteControl.Endpoint); err != nil {
+		return false, marker, newEphemerisPushError(ephemerisReasonRemoteControlEndpointNotAllowed, err)
+	}
 	// Resolve opt-in transport security (wss:// + shared secret / mTLS) from the
 	// referenced Secret; nil TLSConfig keeps the plaintext ws:// behavior (N-12).
 	tlsConfig, authToken, tlsErr := r.resolveRemoteControlTLS(ctx, eph.Namespace, spec.Provider.RemoteControl)
@@ -841,6 +865,27 @@ var errRemoteControlCredentialInvalid = errors.New("not a usable remote-control 
 // on the CR condition/event: it would otherwise let a principal who can write the CR
 // but not read Secrets probe Secret existence and type (an oracle).
 var errRemoteControlCredentialUnavailable = errors.New("referenced remote-control credential is unavailable or not authorized")
+
+// checkRemoteControlEndpointAllowed enforces the operator's remote-control endpoint
+// allowlist (SSRF egress gate, #299). An empty allowlist permits everything —
+// backward-compatible with deployments predating the flag. When the allowlist is set,
+// the endpoint's host (bracketed IPv6 is unwrapped by net.SplitHostPort) must match a
+// listed host exactly, else the push fails closed. The allowlist holds bare hosts, not
+// scheme URLs, so it is matched with ContainsHost rather than Check. Admission already
+// guarantees a well-formed host:port, so a SplitHostPort error here is fail-closed.
+func (r *NTNCellConfigReconciler) checkRemoteControlEndpointAllowed(endpoint string) error {
+	if r.RemoteControlEndpointAllowlist.IsEmpty() {
+		return nil
+	}
+	host, _, err := net.SplitHostPort(endpoint)
+	if err != nil {
+		return fmt.Errorf("remoteControl.endpoint %q is not a valid host:port: %w", endpoint, err)
+	}
+	if !r.RemoteControlEndpointAllowlist.ContainsHost(host) {
+		return fmt.Errorf("remoteControl.endpoint host %q is not permitted by the operator's remote-control endpoint allowlist", host)
+	}
+	return nil
+}
 
 // resolveRemoteControlTLS builds the TLS config and bearer token for the runtime
 // push from the Secret referenced by remoteControl.tls. It reads the Secret from

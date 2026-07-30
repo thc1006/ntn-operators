@@ -79,6 +79,16 @@ func ParseEndpointAllowlist(csv string) EndpointAllowlist {
 	return EndpointAllowlist{hosts: hosts}
 }
 
+// IsEmpty reports whether the allowlist has no entries. Empty means "permit
+// all" to Check (the user-supplied-URL gate) and "whitelist nothing" to
+// ContainsHost (the dialer bypass) — the two callers deliberately read the
+// empty list with opposite senses. A caller that needs permit-all-when-empty
+// on a bare host:port (no URL to hand to Check, e.g. the remote-control WS
+// endpoint) composes IsEmpty with ContainsHost to make that choice explicit.
+func (a EndpointAllowlist) IsEmpty() bool {
+	return len(a.hosts) == 0
+}
+
 // ContainsHost reports whether a bare hostname is in the allowlist.
 // It lowercases the input for DNS-equivalent matching (allowlist hosts
 // are stored lowercased by ParseEndpointAllowlist). Unlike Check, this

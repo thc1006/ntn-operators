@@ -157,6 +157,16 @@ func main() {
 			"An in-cluster Prometheus at a private ClusterIP must be listed here (by host), "+
 			"and multi-tenant clusters should list only the sanctioned endpoints so a tenant "+
 			"cannot aim the operator at arbitrary cluster-internal services.")
+	var remoteControlAllowedHosts string
+	flag.StringVar(&remoteControlAllowedHosts, "remote-control-allowed-endpoint-hosts", "",
+		"Comma-separated list of hostnames (bare host, IPv6 without brackets) that "+
+			"NTNCellConfig.spec.provider.remoteControl.endpoint is allowed to target. "+
+			"Empty (default) permits ANY endpoint — the legitimate gNB target is normally "+
+			"a localhost sidecar or an in-cluster ClusterIP, so unlike the GP-fetch guard "+
+			"this is an allowlist, not a private-IP block. Multi-tenant clusters should "+
+			"list only the sanctioned gNB endpoints so a tenant with NTNCellConfig write "+
+			"but no network access cannot aim the operator at arbitrary cluster-internal "+
+			"services (SSRF, #299). Pair with an operator egress NetworkPolicy.")
 	var ephemerisAllowedPrivateHosts string
 	flag.StringVar(&ephemerisAllowedPrivateHosts, "ephemeris-allowed-private-hosts", "",
 		"Comma-separated list of hostnames whose resolved private/reserved IPs are "+
@@ -277,12 +287,13 @@ func main() {
 		"ocudu": ocudu.NewProvider(mgr.GetClient()).WithAPIReader(mgr.GetAPIReader()),
 	}
 	if err := (&controller.NTNCellConfigReconciler{
-		Client:                  mgr.GetClient(),
-		APIReader:               mgr.GetAPIReader(),
-		Scheme:                  mgr.GetScheme(),
-		Recorder:                mgr.GetEventRecorder("ntncellconfig-controller"),
-		Providers:               providers,
-		MaxConcurrentReconciles: maxConcurrentReconciles,
+		Client:                         mgr.GetClient(),
+		APIReader:                      mgr.GetAPIReader(),
+		Scheme:                         mgr.GetScheme(),
+		Recorder:                       mgr.GetEventRecorder("ntncellconfig-controller"),
+		Providers:                      providers,
+		RemoteControlEndpointAllowlist: netutil.ParseEndpointAllowlist(remoteControlAllowedHosts),
+		MaxConcurrentReconciles:        maxConcurrentReconciles,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "NTNCellConfig")
 		os.Exit(1)

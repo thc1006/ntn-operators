@@ -33,6 +33,18 @@ func TestEndpointAllowlist_Empty_AcceptsAnyHttpURL(t *testing.T) {
 	}
 }
 
+func TestEndpointAllowlist_IsEmpty(t *testing.T) {
+	if !netutil.ParseEndpointAllowlist("").IsEmpty() {
+		t.Error("a blank spec must produce an empty allowlist")
+	}
+	if !netutil.ParseEndpointAllowlist("  , ,").IsEmpty() {
+		t.Error("a spec of only blanks/whitespace must produce an empty allowlist")
+	}
+	if netutil.ParseEndpointAllowlist("gnb.ran.svc").IsEmpty() {
+		t.Error("a spec with one host must not be empty")
+	}
+}
+
 func TestEndpointAllowlist_NonEmpty_OnlyExactHostMatch(t *testing.T) {
 	a := netutil.ParseEndpointAllowlist("prom.monitoring.svc,prom.example.com")
 	ok := []string{
