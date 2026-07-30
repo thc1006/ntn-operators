@@ -304,7 +304,10 @@ spec:
                         windows written before this field existed (freshness then treated as unverifiable).
                       type: integer
                     satellite:
-                      description: satellite is the name or NORAD ID of the satellite.
+                      description: |-
+                        satellite is the satellite's display name (externally sourced OMM ObjectName), bounded and
+                        rune-safe. The canonical identity is noradID; treat this as a label only.
+                      maxLength: 64
                       type: string
                   required:
                   - aos

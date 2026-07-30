@@ -952,10 +952,6 @@ func (r *SatelliteEphemerisReconciler) cachedOMMResult(key client.ObjectKey) (ca
 	return c, ok
 }
 
-// maxSatelliteNameLen bounds the externally-sourced OMM ObjectName stored per
-// propagated state, so a malformed GP feed cannot bloat the status object.
-const maxSatelliteNameLen = 64
-
 // maxEpochAge and maxSourceEpochFutureSkew, and the sourceEpochUsable rule that applies
 // them, live in the shared layer (ephemeris_freshness.go) so the producer and the consumer
 // cannot drift apart.
@@ -1144,14 +1140,10 @@ func (r *SatelliteEphemerisReconciler) propagateStates(
 		if err != nil {
 			continue // skip satellites whose SGP4 propagation fails / goes out of range
 		}
-		// ObjectName comes from external GP data; bound it so a malformed/huge
-		// name can't bloat the status object past the etcd size limit.
-		name := omms[i].ObjectName
-		if len(name) > maxSatelliteNameLen {
-			name = name[:maxSatelliteNameLen]
-		}
+		// ObjectName comes from external GP data; bound it (rune-safe) so a malformed/huge
+		// name can't bloat the status object past the etcd size limit — shared with pass windows.
 		states = append(states, ntnv1alpha1.PropagatedState{
-			Satellite:         name,
+			Satellite:         ephemeris.BoundedSatelliteLabel(omms[i].ObjectName),
 			NoradID:           omms[i].NoradCatID,
 			EpochUnixMs:       epochMs,
 			SourceEpochUnixMs: srcEpochMs,

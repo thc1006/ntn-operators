@@ -101,7 +101,7 @@ func DeepSpaceSummary(deepSpace []sgp4.OMM) string {
 		if len(examples) >= deepSpaceSummaryMaxExamples {
 			break
 		}
-		name := deepSpace[i].ObjectName
+		name := BoundedSatelliteLabel(deepSpace[i].ObjectName) // external; bound so it can't bloat the condition/event
 		if name == "" {
 			name = fmt.Sprintf("NORAD %d", deepSpace[i].NoradCatID)
 		}

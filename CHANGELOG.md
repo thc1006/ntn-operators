@@ -9,7 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
-- **Runtime NTN push no longer follows redirects on the WebSocket handshake.** A
+- **External OMM `OBJECT_NAME` can no longer amplify the SatelliteEphemeris status past the etcd object
+  limit.** `PropagatedState.satellite` was already bounded (MaxLength 64), but `PassWindow.satellite`
+  copied the full external name into up to `MaxPassWindows` (500) windows, the pass-prediction
+  TLE-conversion error embedded it unbounded (→ `PassesPredicted` condition), and the deep-space
+  rejection summary named satellites unbounded (→ `UnsupportedOrbitRegime` condition). A single long name
+  (GP responses allow up to 50 MB) could thus inflate a bounded input into a status object exceeding
+  etcd's ~1.5 MB limit — the status write then fails and the reconcile stalls — or pressure controller
+  memory. Because the source URL is CR-controlled, the SSRF guard does not imply trusted response content
+  (a legitimate public HTTPS endpoint can return a malicious OMM). A shared, rune-safe
+  `ephemeris.BoundedSatelliteLabel` now bounds the name to 64 code points at every persist/surface site
+  (pass windows, propagated states, and error/condition messages); `PassWindow.satellite` gains a CRD
+  `MaxLength=64` as a defense-in-depth apiserver gate; and the canonical satellite identity is the NORAD ID
+  (the name is a display label only). The rune-safe truncation also fixes a latent byte truncation that
+  could split a multibyte rune into a U+FFFD replacement char. Mutation-tested with a 1 MB `OBJECT_NAME`.
   gNB/proxy `302` from `wss://` to a plaintext `http://` on the same host could
   otherwise make the client re-send the `Authorization: Bearer` shared secret over
   cleartext (`coder/websocket` follows redirects by default, and Go preserves the
