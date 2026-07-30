@@ -702,6 +702,13 @@ type NTNCellConfigStatus struct {
 	// +optional
 	ConfigMapRef string `json:"configMapRef,omitempty"`
 
+	// lastPushedSatSwitchDigest is the content digest of the sat_switch_with_resync last delivered
+	// to the gNB by the runtime push. The switch is re-attached to a runtime update only when this
+	// changes, so a (possibly non-idempotent) MAC/RRC-resync command is not re-sent on every
+	// ephemeris heartbeat (issue #207). Empty when no switch has been sent.
+	// +optional
+	LastPushedSatSwitchDigest string `json:"lastPushedSatSwitchDigest,omitempty"`
+
 	// conditions represent the current state of the resource.
 	// +listType=map
 	// +listMapKey=type

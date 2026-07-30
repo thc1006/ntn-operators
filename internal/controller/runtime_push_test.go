@@ -201,6 +201,69 @@ func TestPushEphemerisUpdateIfNeeded_SatSwitchAttached(t *testing.T) {
 	}
 }
 
+// TestPushEphemerisUpdateIfNeeded_SatSwitchGatedOnIntent pins that a pending switch is delivered
+// ONCE per intent, not re-sent on every ephemeris heartbeat (issue #207). The serving ephemeris is
+// set-state and re-pushes on every ~3-min epoch (since #204), but sat_switch_with_resync may carry
+// MAC/RRC-resync command semantics whose idempotency is unproven, so an unchanged switch must not
+// ride every heartbeat; a CHANGED intent must re-send. Mutation: drop the
+// `switchDigest != cc.Status.LastPushedSatSwitchDigest` gate → push 2 re-attaches the identical
+// switch and the "must NOT re-send" assertion fails.
+func TestPushEphemerisUpdateIfNeeded_SatSwitchGatedOnIntent(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := ntnv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme: %v", err)
+	}
+	eph := ephWithPropagatedState(time.Now().Add(time.Hour).UnixMilli())
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(eph).Build()
+	r := &NTNCellConfigReconciler{Client: c}
+	mock := &provider.MockProvider{}
+
+	kmac := 200
+	cc := ccWithRemoteControl()
+	cc.Spec.NTN.SatSwitchWithResync = &ntnv1alpha1.SatSwitchWithResync{
+		NTNConfig: ntnv1alpha1.SatSwitchNTNConfig{
+			EphemerisECEF: &ntnv1alpha1.EphemerisECEF{PosX: 6000000, PosY: 1, PosZ: 1},
+			KMac:          &kmac,
+		},
+	}
+
+	// Push 1: a new switch intent (empty stored digest) → attached + recorded in status.
+	if _, _, err := r.pushEphemerisUpdateIfNeeded(context.Background(), cc, &cc.Spec, mock); err != nil {
+		t.Fatalf("push 1: %v", err)
+	}
+	if mock.LastRuntime.SatSwitch == nil {
+		t.Fatal("push 1: a new switch intent must be attached")
+	}
+	if cc.Status.LastPushedSatSwitchDigest == "" {
+		t.Fatal("push 1: the delivered switch intent must be recorded in status")
+	}
+
+	// Push 2: same intent → the serving ephemeris still pushes (set-state), but the switch must NOT
+	// re-attach on the heartbeat.
+	mock.LastRuntime = nil
+	if _, _, err := r.pushEphemerisUpdateIfNeeded(context.Background(), cc, &cc.Spec, mock); err != nil {
+		t.Fatalf("push 2: %v", err)
+	}
+	if mock.LastRuntime == nil {
+		t.Fatal("push 2: the serving ephemeris must still be pushed")
+	}
+	if mock.LastRuntime.SatSwitch != nil {
+		t.Fatal("push 2: an unchanged switch intent must NOT be re-attached on the ephemeris heartbeat (#207)")
+	}
+
+	// Push 3: the switch intent changes (different k_mac) → re-attached.
+	newK := 201
+	cc.Spec.NTN.SatSwitchWithResync.NTNConfig.KMac = &newK
+	mock.LastRuntime = nil
+	if _, _, err := r.pushEphemerisUpdateIfNeeded(context.Background(), cc, &cc.Spec, mock); err != nil {
+		t.Fatalf("push 3: %v", err)
+	}
+	if mock.LastRuntime.SatSwitch == nil || mock.LastRuntime.SatSwitch.NTNConfig.KMac == nil ||
+		*mock.LastRuntime.SatSwitch.NTNConfig.KMac != 201 {
+		t.Fatal("push 3: a changed switch intent must be re-attached")
+	}
+}
+
 // Without a pending switch, the runtime push must not carry a sat-switch block.
 func TestPushEphemerisUpdateIfNeeded_NoSatSwitchByDefault(t *testing.T) {
 	scheme := runtime.NewScheme()
@@ -661,7 +724,12 @@ func TestPushEphemerisUpdateIfNeeded_CrashBeforeStatus_PendingSatSwitch_IsIdempo
 	}
 	sw1 := *mock.LastRuntime.SatSwitch
 
-	// CRASH before status persists → the new leader re-pushes the same unchanged state.
+	// CRASH before status persists → the new leader re-pushes the same unchanged state. The crash
+	// means the status write — which carries lastPushedSatSwitchDigest — never persisted, so the new
+	// leader reads it empty and MUST re-carry the switch. The crash-idempotency contract (#230 item 6)
+	// therefore still holds: an un-recorded switch is re-sent (only a DURABLY recorded intent is gated
+	// off the heartbeat, #207).
+	cc.Status.LastPushedSatSwitchDigest = ""
 	pushed2, marker2, err := r.pushEphemerisUpdateIfNeeded(context.Background(), cc, &cc.Spec, mock)
 	if err != nil || !pushed2 || mock.RuntimeCalls != 2 {
 		t.Fatalf("re-push #2: pushed=%v err=%v calls=%d", pushed2, err, mock.RuntimeCalls)

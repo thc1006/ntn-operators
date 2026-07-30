@@ -22,6 +22,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -745,12 +746,20 @@ func (r *NTNCellConfigReconciler) pushRuntimeEphemeris(
 		UlSyncValidityDur: ulSync,
 		Ephemeris:         provider.EphemerisUpdate{ECEF: &ecef},
 	}
-	// Attach a pending satellite switch (issue #52 / #49 mechanism): it rides in
-	// the same per-cell frame as the serving ephemeris. This is the only surface
-	// that carries k_mac. The switch only reaches the gNB when a fresh serving
-	// ephemeris push happens (OCUDU requires the cell's ephemeris_info anyway).
+	// Attach a pending satellite switch (issue #52 / #49 mechanism): it rides in the same per-cell
+	// frame as the serving ephemeris (the only surface that carries k_mac; OCUDU requires the cell's
+	// ephemeris_info anyway). But attach it ONLY when its intent changed since the last successful
+	// send: the serving ephemeris is set-state and safe to re-push on every ~3-min epoch heartbeat,
+	// whereas sat_switch_with_resync may carry MAC/RRC-resync command semantics whose idempotency is
+	// unproven upstream (issue #207) — re-sending it on every heartbeat (~40x more often since #204's
+	// epoch cadence) could re-trigger the switch. A new/changed switch still delivers promptly: the
+	// spec edit bumps the generation, so isEphemerisPushUpToDate re-pushes on this reconcile.
+	switchDigest := ""
 	if spec.NTN.SatSwitchWithResync != nil {
-		update.SatSwitch = spec.NTN.SatSwitchWithResync
+		switchDigest = satSwitchIntentDigest(spec.NTN.SatSwitchWithResync)
+		if switchDigest != cc.Status.LastPushedSatSwitchDigest {
+			update.SatSwitch = spec.NTN.SatSwitchWithResync
+		}
 	}
 	// Resolve opt-in transport security (wss:// + shared secret / mTLS) from the
 	// referenced Secret; nil TLSConfig keeps the plaintext ws:// behavior (N-12).
@@ -788,7 +797,25 @@ func (r *NTNCellConfigReconciler) pushRuntimeEphemeris(
 		}
 		return false, marker, newEphemerisPushError(reason, fmt.Errorf("provider PushRuntimeUpdate: %w", err))
 	}
+	// Record the delivered switch intent so an identical switch is not re-attached on the next
+	// ephemeris heartbeat. "" when no switch is configured, so removing then re-adding a switch
+	// re-sends it (each transition bumps the generation, forcing this push path via re-push).
+	cc.Status.LastPushedSatSwitchDigest = switchDigest
 	return true, marker, nil
+}
+
+// satSwitchIntentDigest is a canonical content digest of a pending satellite switch, used to
+// re-send it only when its intent changes (pushRuntimeEphemeris). SatSwitchWithResync has no map
+// fields, so json.Marshal is deterministic.
+func satSwitchIntentDigest(sw *ntnv1alpha1.SatSwitchWithResync) string {
+	b, err := json.Marshal(sw)
+	if err != nil {
+		// A struct with no unmarshalable fields cannot fail to marshal; treat a theoretical error
+		// as "always changed" — safe (re-sends) rather than silently dropping the switch.
+		return "marshal-error"
+	}
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
 }
 
 const (
