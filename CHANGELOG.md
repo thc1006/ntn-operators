@@ -171,6 +171,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `EphemerisSelectionAmbiguous`) when `ephemerisNoradID` is unset against more than one satellite,
   rather than guess. A single-satellite ephemeris still resolves implicitly. Mutation-tested.
 
+- **Runtime-push dedup key is now a content digest, not a wall-clock epoch treated as monotonic.**
+  `runtimeEphemerisPushMarker` keyed on the propagated `EpochUnixMs` alone, whose comment claimed it
+  was a monotonic 1:1 proxy for the ECEF. But `EpochUnixMs` is serialized wall-clock time with no
+  monotonic reading, so across pods or an NTP step a repeated target epoch carrying a *different* ECEF
+  (a new OMM propagated to the same instant after a clock rewind/skew, with the ephemeris generation
+  unchanged) produced an identical marker and the fresh position/velocity was silently dedup'd. The
+  marker now digests the delivered content — owner UID, propagation-input hash, NORAD, both epochs, and
+  the full ECEF position+velocity — so it changes iff the payload changes (a fresh epoch is one such
+  change, preserving the per-propagation re-push cadence). Mutation-tested for the same-epoch/changed-ECEF
+  case the epoch-advances test (#260) did not cover.
+
 - **The manager waits indefinitely for runnables on shutdown, so the leader lease is never released
   early.** `GracefulShutdownTimeout` was unset (controller-runtime default 30s). A *finite* timeout is
   unsafe with `LeaderElectionReleaseOnCancel`: `runnableGroup.StopAndWait` returns on ctx-expiry
@@ -337,6 +348,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `EphemerisPushed=False` (reason `EphemerisSelectionAmbiguous`) instead of pushing whichever
   satellite the upstream listed first. Set `spec.ephemerisNoradID` to the intended satellite to
   restore pushing. Single-satellite ephemerides are unaffected.
+- **One-time runtime re-push per cell after upgrade (harmless).** The runtime-push dedup marker format
+  changed (epoch → content digest), so an already-pushed `NTNCellConfig`'s stored marker will not match
+  the new one on the first reconcile, triggering a single re-push of the current (correct) propagated
+  state. It is idempotent and self-healing; no action needed.
 - **`passPrediction.horizon`: negative is rejected, over-7-days is clamped.** A horizon > 7 days is
   clamped to 7 days (surfaced on the `PassesPredicted` condition message, not silently), so a spec
   relying on windows beyond 7 days will see them truncated (`MaxPassWindows` already capped the

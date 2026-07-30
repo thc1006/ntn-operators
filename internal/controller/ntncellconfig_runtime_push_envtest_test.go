@@ -202,12 +202,13 @@ var _ = Describe("NTNCellConfig runtime-push lifecycle (envtest)", func() {
 		Eventually(prov.pushes, "10s").Should(Receive(&freshPush))
 		Expect(freshPush.EpochUnixMs).To(Equal(freshEpoch))
 
-		// Assert the persisted marker with a string built HERE, independent of runtimeEphemerisPushMarker — so
-		// a regression that drops epoch from that function's key is caught by THIS expectation rather than
-		// masked by it (the pre-existing catch-up assertion below computed its expectation with the function
-		// under test, so it could not). Also confirm the spec/generation/input-hash never moved.
-		freshMarker := fmt.Sprintf("ephemerisRef=%s ephGeneration=%d norad=%d epoch=%d",
-			ephName, frozenGeneration, 25544, freshEpoch)
+		// Assert the persisted marker's readable prefix with a string built HERE, independent of
+		// runtimeEphemerisPushMarker — so a regression that drops epoch from that function's key is caught by
+		// THIS expectation rather than masked by it (the pre-existing catch-up assertion below computed its
+		// expectation with the function under test, so it could not). The marker is now
+		// "norad=<n> epoch=<ms> digest=<sha256>"; the digest is input-derived so we check the fresh-epoch
+		// prefix, not the full opaque hash. Also confirm the spec/generation/input-hash never moved.
+		freshMarkerPrefix := fmt.Sprintf("norad=%d epoch=%d digest=", 25544, freshEpoch)
 		Eventually(func(g Gomega) {
 			currentEph := &ntnv1alpha1.SatelliteEphemeris{}
 			g.Expect(k8sClient.Get(context.Background(), ephKey, currentEph)).To(Succeed())
@@ -222,7 +223,7 @@ var _ = Describe("NTNCellConfig runtime-push lifecycle (envtest)", func() {
 			g.Expect(fresh).NotTo(BeNil())
 			g.Expect(fresh.Status).To(Equal(metav1.ConditionTrue))
 			g.Expect(fresh.Reason).To(Equal("Pushed"))
-			g.Expect(fresh.Message).To(Equal(freshMarker))
+			g.Expect(fresh.Message).To(HavePrefix(freshMarkerPrefix))
 		}, "10s", "100ms").Should(Succeed())
 		Consistently(prov.pushes, "2s", "100ms").ShouldNot(Receive())
 
@@ -252,7 +253,6 @@ var _ = Describe("NTNCellConfig runtime-push lifecycle (envtest)", func() {
 		// watch fans out exactly one fresh runtime push. The controller's own status
 		// write must not create a hot requeue or a fourth push (first, epoch-only, catch-up).
 		Expect(k8sClient.Get(context.Background(), ephKey, eph)).To(Succeed())
-		catchUpGeneration := eph.Generation
 		nextEpoch := freshEpoch + (3 * time.Minute).Milliseconds()
 		eph.Status.PropagatedStatesInputHash = propagationInputHash(eph.Spec)
 		eph.Status.PropagatedStates[0].EpochUnixMs = nextEpoch
@@ -269,8 +269,7 @@ var _ = Describe("NTNCellConfig runtime-push lifecycle (envtest)", func() {
 			g.Expect(fresh).NotTo(BeNil())
 			g.Expect(fresh.Status).To(Equal(metav1.ConditionTrue))
 			g.Expect(fresh.Reason).To(Equal("Pushed"))
-			g.Expect(fresh.Message).To(Equal(fmt.Sprintf("ephemerisRef=%s ephGeneration=%d norad=%d epoch=%d",
-				ephName, catchUpGeneration, 25544, nextEpoch)))
+			g.Expect(fresh.Message).To(HavePrefix(fmt.Sprintf("norad=%d epoch=%d digest=", 25544, nextEpoch)))
 		}, "10s", "100ms").Should(Succeed())
 		Consistently(prov.pushes, "2s", "100ms").ShouldNot(Receive())
 	})

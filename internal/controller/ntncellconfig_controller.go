@@ -18,8 +18,10 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net"
@@ -910,11 +912,18 @@ func ephemerisPushMarker(eph *ntnv1alpha1.SatelliteEphemeris) string {
 // push path. The ConfigMap path keys on the GP fetch time (ephemerisPushMarker),
 // but the runtime push delivers the SGP4-propagated state, which the
 // SatelliteEphemeris re-propagates to a fresh EPOCH every few minutes; keying on
-// that epoch (not the 2h-stable LastUpdated) is what makes the watch fan-out
-// re-push the live state between GP fetches and after a gNB restart (I-12). The
-// epoch is a monotonic 1:1 proxy for the propagated ECEF — each re-propagation
-// yields a new epoch and a new state — so a same-epoch reconcile dedups without
-// hashing the payload. Refreshing epoch/ephemeris/TA is SI-change-free per TS 38.331.
+// the propagated state (not the 2h-stable LastUpdated) is what makes the watch
+// fan-out re-push the live state between GP fetches and after a gNB restart (I-12).
+// The marker is a sha256 over the delivered content — owner UID, propagation-input
+// hash, NORAD, both epochs, and the full ECEF (position + velocity) — so it changes
+// iff the pushed payload changes, and a fresh re-propagation (new epoch and/or new
+// ECEF) is one such change. It deliberately does NOT treat EpochUnixMs as a
+// monotonic 1:1 proxy for the ECEF: EpochUnixMs is serialized wall-clock time with
+// no monotonic reading (see the time package docs), so across pods or an NTP step a
+// REPEATED epoch carrying a DIFFERENT ECEF (a new OMM propagated to the same target
+// instant after a clock rewind/skew) must still re-push — hashing the ECEF, not the
+// epoch alone, is what guarantees that. Refreshing epoch/ephemeris/TA is
+// SI-change-free per TS 38.331.
 //
 // #228 G4 resolution — the re-push cadence (bounded by the SatelliteEphemeris re-propagation interval, a
 // few minutes) versus ntn-UlSyncValidityDur (enum as low as 5 s; the old "NR max 240 s" note was wrong).
@@ -936,8 +945,16 @@ func ephemerisPushMarker(eph *ntnv1alpha1.SatelliteEphemeris) string {
 // epoch-mode-independent, since re-reading a pinned epoch does not extend validity. This marker dedups by
 // epoch and decides neither.
 func runtimeEphemerisPushMarker(eph *ntnv1alpha1.SatelliteEphemeris, state *ntnv1alpha1.PropagatedState) string {
-	return fmt.Sprintf("ephemerisRef=%s ephGeneration=%d norad=%d epoch=%d",
-		eph.Name, eph.Generation, state.NoradID, state.EpochUnixMs)
+	e := state.ECEF
+	// NUL-separated so field boundaries can't collide (e.g. a name ending in a digit + a NORAD).
+	// Generation and inputHash are both kept: generation forces a re-push on any spec bump (existing
+	// I-12 contract), inputHash pins the propagation inputs, and the ECEF closes the same-epoch gap.
+	sum := sha256.Sum256(fmt.Appendf(nil, "%s\x00%d\x00%s\x00%d\x00%d\x00%d\x00%d\x00%d\x00%d\x00%d\x00%d\x00%d",
+		eph.UID, eph.Generation, eph.Status.PropagatedStatesInputHash,
+		state.NoradID, state.EpochUnixMs, state.SourceEpochUnixMs,
+		e.PosX, e.PosY, e.PosZ, e.VelX, e.VelY, e.VelZ))
+	// Readable prefix for operators; the digest is what the dedup compares.
+	return fmt.Sprintf("norad=%d epoch=%d digest=%s", state.NoradID, state.EpochUnixMs, hex.EncodeToString(sum[:]))
 }
 
 // radioFrameDuration is the NR radio-frame length (3GPP TS 38.211): 10 ms. siPeriod is expressed in

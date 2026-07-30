@@ -68,6 +68,60 @@ func TestRuntimeEphemerisPushMarkerKeysOnEpoch(t *testing.T) {
 	}
 }
 
+// TestRuntimeEphemerisPushMarker_SameEpochDifferentPayload_NotDeduped covers the gap the
+// epoch-advances test (I-12 / #260) does not: EpochUnixMs is serialized wall-clock time with NO
+// monotonic reading, so a clock rewind or cross-pod skew can REPEAT a target epoch. A new OMM
+// propagated to that repeated epoch yields a DIFFERENT ECEF at the SAME epoch and generation; the
+// marker must still change so the fresh position/velocity is pushed, not silently dedup'd. This is
+// why the marker digests the payload, not just the epoch.
+func TestRuntimeEphemerisPushMarker_SameEpochDifferentPayload_NotDeduped(t *testing.T) {
+	eph := &ntnv1alpha1.SatelliteEphemeris{
+		ObjectMeta: metav1.ObjectMeta{Name: "eph-a", UID: "uid-1", Generation: 7},
+	}
+	eph.Status.PropagatedStatesInputHash = "hash-1"
+	base := &ntnv1alpha1.PropagatedState{
+		Satellite: "ISS", NoradID: 25544, EpochUnixMs: 1_700_000_000_000, SourceEpochUnixMs: 1_699_000_000_000,
+		ECEF: ntnv1alpha1.EphemerisECEF{PosX: 100, PosY: 200, PosZ: 300, VelX: 1, VelY: 2, VelZ: 3},
+	}
+	marker := func(e *ntnv1alpha1.SatelliteEphemeris, s ntnv1alpha1.PropagatedState) string {
+		return runtimeEphemerisPushMarker(e, &s)
+	}
+
+	// THE gap: same epoch + generation, different ECEF must change the marker.
+	movedPos := *base
+	movedPos.ECEF.PosX = 101
+	if marker(eph, *base) == marker(eph, movedPos) {
+		t.Fatal("same epoch + different ECEF position must change the marker (a clock rewind/skew would otherwise dedup the fresh position)")
+	}
+	movedVel := *base
+	movedVel.ECEF.VelZ = 99
+	if marker(eph, *base) == marker(eph, movedVel) {
+		t.Fatal("same epoch + different ECEF velocity must change the marker")
+	}
+	// A re-fetch (new source element-set epoch) at the same target epoch must change the marker.
+	newSrc := *base
+	newSrc.SourceEpochUnixMs += 60_000
+	if marker(eph, *base) == marker(eph, newSrc) {
+		t.Fatal("a different source element-set epoch must change the marker")
+	}
+	// Identical content → identical marker: dedup still works and is reproducible across a crash/restart.
+	d1, d2 := marker(eph, *base), marker(eph, *base)
+	if d1 != d2 {
+		t.Fatal("identical content must yield an identical (deterministic) marker")
+	}
+	// Owner UID (delete-recreate) and propagation-input hash each change the marker.
+	ephU := *eph
+	ephU.UID = "uid-2"
+	if marker(eph, *base) == marker(&ephU, *base) {
+		t.Fatal("an owner UID change must change the marker")
+	}
+	ephH := *eph
+	ephH.Status.PropagatedStatesInputHash = "hash-2"
+	if marker(eph, *base) == marker(&ephH, *base) {
+		t.Fatal("a propagation-input-hash change must change the marker")
+	}
+}
+
 // TestPushRuntime_RepushesOnFreshEpoch_I12 pins the end-to-end I-12 fix through
 // the reconciler helper: an already-pushed cell is NOT re-pushed for the same
 // epoch (dedup), but a fresh propagated epoch — with LastUpdated deliberately
