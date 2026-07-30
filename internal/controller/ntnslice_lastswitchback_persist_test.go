@@ -96,7 +96,7 @@ func TestReconcile_FailedSwitchbackThenPassEnded_NoGhostDwell(t *testing.T) {
 	r := &NTNSliceReconciler{Client: cli, Scheme: sch, Now: func() time.Time { return fixedNow }}
 	key := client.ObjectKeyFromObject(nsObj)
 	// Terrestrial healthy long enough to switch back; satellite pass currently ACTIVE.
-	r.storeFlapState(key, "", slice.AntiFlapState{RecoveryObservedAt: fixedNow.Add(-90 * time.Second)})
+	r.storeFlapState(key, "", 0, slice.AntiFlapState{RecoveryObservedAt: fixedNow.Add(-90 * time.Second)})
 	r.ReaderProvider = fakeReaderProvider{reader: fakeReader{res: slicemetrics.Result{
 		Metrics: slice.Metrics{RSRP: -80, LatencyMs: 10, PacketLossPercent: 0}, Stale: false, LastFreshAt: fixedNow,
 	}}}
@@ -212,7 +212,7 @@ func TestReconcile_Switchback_PersistsLastSwitchbackTime(t *testing.T) {
 	r, key := baseSliceForDwell(t, fixedNow, ntnv1alpha1.NTNSliceStatus{
 		ActivePathType: string(slice.PathSatellite),
 	})
-	r.storeFlapState(key, "", slice.AntiFlapState{RecoveryObservedAt: fixedNow.Add(-90 * time.Second)})
+	r.storeFlapState(key, "", 0, slice.AntiFlapState{RecoveryObservedAt: fixedNow.Add(-90 * time.Second)})
 	// Terrestrial HEALTHY (rsrp -80 does not fire), reliable; satellite available.
 	r.ReaderProvider = fakeReaderProvider{reader: fakeReader{res: slicemetrics.Result{
 		Metrics: slice.Metrics{RSRP: -80, LatencyMs: 10, PacketLossPercent: 0},
@@ -248,7 +248,7 @@ func TestReconcile_SelfHealsDurableLastSwitchback(t *testing.T) {
 		ActivePathType: string(slice.PathTerrestrial),
 	})
 	memClock := fixedNow.Add(-30 * time.Second)
-	r.storeFlapState(key, "", slice.AntiFlapState{LastSwitchback: memClock})
+	r.storeFlapState(key, "", 0, slice.AntiFlapState{LastSwitchback: memClock})
 	// Terrestrial DEGRADED (would fail over if dwell were satisfied), satellite available.
 	r.ReaderProvider = fakeReaderProvider{reader: fakeReader{res: slicemetrics.Result{
 		Metrics: slice.Metrics{RSRP: -110, LatencyMs: 10, PacketLossPercent: 0},
@@ -284,7 +284,7 @@ func TestReconcile_MonotonicSeed_KeepsNewerMemory(t *testing.T) {
 		ActivePathType:     string(slice.PathTerrestrial),
 		LastSwitchbackTime: &metav1.Time{Time: oldStatus},
 	})
-	r.storeFlapState(key, "", slice.AntiFlapState{LastSwitchback: memClock})
+	r.storeFlapState(key, "", 0, slice.AntiFlapState{LastSwitchback: memClock})
 	r.ReaderProvider = fakeReaderProvider{reader: fakeReader{res: slicemetrics.Result{
 		Metrics: slice.Metrics{RSRP: -110, LatencyMs: 10, PacketLossPercent: 0},
 		Stale:   false, LastFreshAt: fixedNow,
@@ -319,7 +319,7 @@ func TestReconcile_FutureDurableTimestampHealedBySwitchback(t *testing.T) {
 		ActivePathType:     string(slice.PathSatellite),
 		LastSwitchbackTime: &metav1.Time{Time: fixedNow.Add(1 * time.Hour)},
 	})
-	r.storeFlapState(key, "", slice.AntiFlapState{RecoveryObservedAt: fixedNow.Add(-90 * time.Second)})
+	r.storeFlapState(key, "", 0, slice.AntiFlapState{RecoveryObservedAt: fixedNow.Add(-90 * time.Second)})
 	r.ReaderProvider = fakeReaderProvider{reader: fakeReader{res: slicemetrics.Result{
 		Metrics: slice.Metrics{RSRP: -80, LatencyMs: 10, PacketLossPercent: 0}, Stale: false, LastFreshAt: fixedNow,
 	}}}
@@ -437,7 +437,7 @@ func TestReconcile_StaleFlapStateForDifferentUID_IsNotInherited(t *testing.T) {
 	// Leftover state stored under a DIFFERENT (deleted predecessor's) UID, with a recent switchback
 	// that would block failover (15s < 60s dwell) if it were wrongly inherited. The reconciled
 	// object built by baseSliceForDwell has a different UID (empty), so this must be evicted.
-	r.storeFlapState(key, "uid-of-deleted-predecessor", slice.AntiFlapState{
+	r.storeFlapState(key, "uid-of-deleted-predecessor", 0, slice.AntiFlapState{
 		LastSwitchback: fixedNow.Add(-15 * time.Second),
 	})
 
