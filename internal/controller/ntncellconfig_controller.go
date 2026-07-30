@@ -322,7 +322,7 @@ func (r *NTNCellConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// ApplyCellConfig, so no separate best-effort ownership step is needed.
 
 	// Step 6: Get applied status from provider.
-	status, err := prov.GetCellStatus(ctx, cc.Name, spec.Provider.Namespace)
+	status, err := prov.GetCellStatus(ctx, cc)
 	if err != nil {
 		log.Error(err, "failed to get cell status after apply")
 		meta.SetStatusCondition(&cc.Status.Conditions, metav1.Condition{

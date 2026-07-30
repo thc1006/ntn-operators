@@ -63,7 +63,9 @@ func (m *MockProvider) ApplyCellConfig(
 	return m.ApplyErr
 }
 
-func (m *MockProvider) GetCellStatus(_ context.Context, _, _ string) (*ntnv1alpha1.NTNCellConfigStatus, error) {
+func (m *MockProvider) GetCellStatus(
+	_ context.Context, _ *ntnv1alpha1.NTNCellConfig,
+) (*ntnv1alpha1.NTNCellConfigStatus, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.StatusCalls++
