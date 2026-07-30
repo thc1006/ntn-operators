@@ -122,6 +122,18 @@ var (
 		[]string{"namespace", "ephemeris"},
 	)
 
+	// EphemerisPropagationFailedCount is the number of tracked element sets that failed SGP4
+	// propagation to ECEF in the latest reconcile (OMM->TLE conversion, propagation, or ECEF range
+	// validation). These satellites are dropped from propagatedStates, so without this signal a
+	// non-propagatable element set looks like a generic downstream PayloadMissing.
+	EphemerisPropagationFailedCount = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "ntn_operators_ephemeris_propagation_failed_count",
+			Help: "Number of tracked element sets that failed SGP4 propagation to ECEF in the latest reconcile.",
+		},
+		[]string{"namespace", "ephemeris"},
+	)
+
 	// GPFetchReady is 1 when the latest reconcile obtained usable GP data (a fresh
 	// fetch, a 304 Not Modified, or a served cache) and 0 when it could not (fetcher
 	// setup failed, the fetch errored with no cache to fall back on, or an insecure
@@ -247,6 +259,7 @@ func init() {
 		GPSatelliteCount,
 		GPDeepSpaceRejectedCount,
 		EphemerisEpochStaleCount,
+		EphemerisPropagationFailedCount,
 		GPFetchReady,
 		EphemerisPushErrorsTotal,
 		EphemerisPushReady,

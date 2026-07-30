@@ -173,6 +173,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **SGP4 propagation failures are now surfaced, not silently dropped.** A tracked element set that
+  passed the epoch checks but failed `PropagateToECEF` (OMM→TLE conversion, propagation, or ECEF range
+  validation) was dropped from `propagatedStates` with a bare `continue` — no condition, metric, or
+  count — so a malformed/non-propagatable element set looked like a generic downstream
+  `EphemerisPayloadMissing`. The producer now counts these and surfaces them via a `PropagationFailed`
+  status condition and the `ntn_operators_ephemeris_propagation_failed_count` gauge (cleaned up on CR
+  deletion). The condition message carries only a bounded reason and up to three example NORAD IDs —
+  never raw external fields. Mutation-tested.
+
 - **NTNSlice no longer fails over to a satellite whose ephemeris is too stale to deliver.** NTNSlice
   keyed satellite availability on the producer's `PassesPredicted` condition plus an active pass window,
   while NTNCellConfig gates the runtime push on the element set's source-epoch freshness
