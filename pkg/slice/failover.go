@@ -639,6 +639,15 @@ type AntiFlapState struct {
 	// available satellite (a quality-driven, ping-pong-prone hand-back — NOT a
 	// pass-ended forced switchback). Min-dwell is measured from here.
 	LastSwitchback time.Time
+	// LastObservationAt is the identity of the last observation whose degraded/recovered
+	// verdict was folded into the streak. The confirmation counter must advance on distinct
+	// OBSERVATIONS, not on reconciles: the metrics chain re-serves the SAME last-good value
+	// with an unchanged freshness stamp during a source outage (Result.Stale), and a status
+	// conflict can re-reconcile the same read — counting either as a fresh sample would let one
+	// degraded observation trip N-consecutive. EvaluateFailoverWithAntiFlapAt therefore folds a
+	// sample into the streak only when its observationAt differs from this. In-memory only; its
+	// loss on restart re-requires confirmation (a DELAY), consistent with the other two clocks.
+	LastObservationAt time.Time
 }
 
 // terrestrialDegraded reports whether any valid, live (non-inert) trigger fires
@@ -711,6 +720,11 @@ func terrestrialConfirmedRecovered(triggers []string, m Metrics, margin float64)
 // It returns the decision and the updated state; the caller owns (and may drop)
 // the state. Gating only ever downgrades a Failover to Stay on the current path;
 // it never fabricates a switch.
+//
+// It treats every call as a distinct observation. Callers that re-evaluate the SAME
+// observation across reconciles (a stale metrics re-serve, a status-conflict retry) must use
+// EvaluateFailoverWithAntiFlapAt with the observation's freshness stamp, so one observation is
+// not counted as N confirmation samples.
 func EvaluateFailoverWithAntiFlap(
 	ctx context.Context,
 	currentPath PathType,
@@ -723,27 +737,55 @@ func EvaluateFailoverWithAntiFlap(
 	cfg AntiFlapConfig,
 	st AntiFlapState,
 ) (FailoverResult, AntiFlapState) {
-	// 1. Update the confirmation + recovery clocks from this sample. Three states:
-	//    degraded (a raw trigger fires) / confirmed-recovered (all known triggers past
-	//    the hysteresis margin, none unknown) / neither (dead-band or an unknown
-	//    metric). The recovery clock advances ONLY while confirmed-recovered, so the
-	//    switchback delay measures continuous PAST-hysteresis recovery and never counts
-	//    dead-band or unknown-metric time as recovery (H3/C1).
-	switch {
-	case terrestrialDegraded(triggers, metrics):
-		st.ConsecutiveDegraded++
-		st.RecoveryObservedAt = time.Time{} // re-degraded → reset the switchback clock
-	case terrestrialConfirmedRecovered(triggers, metrics, hysteresisMargin):
-		st.ConsecutiveDegraded = 0
-		if st.RecoveryObservedAt.IsZero() {
-			st.RecoveryObservedAt = now // a fresh continuous past-hysteresis streak begins
+	return EvaluateFailoverWithAntiFlapAt(ctx, currentPath, triggers, metrics, satelliteAvailable,
+		switchbackDelay, now, hysteresisMargin, cfg, st, time.Time{})
+}
+
+// EvaluateFailoverWithAntiFlapAt is EvaluateFailoverWithAntiFlap with an explicit observation
+// identity. observationAt uniquely stamps the metrics sample (the reader chain's LastFreshAt): the
+// degraded/recovered verdict is folded into the streak ONLY when observationAt differs from the
+// last one already counted (st.LastObservationAt). A repeated observation — the metrics chain
+// re-serving its last-good value during a source outage (Result.Stale), or a status-conflict
+// re-reconcile of the same read — re-decides on the current streak WITHOUT advancing it, so a
+// single degraded observation cannot climb to N-consecutive. A zero observationAt disables the
+// gate (every call is a fresh sample), preserving the plain EvaluateFailoverWithAntiFlap contract.
+func EvaluateFailoverWithAntiFlapAt(
+	ctx context.Context,
+	currentPath PathType,
+	triggers []string,
+	metrics Metrics,
+	satelliteAvailable bool,
+	switchbackDelay time.Duration,
+	now time.Time,
+	hysteresisMargin float64,
+	cfg AntiFlapConfig,
+	st AntiFlapState,
+	observationAt time.Time,
+) (FailoverResult, AntiFlapState) {
+	// 1. Update the confirmation + recovery clocks from this sample — but ONLY when it is a new
+	//    observation, so a stale re-serve or a retried read cannot inflate the streak. Three
+	//    states: degraded (a raw trigger fires) / confirmed-recovered (all known triggers past the
+	//    hysteresis margin, none unknown) / neither (dead-band or an unknown metric). The recovery
+	//    clock advances ONLY while confirmed-recovered, so the switchback delay measures continuous
+	//    PAST-hysteresis recovery and never counts dead-band or unknown-metric time (H3/C1).
+	if observationAt.IsZero() || !observationAt.Equal(st.LastObservationAt) {
+		st.LastObservationAt = observationAt
+		switch {
+		case terrestrialDegraded(triggers, metrics):
+			st.ConsecutiveDegraded++
+			st.RecoveryObservedAt = time.Time{} // re-degraded → reset the switchback clock
+		case terrestrialConfirmedRecovered(triggers, metrics, hysteresisMargin):
+			st.ConsecutiveDegraded = 0
+			if st.RecoveryObservedAt.IsZero() {
+				st.RecoveryObservedAt = now // a fresh continuous past-hysteresis streak begins
+			}
+		default:
+			// Dead-band or unknown metric: neither degraded nor confirmed recovered. Break
+			// the recovery streak so a later confirmed recovery must re-accumulate the full
+			// switchback delay. (The evaluator independently holds on satellite here.)
+			st.ConsecutiveDegraded = 0
+			st.RecoveryObservedAt = time.Time{}
 		}
-	default:
-		// Dead-band or unknown metric: neither degraded nor confirmed recovered. Break
-		// the recovery streak so a later confirmed recovery must re-accumulate the full
-		// switchback delay. (The evaluator independently holds on satellite here.)
-		st.ConsecutiveDegraded = 0
-		st.RecoveryObservedAt = time.Time{}
 	}
 
 	// 2. Run the base engine, measuring the switchback delay from the recovery

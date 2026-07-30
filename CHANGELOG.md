@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Anti-flap `confirmationSamples` now counts distinct observations, not reconciles.** The
+  N-consecutive failover confirmation advanced its counter on every reliable reconcile, but the
+  metrics chain re-serves the last-good value with an unchanged freshness stamp during a source
+  outage (`Result.Stale`), and a status-conflict retry re-reconciles the same read. A single
+  degraded observation re-served N times therefore tripped the gate — defeating the "absorb a
+  single-sample blip" contract exactly when the source flaked while terrestrial was degraded. The
+  evaluator now folds a sample into the streak only when its observation stamp (the reader chain's
+  `LastFreshAt`) differs from the last one counted; a repeated observation re-decides on the current
+  streak without advancing it. In-memory only, so its loss on restart re-requires confirmation (a
+  delay), consistent with the other flap clocks. Verified at the evaluator (stale replay ≠ N;
+  distinct observations do confirm) and end-to-end in the controller (a stuck stale source across
+  three reconciles no longer confirms a failover on one reading).
+
 ### Added
 
 - **Durable conditional-GET validators for the OMM cache (polite restart/failover refetch).** The
