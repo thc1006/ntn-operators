@@ -23,8 +23,9 @@ import (
 // TestEphemerisToNTNCellConfig_IndexedPath_G3 pins the INDEXED mapper path (#204-G3b):
 // with the spec.ephemerisRef field index registered (as SetupWithManager does on the
 // manager cache), the mapper resolves referencing cells via client.MatchingFields — only
-// the cell that references the ephemeris is returned, with no in-Go filter. (The envtest
-// mapper test uses a direct client and exercises the fallback path instead.)
+// the cell that references the ephemeris is returned, with no in-Go filter. The mapper has
+// no namespace-scan fallback: on an indexed-lookup error it drops the fan-out (the cells
+// re-resolve on their own requeue), so every test drives it through an indexed client.
 // Mutation: point the index at the wrong field, or the mapper at the wrong key, and this
 // returns the wrong set.
 func TestEphemerisToNTNCellConfig_IndexedPath_G3(t *testing.T) {

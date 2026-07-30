@@ -7,9 +7,11 @@ Operational response for the alerts shipped in the chart's `PrometheusRule`
 
 All alerts are `severity: warning`. Most are namespaced — the labels
 (`namespace`, and one of `ephemeris` / `config` / `slice`) point at the exact CR.
-The exception is `NTNControllerReconcileErrors`, which aggregates
-`sum by (controller)` over `controller_runtime_reconcile_errors_total` (a metric
-with no `namespace` label), so it carries only `controller`. Assume
+Two are not: `NTNControllerReconcileErrors` aggregates `sum by (controller)` over
+`controller_runtime_reconcile_errors_total` (a metric with no `namespace` label),
+so it carries only `controller`; `NTNEphemerisMapperIndexErrors` is a single
+unlabeled counter (a process-level cache/index fault — the namespace/ephemeris is
+in the log, not a series). Assume
 `NS=<namespace>` and the operator lives in `ntn-operators-system` unless you
 deploy it elsewhere; the operator Deployment is `<release>-controller-manager`
 (the commands below assume a release named `ntn-operators`).
@@ -37,6 +39,7 @@ Metric → alert map:
 | `NTNGPFetchNotReady` | `ntn_operators_gp_fetch_ready == 0` | 30m |
 | `NTNDeepSpaceElementsRejected` | `ntn_operators_gp_deep_space_rejected_count > 0` | 15m |
 | `NTNControllerReconcileErrors` | `sum by (controller) (rate(controller_runtime_reconcile_errors_total[5m])) > 0.1` | 15m |
+| `NTNEphemerisMapperIndexErrors` | `increase(ntn_operators_ephemeris_mapper_index_error_total[15m]) > 0` | 15m |
 
 ---
 
@@ -341,6 +344,53 @@ Common causes: RBAC gaps (a role missing a verb — check
 reconcile. **Mitigate** per the logged error; if a single CR is the culprit,
 `kubectl describe` it and correct or quarantine it. **Escalate** to the platform
 owner for RBAC/apiserver issues.
+
+---
+
+## NTNEphemerisMapperIndexErrors
+
+**Fires when** `increase(ntn_operators_ephemeris_mapper_index_error_total[15m]) > 0`
+for 15m. **Unlabeled** — no `namespace` (see *Why unlabeled* below).
+
+**Impact.** The SatelliteEphemeris→NTNCellConfig fan-out mapper's `spec.ephemerisRef`
+indexed lookup is erroring, so a SatelliteEphemeris change does not immediately fan
+out to the NTNCellConfigs that reference it. This is **self-healing**: each
+referencing cell re-resolves the ephemeris on its own reconcile `RequeueAfter`
+(1–5 min), so nothing is permanently lost — the cost is propagation *delay*, not a
+stall. A sustained rate means the shared informer cache is unhealthy, which
+usually also shows up as broader reconcile errors.
+
+**Why unlabeled.** The `spec.ephemerisRef` field index is registered in
+`SetupWithManager` and is startup-fatal, so at runtime this is never a *missing*
+index — it is a cache/index anomaly on the controller's shared informer cache, a
+process-level fault. A `namespace` label would spawn one series per namespace that
+happened to fan out during the anomaly (fleet-wide cardinality) without localizing
+the fault, so the metric is a single unlabeled counter and the affected
+namespace/ephemeris is in the Error log instead.
+
+**Diagnose.**
+
+```bash
+# The mapper logs the affected ephemeris + namespace with the underlying error.
+kubectl logs -l control-plane=controller-manager -n ntn-operators-system --tail=-1 --prefix=true --since=20m \
+  | grep -i 'indexed ephemerisRef lookup failed'
+```
+
+```promql
+# One-off blip (self-heals) or a sustained rate (cache unhealthy)?
+increase(ntn_operators_ephemeris_mapper_index_error_total[15m])
+# Cross-check: a sick cache usually elevates reconcile errors too.
+sum by (controller) (rate(controller_runtime_reconcile_errors_total[5m]))
+```
+
+**Mitigate.** A single blip needs no action — the cells re-resolve on requeue. For
+a sustained rate, treat it as informer-cache / apiserver health: check apiserver
+reachability and the controller's memory/restart state (an OOM-restarting manager
+resyncs its cache repeatedly). It commonly clears on a clean controller restart
+once the underlying apiserver/cache issue is resolved.
+
+**Escalate** to the platform owner (apiserver / controller-runtime cache health)
+if the rate persists across a restart.
 
 ---
 

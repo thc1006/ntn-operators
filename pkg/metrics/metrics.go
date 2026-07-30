@@ -235,17 +235,22 @@ var (
 		[]string{"namespace", "name"},
 	)
 
-	// EphemerisMapperFallbackTotal counts times the SatelliteEphemeris->NTNCellConfig mapper
-	// fell back to a full namespace scan because the spec.ephemerisRef index was unavailable.
-	// A persistent nonzero rate in production means the field index is not registered (an
-	// O(namespace) perf regression that the V(1) fallback log would otherwise hide at the
-	// default verbosity).
-	EphemerisMapperFallbackTotal = prometheus.NewCounterVec(
+	// EphemerisMapperIndexErrorTotal counts unexpected errors from the spec.ephemerisRef indexed
+	// lookup in the SatelliteEphemeris->NTNCellConfig fan-out mapper. The index is registered in
+	// SetupWithManager (startup-fatal otherwise), so a nonzero rate is a real cache/index anomaly,
+	// not a missing index at runtime. Context cancellation and deadlines are excluded (shutdown or
+	// a deadline, not a degradation). The mapper drops that one fan-out rather than amplifying the
+	// anomaly into an O(namespace) scan; the referencing cells re-resolve the ephemeris on their own
+	// RequeueAfter, so this counter is observability, not lost work.
+	//
+	// Unlabeled: the fault is process-level (the shared informer cache), not per-namespace, so a
+	// namespace label would multiply series across a fleet without localizing it; the affected
+	// namespace/ephemeris is in the mapper's Error log. Alerted via NTNEphemerisMapperIndexErrors.
+	EphemerisMapperIndexErrorTotal = prometheus.NewCounter(
 		prometheus.CounterOpts{
-			Name: "ntn_operators_ephemeris_mapper_index_fallback_total",
-			Help: "Times the ephemeris->cell mapper fell back to a full namespace scan (spec.ephemerisRef index unavailable).",
+			Name: "ntn_operators_ephemeris_mapper_index_error_total",
+			Help: "spec.ephemerisRef indexed-lookup errors in the ephemeris mapper (excludes context cancel/deadline).",
 		},
-		[]string{"namespace"},
 	)
 )
 
@@ -266,7 +271,7 @@ func init() {
 		ReaderQueryDuration,
 		ReaderErrorsTotal,
 		ReaderStaleUsedTotal,
-		EphemerisMapperFallbackTotal,
+		EphemerisMapperIndexErrorTotal,
 	)
 	// Note: logging here is intentionally omitted because init() runs
 	// before controller-runtime's logger is configured. Registration
