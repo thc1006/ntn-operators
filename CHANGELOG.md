@@ -160,6 +160,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Runtime satellite selection is now deterministic and fails closed instead of silently switching
+  satellites.** `SatelliteEphemeris` propagated states inherited the upstream response order
+  (`FilterOMMs` preserves it; no dedup, no sort), so with a multi-satellite ephemeris and no
+  `NTNCellConfig.spec.ephemerisNoradID` the cell pushed "the first" state — and a reordered upstream
+  response (`[A,B]`→`[B,A]`, which neither CelesTrak nor Space-Track guarantees stable) silently
+  switched which satellite was pushed, while a duplicate NORAD (e.g. a `GP_HISTORY` query) could serve
+  an older element set. The producer now keeps, per NORAD, the latest-epoch element set and sorts by
+  NORAD ascending; the runtime-push consumer fails **closed** (`EphemerisPushed=False`, reason
+  `EphemerisSelectionAmbiguous`) when `ephemerisNoradID` is unset against more than one satellite,
+  rather than guess. A single-satellite ephemeris still resolves implicitly. Mutation-tested.
+
 - **The manager waits indefinitely for runnables on shutdown, so the leader lease is never released
   early.** `GracefulShutdownTimeout` was unset (controller-runtime default 30s). A *finite* timeout is
   unsafe with `LeaderElectionReleaseOnCancel`: `runnableGroup.StopAndWait` returns on ctx-expiry
@@ -320,6 +331,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrade notes
 
+- **Runtime push now fails closed for a multi-satellite ephemeris with no `ephemerisNoradID`.** An
+  existing `NTNCellConfig` on the runtime-push path that left `spec.ephemerisNoradID` unset while its
+  referenced `SatelliteEphemeris` tracks more than one satellite will now hold with
+  `EphemerisPushed=False` (reason `EphemerisSelectionAmbiguous`) instead of pushing whichever
+  satellite the upstream listed first. Set `spec.ephemerisNoradID` to the intended satellite to
+  restore pushing. Single-satellite ephemerides are unaffected.
 - **`passPrediction.horizon`: negative is rejected, over-7-days is clamped.** A horizon > 7 days is
   clamped to 7 days (surfaced on the `PassesPredicted` condition message, not silently), so a spec
   relying on windows beyond 7 days will see them truncated (`MaxPassWindows` already capped the

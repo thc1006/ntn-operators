@@ -45,6 +45,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
+	"github.com/akhenakh/sgp4"
 	"github.com/prometheus/client_golang/prometheus"
 
 	ntnv1alpha1 "github.com/thc1006/ntn-operators/api/v1alpha1"
@@ -1026,6 +1027,35 @@ func propagationInputHash(spec ntnv1alpha1.SatelliteEphemerisSpec) string {
 // future epoch and records the ECEF state vectors in status.propagatedStates for
 // downstream runtime ephemeris push (#176). The set is filtered by
 // spec.satellites.noradIDs and capped; un-propagatable satellites are skipped.
+// canonicalizeOMMs makes the propagated-state order DETERMINISTIC and one-per-NORAD, independent of
+// upstream response order (neither CelesTrak nor Space-Track guarantees it stable) and of a history
+// feed returning multiple element sets per object. Without it, status.propagatedStates inherits
+// upstream order, so states[0] — the state a cell with no ephemerisNoradID pushes — could silently
+// switch satellites between fetches, and a duplicate NORAD could serve an older element set. Keeps,
+// per NORAD, the OMM with the latest PARSEABLE epoch (a NORAD whose every epoch is unparseable keeps
+// one, to stay counted+skipped downstream), then sorts by NORAD ascending.
+func canonicalizeOMMs(omms []sgp4.OMM) []sgp4.OMM {
+	type pick struct {
+		omm   sgp4.OMM
+		epoch time.Time
+		ok    bool
+	}
+	best := make(map[int]pick, len(omms))
+	for _, o := range omms {
+		t, ok := parseOMMEpoch(o.EpochStr)
+		cur, seen := best[o.NoradCatID]
+		if !seen || (ok && (!cur.ok || t.After(cur.epoch))) {
+			best[o.NoradCatID] = pick{omm: o, epoch: t, ok: ok}
+		}
+	}
+	out := make([]sgp4.OMM, 0, len(best))
+	for _, p := range best {
+		out = append(out, p.omm)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].NoradCatID < out[j].NoradCatID })
+	return out
+}
+
 func (r *SatelliteEphemerisReconciler) propagateStates(
 	ctx context.Context,
 	eph *ntnv1alpha1.SatelliteEphemeris,
@@ -1036,7 +1066,7 @@ func (r *SatelliteEphemerisReconciler) propagateStates(
 	if eph.Spec.Satellites != nil {
 		norad = eph.Spec.Satellites.NoradIDs
 	}
-	omms := ephemeris.FilterOMMs(result.OMMs, norad)
+	omms := canonicalizeOMMs(ephemeris.FilterOMMs(result.OMMs, norad))
 	epochMs := epoch.UnixMilli()
 
 	// Count element-set epoch health across the ENTIRE tracked set — independent of SGP4 success
