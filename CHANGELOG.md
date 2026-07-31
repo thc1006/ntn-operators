@@ -357,6 +357,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   references and its `EnsureOwnership` back-fill used `SetControllerReference` in a single `Update`,
   so a genuine leftover has either our controller reference or none. A ConfigMap owned by a different controller, an unlabeled foreign object, and a
   labeled-but-empty impostor are still left untouched, and the skip is now logged. Mutation-tested.
+- **A handshake answered by something that is not a WebSocket server is no longer retried once a
+  minute forever.** The classifier keyed on a status BAND (`300 <= code < 500`), so everything else
+  fell through to "gNB unreachable" and the tight cadence. But coder/websocket accepts only a valid
+  101 and returns a **non-nil** response for every other outcome — verified against v1.8.15 — so the
+  band silently missed: a plain **200** from an HTTP server on the wrong port, a **204** from a proxy
+  that swallowed the `Upgrade`, and a **101 whose `Sec-WebSocket-Accept`, `Upgrade` header or
+  subprotocol is invalid**. Each is a deterministic protocol/config fault that the next minute cannot
+  fix, and each was being hammered indefinitely. Classification now keys on the response being
+  present rather than on a band: any definitive answer is a rejection (the bounded self-heal poll),
+  except `5xx` and `408`/`425`, which stay transient. `501 Not Implemented` and `505 HTTP Version Not
+  Supported` are deliberately excluded from that 5xx exception — they say the server is *incapable*,
+  not momentarily struggling, so banding them as transient would repeat the very mistake being fixed
+  here. A malformed 101 carries the library's reason, which names the offending header.
+
 - **A refused runtime-push handshake no longer strands the cell until an unrelated heartbeat.** Every
   non-101 HTTP response to the gNB `remote_control` WebSocket handshake in the 3xx/4xx band was
   classified `ProviderPushRejected`, which is in the never-requeue set — a set whose contract is "the
