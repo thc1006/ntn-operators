@@ -66,6 +66,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **End-to-end coverage for the credentialed runtime push (`wss://` + bearer + mTLS), closing #329.**
+  Everything under #206, #295, #297, #313, #318 and #322 was unit-tested against `httptest`, which
+  cannot show that the *deployment shape* works — and `test/e2e/` contained zero tests touching
+  `remoteControl`, `wss` or mTLS, so a regression in the chain shipped green. The new `e2e_wss` suite
+  stands up the shape the sample documents (a plaintext remote_control stand-in with a TLS-terminating
+  nginx sidecar in front of it) and asserts **what crossed the wire**, read back out of the plaintext
+  backend, not merely that a condition flipped. It needs **no image build**: the gNB stand-in is
+  stdlib-only Go mounted from a ConfigMap and run with the stock `golang` image, and the proxy is stock
+  `nginx` — so it runs identically on Kind in CI and on a plain kubeadm cluster, with no Docker, no
+  registry and no `kind load`. The nginx config is read from `config/samples/remote-control-tls/`, so
+  the shipped sample is what is under test rather than a copy that could drift. Four arms: the happy
+  path (frame validated for cmd/plmn/nci/future-epoch), a wrong bearer classified as
+  `RemoteEndpointRejected`, a token without `ca.crt` refused before any dial (#313), and a dropped
+  client certificate refused by the proxy — the last three each also asserting that **nothing** reached
+  the backend. CI guards the same false-green classes the HA suite does: a tag typo, a deleted arm, or
+  a run where no frame ever crossed the wire all fail the job.
+
 - **A deployable TLS-termination sample for the credentialed runtime push, and the guide that was
   missing.** The operator can speak `wss://` with a bearer token and mutual TLS, but OCUDU's
   `remote_control` server is plaintext and unauthenticated — so the feature only works behind a

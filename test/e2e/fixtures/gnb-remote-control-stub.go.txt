@@ -1,0 +1,131 @@
+// NOTE: .go.txt, not .go — this is SOURCE DATA mounted into a ConfigMap and run with the
+// stock golang image inside the cluster. It must NOT be compiled into the test binary.
+
+// Plaintext stand-in for OCUDU's remote_control WebSocket server.
+// STDLIB ONLY, on purpose: it is mounted from a ConfigMap and run with the stock
+// golang image, so the e2e needs no image build, no registry and no network at
+// container start — and behaves identically on kind and on a kubeadm cluster.
+package main
+
+import (
+	"crypto/sha1"
+	"encoding/base64"
+	"encoding/binary"
+	"encoding/json"
+	"io"
+	"log"
+	"net/http"
+	"os"
+	"time"
+)
+
+const wsGUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+
+func accept(key string) string {
+	h := sha1.New()
+	_, _ = io.WriteString(h, key+wsGUID)
+	return base64.StdEncoding.EncodeToString(h.Sum(nil))
+}
+
+// readFrame reads one client frame (always masked, per RFC 6455 §5.1).
+func readFrame(r io.Reader) ([]byte, error) {
+	var hdr [2]byte
+	if _, err := io.ReadFull(r, hdr[:]); err != nil {
+		return nil, err
+	}
+	n := uint64(hdr[1] & 0x7f)
+	switch n {
+	case 126:
+		var e [2]byte
+		if _, err := io.ReadFull(r, e[:]); err != nil {
+			return nil, err
+		}
+		n = uint64(binary.BigEndian.Uint16(e[:]))
+	case 127:
+		var e [8]byte
+		if _, err := io.ReadFull(r, e[:]); err != nil {
+			return nil, err
+		}
+		n = binary.BigEndian.Uint64(e[:])
+	}
+	var mask [4]byte
+	if hdr[1]&0x80 != 0 {
+		if _, err := io.ReadFull(r, mask[:]); err != nil {
+			return nil, err
+		}
+	}
+	buf := make([]byte, n)
+	if _, err := io.ReadFull(r, buf); err != nil {
+		return nil, err
+	}
+	if hdr[1]&0x80 != 0 {
+		for i := range buf {
+			buf[i] ^= mask[i%4]
+		}
+	}
+	return buf, nil
+}
+
+// writeFrame writes one unmasked text frame (server→client is never masked).
+func writeFrame(w io.Writer, p []byte) error {
+	var hdr []byte
+	switch {
+	case len(p) < 126:
+		hdr = []byte{0x81, byte(len(p))}
+	default:
+		hdr = []byte{0x81, 126, 0, 0}
+		binary.BigEndian.PutUint16(hdr[2:], uint16(len(p)))
+	}
+	if _, err := w.Write(append(hdr, p...)); err != nil {
+		return err
+	}
+	return nil
+}
+
+func main() {
+	http.HandleFunc("/received", func(w http.ResponseWriter, _ *http.Request) {
+		b, _ := os.ReadFile("/tmp/received.jsonl")
+		_, _ = w.Write(b)
+	})
+	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		key := r.Header.Get("Sec-WebSocket-Key")
+		if key == "" {
+			http.Error(w, "not a websocket upgrade", http.StatusBadRequest)
+			return
+		}
+		conn, buf, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			return
+		}
+		defer conn.Close() //nolint:errcheck
+		_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
+		_, _ = buf.WriteString("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n" +
+			"Connection: Upgrade\r\nSec-WebSocket-Accept: " + accept(key) + "\r\n\r\n")
+		_ = buf.Flush()
+
+		data, err := readFrame(buf)
+		if err != nil {
+			log.Printf("read: %v", err)
+			return
+		}
+		log.Printf("FRAME %s", data)
+		var env struct {
+			Cmd   string            `json:"cmd"`
+			Cells []json.RawMessage `json:"cells"`
+		}
+		if json.Unmarshal(data, &env) != nil || env.Cmd != "ntn_config_update" || len(env.Cells) == 0 {
+			_ = writeFrame(buf, []byte(`{"error":"malformed ntn_config_update"}`))
+			_ = buf.Flush()
+			return
+		}
+		if f, e := os.OpenFile("/tmp/received.jsonl", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644); e == nil {
+			_, _ = f.Write(append(data, '\n'))
+			_ = f.Close()
+		}
+		reply, _ := json.Marshal(map[string]any{"cmd": env.Cmd, "timestamp": time.Now().UnixMilli()})
+		_ = writeFrame(buf, reply)
+		_ = buf.Flush()
+	})
+	log.Println("stdlib remote_control stand-in on :8001")
+	log.Fatal(http.ListenAndServe(":8001", nil))
+}
