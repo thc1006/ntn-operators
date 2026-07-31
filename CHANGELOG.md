@@ -283,6 +283,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   These need different operator responses and only one of them — staleness — self-heals on the next
   successful fetch, so collapsing them cost an operator the diagnosis during the exact outage the
   condition exists to report. `True/ConstellationMemberAvailable` was already in place.
+- **`failoverPolicy.sessionContinuity` is now documented as accepted-but-not-enforced.** The field's
+  godoc previously claimed it *"preserves active sessions during failover"*; this build performs **no**
+  runtime session preservation, so active sessions may drop on a path switch regardless of the value.
+  The field is retained for forward compatibility (a future release may honor it, #69) and its
+  admission default stays `true`, but the API doc — and thus `kubectl explain ntnslice.spec.failoverPolicy.sessionContinuity` —
+  no longer overstates it. **Documentation only — no behavior change**; if you relied on this field for
+  session survival, be aware it never took effect. (README already carried this caveat; the schema now does too.)
 
 - **`FailoverReady=True` now reports Reason `ConstellationMemberAvailable`, not the overstated
   `SatelliteAvailable`.** The condition *type* is unchanged (`FailoverReady`), so anything keyed on the
