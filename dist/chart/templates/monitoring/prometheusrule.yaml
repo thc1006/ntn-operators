@@ -140,4 +140,27 @@ spec:
           annotations:
             summary: "Ephemeris fan-out mapper indexed lookup is erroring"
             description: "The SatelliteEphemeris->NTNCellConfig mapper's spec.ephemerisRef index lookup has failed in the last 15m (cache/index anomaly, not a missing index). Cells re-resolve on their own requeue, but a sustained rate means the informer cache is unhealthy. See the controller Error log for the affected namespace/ephemeris."
+        # ADR-0007: persisting the last-good OMM set is deliberately best-effort — a failure must
+        # not fail live reconciliation. That is precisely why it needs an alert: without one the
+        # cache can be failing to write for weeks and the first symptom is a restart with nothing
+        # to propagate, during the upstream outage the cache exists for. One blip is expected
+        # (conflict, transient apiserver error); sustained failure means restart continuity is gone.
+        - alert: NTNOMMCachePersistFailing
+          expr: increase(ntn_operators_omm_cache_persist_total{result!="success"}[30m]) > 0
+          for: 30m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Durable OMM cache is not being written for {{`{{ $labels.namespace }}`}}/{{`{{ $labels.ephemeris }}`}}"
+            description: "Durable OMM cache writes have been failing for 30m (result={{`{{ $labels.result }}`}}). Live propagation is unaffected, but a restart or leader failover will have no last-good element set to fall back on. skipped_oversize means the tracked set exceeds the ConfigMap bound; failed means the write itself is erroring."
+        # A restore that is refused is worse than one that never happens: the object is there, and
+        # something about it does not check out. refused_identity on the legacy name is how a
+        # pre-ADR-0007 truncation collision surfaces; refused_digest means corruption or a hand edit.
+        - alert: NTNOMMCacheRestoreRefused
+          expr: increase(ntn_operators_omm_cache_restore_total{result=~"refused_.*"}[1h]) > 0
+          labels:
+            severity: warning
+          annotations:
+            summary: "Durable OMM cache restore refused for {{`{{ $labels.namespace }}`}}/{{`{{ $labels.ephemeris }}`}}"
+            description: "A persisted OMM cache was found but refused ({{`{{ $labels.result }}`}}). The cold start had to proceed without it. refused_identity: the object belongs to a different CR generation or source (under the legacy name, a truncation collision); refused_digest: corrupt or hand-edited payload; refused_parse: the stored element set no longer validates."
 {{- end }}

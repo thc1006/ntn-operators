@@ -441,6 +441,85 @@ if the rate persists across a restart.
 
 ---
 
+## NTNOMMCachePersistFailing
+
+**Fires when** `increase(ntn_operators_omm_cache_persist_total{result!="success"}[30m]) > 0`
+for 30m. Labels: `namespace`, `ephemeris`, `result`.
+
+**Impact.** None right now — and that is the point. Persisting the last-good OMM set
+is best-effort by design (ADR-0007): a write failure must never fail live
+reconciliation, so nothing degrades while the process stays up. The cost is
+deferred: on the next restart or leader failover the controller has **no last-good
+element set to fall back on**, so a concurrent upstream outage means propagation
+stops as soon as the last pushed epoch expires. This alert exists because that
+failure mode is otherwise invisible until the moment it hurts.
+
+**Diagnose.**
+
+```bash
+kubectl logs -l control-plane=controller-manager -n ntn-operators-system --tail=-1 --since=40m \
+  | grep 'omm-cache:'
+```
+
+```promql
+# Which outcome?  failed | skipped_oversize | skipped_marshal
+sum by (namespace, ephemeris, result) (increase(ntn_operators_omm_cache_persist_total{result!="success"}[30m]))
+```
+
+**Mitigate by `result`.**
+
+- `failed` — the ConfigMap write itself is erroring. Check RBAC (`get;create;update`
+  on configmaps), the namespace's ResourceQuota for ConfigMap count, and apiserver
+  health. The controller holds no `delete` verb by design; a leftover object is
+  garbage-collected with its owner CR.
+- `skipped_oversize` — the tracked OMM set exceeds the ~900 KiB bound under the 1 MiB
+  ConfigMap limit. Narrow `spec.satellites.noradIDs` so the persisted set is the one
+  actually propagated. The in-memory cache is unaffected; only restart continuity is.
+- `skipped_marshal` — a payload that will not serialize. Treat as a bug and capture
+  the log line.
+
+**Escalate** to the platform owner if `failed` persists across a controller restart.
+
+---
+
+## NTNOMMCacheRestoreRefused
+
+**Fires when** `increase(ntn_operators_omm_cache_restore_total{result=~"refused_.*"}[1h]) > 0`.
+Labels: `namespace`, `ephemeris`, `result`.
+
+**Impact.** A persisted cache **was found and rejected**, so the cold start proceeded
+without it. That is strictly worse than having no cache: something wrote an object
+that does not check out. A plain miss is deliberately not counted — every first-ever
+reconcile misses — so every sample here is a real refusal.
+
+**Diagnose by `result`.**
+
+- `refused_identity` — the object's owner UID or fetch identity does not match the
+  live CR. Expected exactly once after a delete/recreate or a `spec.source` edit, and
+  then never again. **Sustained, under the legacy name, this is a pre-ADR-0007
+  truncation collision**: two SatelliteEphemeris objects sharing a 243-character name
+  prefix mapped onto one ConfigMap, and the loser could never persist. The hashed name
+  fixes new writes; confirm with the object list below.
+- `refused_digest` — the stored payload does not match its recorded SHA-256. Corrupt,
+  truncated, or hand-edited. Never restored, by design.
+- `refused_parse` — the payload no longer validates as an OMM set (upstream schema
+  change, or a partially written object).
+
+```bash
+# Which cache objects exist for this CR, and who owns them?
+kubectl get cm -n <ns> -l ntn.operators.dev/omm-cache=true \
+  -o custom-columns=NAME:.metadata.name,OWNER-UID:.metadata.annotations.ntn\.operators\.dev/omm-owner-uid
+```
+
+**Mitigate.** No action is needed for a one-off after a delete/recreate — the next
+successful fetch rewrites the cache under the hashed name. For `refused_digest` or
+`refused_parse`, delete the offending ConfigMap and let the next fetch repersist. For
+sustained `refused_identity`, check for two CRs with a shared long name prefix; after
+this release each gets a distinct hashed name, so the collision clears on the next
+persist.
+
+---
+
 ## See also
 
 - [`e2e-prometheus-metrics.md`](e2e-prometheus-metrics.md) — wiring an NTNSlice

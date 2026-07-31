@@ -273,6 +273,45 @@ var (
 	)
 )
 
+var (
+	// OMMCachePersistTotal counts durable OMM-cache writes by outcome. Persistence is
+	// deliberately best-effort — a failure must not fail live reconciliation (ADR-0007) — which
+	// is exactly why it needs a counter: without one, the cache can be failing to write for
+	// weeks and the first symptom is a restart that has nothing to propagate.
+	// result: success | failed | skipped_oversize | skipped_marshal.
+	OMMCachePersistTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "ntn_operators_omm_cache_persist_total",
+			Help: "Durable OMM cache writes, by outcome.",
+		},
+		[]string{"namespace", "ephemeris", "result"},
+	)
+
+	// OMMCacheRestoreTotal counts cold-start restores by outcome. A plain miss is NOT counted:
+	// every first-ever reconcile misses, so it would drown the refusals, which are the signal.
+	// result: hydrated | migrated | refused_digest | refused_identity | refused_parse.
+	// Sustained refused_identity on the legacy name is how a pre-ADR-0007 truncation collision
+	// shows itself.
+	OMMCacheRestoreTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "ntn_operators_omm_cache_restore_total",
+			Help: "Durable OMM cache restores after a cold start, by outcome.",
+		},
+		[]string{"namespace", "ephemeris", "result"},
+	)
+
+	// OMMCacheRestoredAgeSeconds is how old the restored element set was at restore time.
+	// Restoring does not make data fresh: the freshness gates still apply, so a large value
+	// predicts that propagation is about to stop, and does so before it does.
+	OMMCacheRestoredAgeSeconds = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "ntn_operators_omm_cache_restored_age_seconds",
+			Help: "Age of the OMM set at the moment it was restored from the durable cache.",
+		},
+		[]string{"namespace", "ephemeris"},
+	)
+)
+
 func init() {
 	metrics.Registry.MustRegister(
 		FailoverTotal,
@@ -291,6 +330,9 @@ func init() {
 		ReaderQueryDuration,
 		ReaderErrorsTotal,
 		ReaderStaleUsedTotal,
+		OMMCachePersistTotal,
+		OMMCacheRestoreTotal,
+		OMMCacheRestoredAgeSeconds,
 		EphemerisMapperIndexErrorTotal,
 	)
 	// Note: logging here is intentionally omitted because init() runs
