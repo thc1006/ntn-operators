@@ -278,6 +278,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Losing the ConfigMap create race is now classified instead of surfacing as a generic apply
+  failure.** `ApplyCellConfig` reads the ConfigMap with the uncached reader and creates it when the
+  read says NotFound. If anything else takes that name in between, the `Create` returned
+  `AlreadyExists`, which the reconciler reported as a plain `ApplyFailed` — a misleading condition
+  plus a Warning event that only self-corrected a requeue interval later. It now re-reads the object
+  that won the race and classifies it: ours to adopt and converge, or foreign and reported as
+  `ErrConfigMapNotOwned` → `OwnershipConflict`, which is what the situation actually is.
+
+- **The operator's management labels are repaired on a ConfigMap it owns.** The no-op guard compared
+  only `geo_ntn.yml` and the koffset annotation, and the update path never re-set the labels — so a
+  ConfigMap whose `app.kubernetes.io/managed-by` and `app.kubernetes.io/component` labels had been
+  stripped was reported successfully applied and never fixed. That matters beyond `kubectl get -l`:
+  those labels are how a ConfigMap is recognized as the operator's own once its owner reference is
+  gone, so a stripped label would quietly make a future pre-atomic-ref leftover unreclaimable. The
+  labels are now part of the compared desired state and are restored on write. The #204-G3 no-op is
+  preserved: a fully-correct ConfigMap is still not rewritten on the fan-out cadence.
+
 - **A legacy unowned ConfigMap is no longer leaked when the CR is deleted before its first
   reconcile.** #210 reclaims pre-atomic-reference artifacts — a ConfigMap carrying the operator's
   management labels and its `geo_ntn.yml` key but no owner reference, left behind when an older
@@ -512,6 +529,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (#220 C4).
 
 ### Upgrade notes
+
+- **The ConfigMap name of an NTNCellConfig whose name exceeds ~243 characters changes.** The
+  disambiguating hash suffix appended to an over-long name widened from 32 bits (8 hex chars) to
+  128 bits (32 hex chars): a collision puts the losing CR into a permanent `OwnershipConflict`, and
+  a 32-bit truncated digest can be searched offline in seconds, so a principal able to create an
+  NTNCellConfig could aim a long name at another CR's ConfigMap. Names short enough to fit whole —
+  effectively all of them — are **unchanged**. For a CR long enough to be truncated, the operator
+  creates a ConfigMap under the new name on first reconcile after the upgrade; the old one keeps its
+  controller owner reference and is garbage-collected with the CR, but anything mounting it **by
+  name** (a gNB Pod spec) must be repointed. Check with
+  `kubectl get ntncellconfig -A -o name | awk 'length($0) > 250'` before upgrading.
 
 - **A satellite whose element set is stale beyond `maxEpochAge` now holds NTNSlice on terrestrial**
   instead of failing over to it — previously NTNSlice could steer traffic onto a satellite whose stale

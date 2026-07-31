@@ -48,16 +48,23 @@ const configDataKey = "geo_ntn.yml"
 // maxK8sNameLen is the maximum length for a Kubernetes object name.
 const maxK8sNameLen = 253
 
+// configMapNameHashBytes is the width of the disambiguating hash suffix appended when a CR
+// name is too long to fit whole. 128 bits, not the 32 bits this used to take: a collision
+// puts the losing CR into a permanent OwnershipConflict, and a 32-bit truncated digest is
+// searchable offline in seconds, so a principal able to create an NTNCellConfig could aim a
+// long name at another CR's ConfigMap. 128 bits removes that as a construction problem.
+const configMapNameHashBytes = 16
+
 // ConfigMapNameFor returns the ConfigMap name for a given NTNCellConfig CR name.
-// If the resulting name exceeds K8s limits, it is truncated with a 8-char hash
-// suffix to prevent collisions between different long CR names.
+// If the resulting name exceeds K8s limits, it is truncated and disambiguated with a
+// hash suffix so different long CR names cannot land on the same ConfigMap.
 func ConfigMapNameFor(crName string) string {
 	name := ConfigMapPrefix + crName
 	if len(name) > maxK8sNameLen {
 		h := sha256.Sum256([]byte(name))
-		suffix := hex.EncodeToString(h[:4]) // 8 hex chars
-		// Truncate to leave room for "-" + 8-char hash
-		truncLen := maxK8sNameLen - 9 // 253 - 9 = 244
+		suffix := hex.EncodeToString(h[:configMapNameHashBytes])
+		// Leave room for "-" + the hex-encoded suffix.
+		truncLen := maxK8sNameLen - 1 - len(suffix)
 		name = strings.TrimRight(name[:truncLen], "-.") + "-" + suffix
 	}
 	return name
@@ -224,12 +231,23 @@ func (p *Provider) ApplyCellConfig(
 		if err := controllerutil.SetControllerReference(owner, cm, scheme); err != nil {
 			return fmt.Errorf("setting controller reference: %w", err)
 		}
-		if err := p.client.Create(ctx, cm); err != nil {
+		err := p.client.Create(ctx, cm)
+		if err == nil {
+			return nil
+		}
+		if !apierrors.IsAlreadyExists(err) {
 			return fmt.Errorf("creating ConfigMap: %w", err)
 		}
-		return nil
-	}
-	if err != nil {
+		// Lost the create race: something else made this name between our Get and our
+		// Create. The object exists now, so classify it — ours to update/adopt, or foreign
+		// (ErrConfigMapNotOwned, which the reconciler surfaces as OwnershipConflict).
+		// Returning the raw AlreadyExists instead would open a misleading ApplyFailed
+		// episode — Warning event included — that only self-corrects a requeue later.
+		cm = &corev1.ConfigMap{}
+		if err := p.reader().Get(ctx, key, cm); err != nil {
+			return fmt.Errorf("re-reading ConfigMap after losing the create race: %w", err)
+		}
+	} else if err != nil {
 		return fmt.Errorf("getting ConfigMap: %w", err)
 	}
 
@@ -252,13 +270,18 @@ func (p *Provider) ApplyCellConfig(
 	}
 	desiredData := string(yamlData)
 	desiredKoffset := strconv.Itoa(spec.NTN.CellSpecificKoffset)
-	// No-op when the stored ConfigMap already carries the desired content AND we already
+	// No-op when the stored ConfigMap already carries the desired state AND we already
 	// owned it: GenerateConfig is a deterministic function of the (static) CR spec, so a
 	// SatelliteEphemeris fan-out reconcile that changed nothing must not rewrite a
 	// byte-identical ConfigMap — an unconditional Update bumps resourceVersion and churns
 	// every watcher on the ~3-minute re-propagation cadence (#204-G3). A just-adopted CM
 	// (alreadyOwned == false) always writes, so the owner reference persists.
-	if alreadyOwned &&
+	//
+	// The management labels are part of that desired state, not just a create-time stamp:
+	// they are how a ConfigMap is recognized as ours once an owner reference is gone
+	// (isAdoptableLeftover), so a stripped label would quietly make a future leftover
+	// unreclaimable — and they are how an operator selects these objects with kubectl.
+	if alreadyOwned && isOperatorManaged(cm) &&
 		cm.Data[configDataKey] == desiredData &&
 		cm.Annotations["ntn.operators.dev/koffset"] == desiredKoffset {
 		return nil
@@ -267,6 +290,11 @@ func (p *Provider) ApplyCellConfig(
 		cm.Data = make(map[string]string)
 	}
 	cm.Data[configDataKey] = desiredData
+	if cm.Labels == nil {
+		cm.Labels = make(map[string]string)
+	}
+	cm.Labels[managedByLabel] = managedByValue
+	cm.Labels[componentLabel] = componentValue
 	if cm.Annotations == nil {
 		cm.Annotations = make(map[string]string)
 	}
