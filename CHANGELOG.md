@@ -353,6 +353,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to every referencing `NTNCellConfig` and bumped the ConfigMap's `resourceVersion`, churning
   every watcher. It now skips the write when the stored content (config + koffset annotation)
   already matches and the ConfigMap is already owned (#204-G3).
+- **`NTNCellConfig` failure early returns no longer re-write an identical status every requeue.**
+  The reconcile already skipped a byte-identical *terminal* status write, but the failure early
+  returns — provider registry/type unusable, `ApplyCellConfig` failing, post-apply `GetCellStatus`
+  failing, and an ephemeris-push failure — still called `Status().Update` unconditionally, so a
+  persistent outage re-sent an identical `ConfigApplied=False`/`EphemerisPushed=False` through API
+  handling, admission, and the watch stream on every (minutely) requeue. A `persistStatusIfChanged`
+  helper (mirroring the NTNSlice one) now guards every status write, terminal and early-return alike;
+  the episode-gated events keep the WO-20 emit-after-persist discipline (any change that would emit
+  also fails the DeepEqual and writes). Verified by counting status subresource requests, since the
+  apiserver short-circuits a byte-identical write without a `resourceVersion` bump.
 - **`SatelliteEphemeris`→`NTNCellConfig` fan-out uses a `spec.ephemerisRef` field index.**
   The mapper resolved referencing cells by scanning every `NTNCellConfig` in the namespace and
   filtering in Go; it now uses an indexed cache lookup (registered in `SetupWithManager`), with

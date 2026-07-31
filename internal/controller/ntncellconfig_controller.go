@@ -250,7 +250,7 @@ func (r *NTNCellConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			Message:            "NTN provider registry is not configured",
 			ObservedGeneration: cc.Generation,
 		})
-		if err := r.Status().Update(ctx, cc); err != nil {
+		if err := r.persistStatusIfChanged(ctx, cc, oldStatus); err != nil {
 			return ctrl.Result{}, err
 		}
 		return ctrl.Result{RequeueAfter: time.Minute}, nil
@@ -265,7 +265,7 @@ func (r *NTNCellConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			Message:            fmt.Sprintf("Provider type %q is not registered", cc.Spec.Provider.Type),
 			ObservedGeneration: cc.Generation,
 		})
-		if err := r.Status().Update(ctx, cc); err != nil {
+		if err := r.persistStatusIfChanged(ctx, cc, oldStatus); err != nil {
 			return ctrl.Result{}, err
 		}
 		return ctrl.Result{}, nil
@@ -310,7 +310,7 @@ func (r *NTNCellConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			Message:            err.Error(),
 			ObservedGeneration: cc.Generation,
 		})
-		if err := r.Status().Update(ctx, cc); err != nil {
+		if err := r.persistStatusIfChanged(ctx, cc, oldStatus); err != nil {
 			return ctrl.Result{}, err
 		}
 		if applyFailEpisode && r.Recorder != nil {
@@ -332,7 +332,7 @@ func (r *NTNCellConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			Message:            fmt.Sprintf("Config applied but status verification failed: %v", err),
 			ObservedGeneration: cc.Generation,
 		})
-		if err := r.Status().Update(ctx, cc); err != nil {
+		if err := r.persistStatusIfChanged(ctx, cc, oldStatus); err != nil {
 			return ctrl.Result{}, err
 		}
 		return ctrl.Result{RequeueAfter: time.Minute}, nil
@@ -392,7 +392,7 @@ func (r *NTNCellConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 				Message:            message,
 				ObservedGeneration: cc.Generation,
 			})
-			if err := r.Status().Update(ctx, cc); err != nil {
+			if err := r.persistStatusIfChanged(ctx, cc, oldStatus); err != nil {
 				return ctrl.Result{}, err
 			}
 			// This persist path durably records the ConfigApplied=True transition, so
@@ -450,15 +450,11 @@ func (r *NTNCellConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		}).Set(1)
 	}
 
-	// Skip the write when this reconcile did not change the status (an ephemeris-watch fan-out or a
-	// periodic requeue that found nothing to do): a byte-identical Status().Update is producer churn
-	// the API server, admission and the watch stream still process. The events below stay
-	// episode-gated, so they self-limit independently of whether the write happened, and the state
-	// they describe is already persisted.
-	if !equality.Semantic.DeepEqual(oldStatus, &cc.Status) {
-		if err := r.Status().Update(ctx, cc); err != nil {
-			return ctrl.Result{}, err
-		}
+	// Terminal persist (skipped when unchanged — e.g. an ephemeris-watch fan-out that found the
+	// config already applied). The events below stay episode-gated, so they self-limit whether or
+	// not this write happened, and the state they describe is already persisted.
+	if err := r.persistStatusIfChanged(ctx, cc, oldStatus); err != nil {
+		return ctrl.Result{}, err
 	}
 
 	if configApplyChanged {
@@ -468,6 +464,20 @@ func (r *NTNCellConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 
 	log.Info("NTN cell configuration applied successfully")
 	return ctrl.Result{RequeueAfter: 5 * time.Minute}, nil
+}
+
+// persistStatusIfChanged writes cc.Status only when this reconcile changed it, so a no-op
+// reconcile — or a persistent-failure early return that re-derives an identical condition on
+// every requeue — does not churn the API server, admission, and the watch stream (#188). Event
+// emits stay gated on the SAME change, so a skipped write never breaks the WO-20
+// emit-after-persist discipline: any change that would emit also fails this DeepEqual and writes.
+func (r *NTNCellConfigReconciler) persistStatusIfChanged(
+	ctx context.Context, cc *ntnv1alpha1.NTNCellConfig, oldStatus *ntnv1alpha1.NTNCellConfigStatus,
+) error {
+	if equality.Semantic.DeepEqual(oldStatus, &cc.Status) {
+		return nil
+	}
+	return r.Status().Update(ctx, cc)
 }
 
 // handleFinalizer manages ConfigMap cleanup on NTNCellConfig deletion.

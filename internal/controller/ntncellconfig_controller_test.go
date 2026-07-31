@@ -581,6 +581,50 @@ var _ = Describe("NTNCellConfig Controller", func() {
 			Expect(statusUpdates).To(Equal(0), "a steady no-op reconcile must not issue a Status().Update request")
 		})
 
+		It("should not re-write status on a repeated identical early-return failure (WO-20 P2)", func() {
+			createReferencedEphemeris()
+			createCellConfig()
+
+			// #271 guarded only the terminal success write; the failure early returns still wrote
+			// unconditionally. A persistent ApplyCellConfig failure re-derives an identical
+			// ConfigApplied=False every requeue, so after the first persist the write must stop.
+			// Count Status().Update REQUESTS (not resourceVersion — the apiserver short-circuits a
+			// byte-identical write silently, hiding the request the controller still sent).
+			statusUpdates := 0
+			mock := &provider.MockProvider{ApplyErr: errors.New("apply boom")}
+			reconciler := &NTNCellConfigReconciler{
+				Client:    &countingStatusClient{Client: k8sClient, statusUpdates: &statusUpdates},
+				Scheme:    k8sClient.Scheme(),
+				Recorder:  events.NewFakeRecorder(10),
+				Providers: map[string]provider.NTNProvider{"ocudu": mock},
+			}
+
+			// The very first reconcile only adds the finalizer and requeues (before ApplyCellConfig),
+			// so drive it once to get past that bootstrap; later reconciles exercise the apply failure.
+			_, err := reconciler.Reconcile(context.Background(), reconcile.Request{NamespacedName: cellNN})
+			Expect(err).NotTo(HaveOccurred())
+
+			// The first apply failure persists ConfigApplied=False exactly once.
+			statusUpdates = 0
+			_, err = reconciler.Reconcile(context.Background(), reconcile.Request{NamespacedName: cellNN})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(statusUpdates).To(Equal(1), "the first apply failure must persist ConfigApplied=False")
+
+			// A repeated identical failure must NOT re-write the byte-identical status.
+			statusUpdates = 0
+			result, err := reconciler.Reconcile(context.Background(), reconcile.Request{NamespacedName: cellNN})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(Equal(time.Minute))
+			Expect(statusUpdates).To(Equal(0), "a repeated identical apply failure must not re-write status")
+
+			// But a genuine change (recovery) must still write — the guard must not over-suppress.
+			mock.ApplyErr = nil
+			statusUpdates = 0
+			_, err = reconciler.Reconcile(context.Background(), reconcile.Request{NamespacedName: cellNN})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(statusUpdates).To(BeNumerically(">=", 1), "recovery to ConfigApplied=True must write status")
+		})
+
 		It("should keep ConfigApplied true and set EphemerisPushed=false when push fails", func() {
 			createReferencedEphemeris()
 			createCellConfig()
