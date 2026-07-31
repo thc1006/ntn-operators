@@ -236,6 +236,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A legacy unowned ConfigMap is no longer leaked when the CR is deleted before its first
+  reconcile.** #210 reclaims pre-atomic-reference artifacts — a ConfigMap carrying the operator's
+  management labels and its `geo_ntn.yml` key but no owner reference, left behind when an older
+  version's best-effort `EnsureOwnership` write did not land — by **adopting** them in
+  `ApplyCellConfig`. But the reconciler runs the finalizer FIRST, so a CR deleted before any
+  successful post-upgrade reconcile never reaches `ApplyCellConfig`: `Cleanup` required strict
+  controller ownership, skipped the unowned leftover, removed the finalizer, and the ConfigMap was
+  orphaned with nothing left that could ever reclaim it — the exact artifact class #210 set out to
+  recover, on the one path it did not cover. `Cleanup` now deletes under the SAME predicate
+  `ApplyCellConfig` adopts under, extracted into a single shared `isAdoptableLeftover` so the two
+  cannot drift apart again. This grants no new destructive power: adoption already ends in
+  deletion, because an adopted ConfigMap carries a controller reference and is GC-cascaded when the
+  CR goes away. The shared predicate is also **tightened**: it now requires the ConfigMap to have NO
+  owner references at all, not merely no *controller* owner reference. A ConfigMap carrying a plain
+  owner reference already belongs to another object's lifecycle, and adopting it would make the
+  operator a second owner that deletes it when this CR goes away while the other owner still claims
+  it. This excludes nothing real — the pre-atomic-ref version created the ConfigMap with no owner
+  references and its `EnsureOwnership` back-fill used `SetControllerReference` in a single `Update`,
+  so a genuine leftover has either our controller reference or none. A ConfigMap owned by a different controller, an unlabeled foreign object, and a
+  labeled-but-empty impostor are still left untouched, and the skip is now logged. Mutation-tested.
+
 - **SGP4 propagation failures are now surfaced, not silently dropped.** A tracked element set that
   passed the epoch checks but failed `PropagateToECEF` (OMM→TLE conversion, propagation, or ECEF range
   validation) was dropped from `propagatedStates` with a bare `continue` — no condition, metric, or
