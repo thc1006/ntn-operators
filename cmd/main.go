@@ -167,13 +167,13 @@ func main() {
 			"CelesTrak access should leave this empty.")
 	var remoteControlAllowedHosts string
 	flag.StringVar(&remoteControlAllowedHosts, "remote-control-allowed-endpoint-hosts", "",
-		"Comma-separated list of hostnames a CREDENTIALED NTNCellConfig "+
-			"spec.provider.remoteControl (remoteControl.tls set) may push to. Empty (default) "+
-			"permits any endpoint (opt-in). When set, a credentialed push to a host not on the "+
-			"list is refused BEFORE the credential leaves the operator — an interim confused-deputy "+
-			"boundary (#251) so a principal who can write NTNCellConfig but not read the referenced "+
-			"Secret cannot aim a labelled credential at an arbitrary host. Plaintext pushes "+
-			"(no remoteControl.tls) are never gated.")
+		"Comma-separated list of hostnames any NTNCellConfig "+
+			"spec.provider.remoteControl may push to — credentialed (remoteControl.tls set) or "+
+			"plaintext alike. Empty (default) permits any endpoint (opt-in). When set, a push to a "+
+			"host not on the list is refused BEFORE the credential (if any) leaves the operator — an "+
+			"interim confused-deputy / SSRF boundary (#251) so a principal who can write NTNCellConfig "+
+			"but has narrower egress than the operator cannot aim a labelled credential at an arbitrary "+
+			"host, nor use the operator as a plaintext relay to an internal one.")
 	// Default to the Zap PRODUCTION config (JSON encoder, info level, sampling,
 	// error-level stacktraces) rather than the kubebuilder scaffold's Development
 	// default (console, warning stacktraces, no sampling), so a deployed operator

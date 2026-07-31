@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **The `remoteControl` endpoint allow-list now gates plaintext pushes too, not only credentialed ones.**
+  `--remote-control-allowed-endpoint-hosts` previously refused only a *credentialed* (`remoteControl.tls`)
+  push to a non-allowlisted host (closing bearer exfiltration); a *plaintext* `ws://` push escaped it, so
+  a principal who can write an `NTNCellConfig` but has narrower egress than the operator could aim one at
+  an internal host and use the operator as an **SSRF relay**. The check now runs for every push (still
+  before any Secret is read, so no "Secret is valid" oracle) and the flag/error/field-doc wording drops
+  the credential-only framing. An empty (default) allow-list still permits all, so only a deployment that
+  sets the flag *and* plaintext-pushes to an unlisted host is affected — the intended tightening. This is
+  the host-level app-layer complement the egress NetworkPolicy entry below points to (they act at
+  different layers), and is distinct from the `credentialRefPolicy` admission policy, which gates the
+  *credential reference* at admission rather than the *destination* at runtime. See ADR-0009 Amendment (2). #251
+
+- **A `remoteControl.tls` token that is not a valid HTTP header value is now rejected as a credential
+  error instead of tight-looping as a network failure.** A Secret holds arbitrary bytes, so a token
+  carrying a CR/LF/NUL — most often a trailing newline from `kubectl create secret
+  --from-file`/`--from-literal` — made `net/http` reject the `Authorization: Bearer` header at dial time;
+  that was misclassified as a transient gNB unreachability (`ProviderPushFailed`, 1-min retry) with a
+  status that misreported a network fault. The token is now validated with
+  `httpguts.ValidHeaderFieldValue` (net/http's own check) and bounded to 8 KiB; a bad one takes the
+  uniform `RemoteControlCredentialUnavailable` reason and slow self-heal like every other bad credential
+  — a *distinct* reason would have re-opened the oracle closed elsewhere in this section — and the token
+  is never logged. #322
+
 - **The kustomize base now ships an opt-in default-deny egress NetworkPolicy for the operator (#299).**
   The Helm chart already restricts operator egress via `networkPolicy.enable`, but the kustomize base
   (`config/network-policy/`) only had the metrics *ingress* rule, so a non-Helm deployment had no

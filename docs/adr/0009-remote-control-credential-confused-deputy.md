@@ -1,6 +1,6 @@
 # ADR 0009 — Confused-deputy boundary for remoteControl.tls credential reads
 
-- Status: **Accepted**, **amended 2026-07-31** — see [Amendment](#amendment-2026-07-31--the-deferral-rationale-was-wrong). The interim endpoint allow-list stands; the deferral of the full per-CR authorization does **not**.
+- Status: **Accepted**, **amended 2026-07-31 (twice)** — see [Amendment (1)](#amendment-2026-07-31--the-deferral-rationale-was-wrong) and [Amendment (2)](#amendment-2026-07-31-2--the-endpoint-allow-list-now-gates-plaintext-destinations-too). The interim endpoint allow-list stands (and now gates plaintext destinations too); the deferral of the full per-CR authorization does **not**.
 - Date: 2026-07-31
 - Deciders: @thc1006
 - Relates to: #219 (label/type opt-in gate), #251 (this confused-deputy follow-up), the N-12 runtime TLS/bearer/mTLS push. Builds on the existing SSRF allow-list (`--prometheus-allowed-endpoint-hosts`, `--ephemeris-allowed-private-hosts`) and `pkg/netutil.EndpointAllowlist`.
@@ -45,7 +45,7 @@ Two-part, matching the actual (same-namespace, low-adoption) shape of the proble
 
 ## Testing
 
-`TestPushEphemerisUpdateIfNeeded_RemoteControlEndpointAllowlist` pins all four arms: a credentialed push to a non-allowlisted endpoint is refused (`RemoteControlConfigInvalid`, `errRemoteControlEndpointNotAllowed`) **and the provider is never called** (the credential does not leave the operator) — the refused case provisions **no** Secret, so getting the endpoint error (rather than credential-unavailable) proves the endpoint is checked before the Secret read (no oracle); an allowlisted credentialed push proceeds; an empty allow-list permits any endpoint (opt-in); and a plaintext push is never gated. Mutation-verified by neutering the `rc.TLS != nil` check (the attacker-endpoint case then pushes).
+`TestPushEphemerisUpdateIfNeeded_RemoteControlEndpointAllowlist` pins all five arms: a credentialed push to a non-allowlisted endpoint is refused (`RemoteControlConfigInvalid`, `errRemoteControlEndpointNotAllowed`) **and the provider is never called** (the credential does not leave the operator) — the refused case provisions **no** Secret, so getting the endpoint error (rather than credential-unavailable) proves the endpoint is checked before the Secret read (no oracle); an allowlisted credentialed push proceeds; an empty allow-list permits any endpoint (opt-in); a **plaintext** push to a non-allowlisted endpoint is **also refused** (no SSRF relay through the operator); and an allowlisted plaintext push proceeds. Mutation-verified by neutering the allow-list `Check` (both attacker-endpoint cases then push).
 
 ---
 
@@ -88,3 +88,13 @@ Checked end-to-end against a live Kubernetes **1.36.3** cluster using the artifa
 - **Objects already stored** are not re-validated; the policy applies on their next write.
 - **A privileged writer acting for someone else** — a GitOps controller or CI identity with broad rights — passes the check, because the authorized principal is whoever submits the object. This is inherent to authorization-at-admission and would be equally true of a webhook; where tenants submit through such a pipeline, the pipeline is the trust boundary.
 - The `patch`-without-`get` labelling vector from #219 is unchanged: this gates *who may reference* a labelled Secret, not who may label one.
+
+---
+
+## Amendment 2026-07-31 (2) — the endpoint allow-list now gates plaintext destinations too
+
+The original Decision scoped `--remote-control-allowed-endpoint-hosts` to *credentialed* pushes on a "nothing to exfiltrate" rationale, leaving plaintext `ws://` pushes ungated. That conflated two orthogonal axes. The endpoint allow-list constrains the **destination** — where the operator connects — which, as the Revised decision notes, is *orthogonal to who may reference the credential*. A missing credential does not make an arbitrary destination safe: a principal who can write an `NTNCellConfig` but has narrower egress than the operator can aim a **plaintext** push at an internal host and use the operator as an **SSRF relay**, no credential required.
+
+The allow-list now runs for **every** push (still before any Secret is read; still opt-in — an empty list permits all, so no existing deployment changes on upgrade). The error, flag help, and field doc drop the credential-only framing.
+
+**This does not contradict the `credentialRefPolicy` result in Amendment (1)** ("plaintext CR — created, correctly ungated"). That row is about **admission** of the *credential reference*: a plaintext CR has no `secretName`, so the credential-ref policy correctly does not block its creation. The endpoint allow-list acts later, at **runtime**, on the *destination*. The two are complementary and operate on different axes at different times — admission gates *who may reference a credential*; the allow-list gates *where any push may go*. Both compose with the opt-in egress NetworkPolicy (#317 / #299), which confines the operator at the network layer but is port-based by default and so does not confine *hosts* on its own; the app-layer allow-list adds host-level destination confinement for operators who set it.
