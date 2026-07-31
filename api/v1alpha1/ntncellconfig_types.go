@@ -91,6 +91,12 @@ type RemoteControlRef struct {
 	// 1-63) — a permanent admission error beats a silent tight-requeue on a mistyped
 	// value. The pattern alone cannot bound the label/host length (a regex quantifier
 	// would, but the DNS-1123 label form makes that unreadable), so CEL carries it.
+	//
+	// Shape validation does NOT restrict WHICH host the operator will dial; the endpoint is
+	// CR-author-controlled, so confining it is an admin egress control (SSRF), not a CRD rule.
+	// Set the operator flag --remote-control-allowed-endpoint-hosts to permit only sanctioned
+	// gNB hosts for the runtime push (empty = any, backward compatible), and pair it with the
+	// operator egress NetworkPolicy (config/network-policy/allow-egress-traffic.yaml). See #299.
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=261
 	// +kubebuilder:validation:Pattern=`^(\[[0-9a-fA-F:]+\]|[a-zA-Z0-9]([-a-zA-Z0-9]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([-a-zA-Z0-9]*[a-zA-Z0-9])?)*):[0-9]{1,5}$`

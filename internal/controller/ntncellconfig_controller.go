@@ -968,21 +968,26 @@ func (r *NTNCellConfigReconciler) resolveRemoteControlTLS(
 	if err := reader.Get(ctx, client.ObjectKey{Namespace: namespace, Name: t.SecretName}, secret); err != nil {
 		return nil, "", fmt.Errorf("reading remoteControl.tls secret %q: %w", t.SecretName, err)
 	}
-	// SECURITY (partial confused-deputy MITIGATION, not an authorization boundary): the
-	// operator reads this Secret with its OWN cluster-wide secrets-get, on behalf of
-	// whoever authored the NTNCellConfig — who may not be able to read Secrets. Two gates
-	// raise the bar against a CR author pointing the operator at an arbitrary Secret and
-	// shipping its contents to a CR-controlled endpoint:
+	// SECURITY (confused deputy): the operator reads this Secret with its OWN cluster-wide
+	// secrets-get, on behalf of whoever authored the NTNCellConfig — who may not be able to
+	// read Secrets. The ENFORCED authorization boundary is the credentialRefPolicy
+	// ValidatingAdmissionPolicy (dist/chart, credentialRefPolicy.enable; ADR-0009, #251):
+	// when enabled the apiserver requires the CR's writer to hold `get` on the referenced
+	// Secret, so the writer cannot borrow a Secret it could not read itself. That policy is
+	// OPT-IN and OFF by default (enable=false), so out of the box the two gates below are a
+	// PARTIAL mitigation only — NOT an authorization boundary — raising the bar against a CR
+	// author pointing the operator at an arbitrary Secret and shipping its contents to a
+	// CR-controlled endpoint:
 	//   (1) refuse a Kubernetes API credential — a service-account or bootstrap token
 	//       Secret stores its apiserver token under the same "token" key we read;
 	//   (2) require the Secret's owner to opt it in via a label.
-	// Known LIMITS (a real per-CR/per-endpoint SubjectAccessReview or grant resource is a
-	// tracked follow-up): the opt-in is namespace-scoped — once labelled, ANY NTNCellConfig
-	// in the namespace may use the Secret; a principal with secrets `patch` but not `get`
-	// could add the label to a Secret it cannot read; and the type check does not stop an
-	// Opaque Secret from holding some other bearer token. Those limits are about WHICH Secret
-	// may be named; the CA-pinning gate further down bounds where its token may be SENT,
-	// which is what turns "named the wrong Secret" into something less than exfiltration.
+	// LIMITS of gates (1)/(2) — why they do not substitute for the policy: the label opt-in
+	// is namespace-scoped — once labelled, ANY NTNCellConfig in the namespace may use the
+	// Secret; a principal with secrets `patch` but not `get` could add the label to a Secret
+	// it cannot read; and the type check does not stop an Opaque Secret from holding some
+	// other bearer token. Those limits are about WHICH Secret may be named; the CA-pinning
+	// gate further down bounds where its token may be SENT, which is what turns "named the
+	// wrong Secret" into something less than exfiltration.
 	switch secret.Type {
 	case corev1.SecretTypeServiceAccountToken, secretTypeBootstrapToken:
 		return nil, "", fmt.Errorf("remoteControl.tls secret %q has type %q — a Kubernetes API credential must not be used as a gNB remote-control secret", t.SecretName, secret.Type)
