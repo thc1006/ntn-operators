@@ -66,7 +66,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **ADR-0010 — an owner-issued grant for `remoteControl.tls` credentials (Proposed).** Records the
+- **ADR-0011 — an owner-issued grant for `remoteControl.tls` credentials (Proposed).** Records the
   design for a `RemoteControlCredentialGrant` CRD created by the Secret's owner, naming which
   NTNCellConfig may use the credential, against which endpoint, in which auth mode. It exists because
   three gaps on `main` share one shape — the Secret's owner cannot express, revocably, what their

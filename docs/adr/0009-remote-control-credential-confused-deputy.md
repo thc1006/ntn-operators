@@ -3,7 +3,7 @@
 - Status: **Accepted**, **amended 2026-07-31 (twice)** — see [Amendment (1)](#amendment-2026-07-31--the-deferral-rationale-was-wrong) and [Amendment (2)](#amendment-2026-07-31-2--the-endpoint-allow-list-now-gates-plaintext-destinations-too). The interim endpoint allow-list stands (and now gates plaintext destinations too); the deferral of the full per-CR authorization does **not**.
 - Date: 2026-07-31
 - Deciders: @thc1006
-- ⚠ **Partly superseded by [ADR-0010](0010-remote-control-credential-grant.md)**: the *Rationale* bullet preferring a SubjectAccessReview at admission **over** a ReferenceGrant-style CRD no longer holds once revocability and endpoint binding are required — a SAR is a point-in-time check on a write and cannot express a destination. The interim endpoint allow-list and the shipped admission policy (#309) both stand; ADR-0010 adds an owner-issued grant as the opt-in stronger tier.
+- ⚠ **Partly superseded by [ADR-0011](0011-remote-control-credential-grant.md)**: the *Rationale* bullet preferring a SubjectAccessReview at admission **over** a ReferenceGrant-style CRD no longer holds once revocability and endpoint binding are required — a SAR is a point-in-time check on a write and cannot express a destination. The interim endpoint allow-list and the shipped admission policy (#309) both stand; ADR-0011 adds an owner-issued grant as the opt-in stronger tier.
 - Relates to: #219 (label/type opt-in gate), #251 (this confused-deputy follow-up), the N-12 runtime TLS/bearer/mTLS push. Builds on the existing SSRF allow-list (`--prometheus-allowed-endpoint-hosts`, `--ephemeris-allowed-private-hosts`) and `pkg/netutil.EndpointAllowlist`.
 
 ## Context
@@ -18,6 +18,18 @@ This is a **confused deputy**: the operator lends its Secret-read privilege on b
 The #219 mitigation — the Secret owner must label it `ntn.operators.dev/remote-control-credential: true`, and API-credential Secret types are refused — reduces *which* Secrets can be targeted but is **not an authorization boundary**: the label is namespace-scoped, so **any** NTNCellConfig in the namespace may use **any** labelled Secret, and it does not bind the *endpoint*. The code comment on `RemoteControlTLS.secretName` already states this; #251 tracks the real fix.
 
 ## Decision
+
+**Net current state (2026-07-31)** — read this first; the original two-part decision and the two amendments below are the history that produced it. Three tiers, weakest-to-strongest, all composing:
+
+1. **Admin endpoint allow-list** (`--remote-control-allowed-endpoint-hosts`) — shipped; gates the *destination* of **every** push (credentialed and plaintext, per Amendment 2), before any Secret is read; opt-in (empty = permit-all).
+2. **Credential-reference admission policy** (#309 VAP, `credentialRefPolicy.enable`, default off) — the cheap default authorization tier: the principal referencing a Secret must be able to `get` it, checked at admission through the VAP `authorizer` library, **no webhook** — which retires this ADR's original "a SAR needs webhook infrastructure we lack" reasoning.
+3. **Owner-issued grant** ([ADR-0011](0011-remote-control-credential-grant.md), opt-in behind `--require-credential-grant`) — the strong tier the original decision deferred: revocable, binding a credential to a specific (CR, endpoint, mode). The per-CR authorization model now lives there.
+
+**Superseded** by the above: the original bullet 2's preference for *SubjectAccessReview-at-admission over a grant CRD*, and its framing of full per-CR authorization as merely "deferred." A SAR is a point-in-time write check that cannot express revocation or a destination; ADR-0011 supplies both. The threat model, the same-namespace framing, and tier 1 all still stand.
+
+---
+
+### Original two-part decision (2026-07-31 — superseded in part; see Net current state)
 
 Two-part, matching the actual (same-namespace, low-adoption) shape of the problem:
 

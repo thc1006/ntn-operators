@@ -1,12 +1,12 @@
-# ADR 0010 — An owner-issued grant for `remoteControl.tls` credentials
+# ADR 0011 — An owner-issued grant for `remoteControl.tls` credentials
 
 - Status: **Proposed**
 - Date: 2026-07-31
 - Deciders: @thc1006
 - Supersedes: the **"prefer SubjectAccessReview at admission over a ReferenceGrant-style CRD"** recommendation in [ADR-0009](0009-remote-control-credential-confused-deputy.md) — see *Relationship to ADR-0009*. The interim endpoint allow-list and the shipped admission policy both stand.
 - Relates to: #219 (label/type opt-in), #251 (confused deputy), #298 (rotation is bounded by the ~3m epoch cadence), #300 (admin endpoint allow-list), #309 (opt-in `ValidatingAdmissionPolicy`), #329/#332 (the credentialed-push E2E baseline this work extends).
-- ⚠ **Numbering**: a concurrent PR also proposed an ADR-0010 (secure-by-default transport). This decision keeps **0010** because it already carries ADR-0009's forward pointer; the transport decision becomes **ADR-0011**. The two are independent: transport versioning decides *how* we connect, this decides *who may consent to a credential being used*.
-- ⚠ **Depends on ADR-0011 for one field**: `allowedModes` must use the SAME enum as the transport API, and the grant must ship in whichever API version that lands in. This ADR does not pre-decide that — see *Open dependency*.
+- ⚠ **Numbering**: this grant decision is **ADR-0011**; the concurrent secure-by-default transport decision takes **ADR-0010** (layering: 0009 confused-deputy threat model → 0010 transport mode + API versioning → 0011 continuous per-credential authorization). The two are independent: transport versioning decides *how* we connect, this decides *who may consent to a credential being used*.
+- ⚠ **Depends on ADR-0010 for one field**: `allowedModes` must use the SAME enum as the transport API, and the grant must ship in whichever API version that lands in. This ADR does not pre-decide that — see *Open dependency*.
 
 ## Context
 
@@ -157,7 +157,7 @@ This is deliberately stricter than `pkg/netutil.EndpointAllowlist`, which compar
 
 ### Open dependency
 
-`allowedModes` must draw from the same enum as the transport work (ADR-0011), and the grant must ship in whichever API version that lands in. This ADR **does not** assume that version. Sequencing — grant first, transport first, or together — is settled with ADR-0011 before either implementation starts.
+`allowedModes` must draw from the same enum as the transport work (ADR-0010), and the grant must ship in whichever API version that lands in. This ADR **does not** assume that version. Sequencing — grant first, transport first, or together — is settled with ADR-0010 before either implementation starts.
 
 ### Enforcement is admin-gated and default-off
 
