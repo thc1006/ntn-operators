@@ -54,6 +54,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -469,6 +470,23 @@ func createSecret(t *testing.T, name string, data map[string][]byte, optIn bool)
 // every other test shares. Configure the union at deploy time and assert it here.
 func requireManagerAllowsGPHost(t *testing.T) {
 	t.Helper()
+	want := wssGPMock + "." + wssNS + ".svc.cluster.local"
+	if slices.Contains(managerFlagList(t, "--ephemeris-allowed-private-hosts"), want) {
+		return
+	}
+	t.Fatalf("the deployed manager does not allow the GP mock host %q, so the SSRF-safe fetcher will "+
+		"block it and the ephemeris will never propagate.\n"+
+		"Deploy with ONE --ephemeris-allowed-private-hosts carrying the UNION of every mock host, e.g.\n"+
+		"  manager.args:\n"+
+		"    - --ephemeris-allowed-private-hosts=celestrak-mock.default.svc.cluster.local,%s\n"+
+		"Do NOT add a second occurrence of the flag: the later value replaces the earlier one.\n"+
+		"current args: %v", want, want, managerArgs(t))
+}
+
+// managerArgs reads the deployed manager's argv. Namespace-scoped on purpose: the
+// control-plane=controller-manager label is not ours alone — Kueue, for one, carries it too.
+func managerArgs(t *testing.T) []string {
+	t.Helper()
 	ns := os.Getenv("WSS_MANAGER_NAMESPACE")
 	if ns == "" {
 		ns = "ntn-operators-system"
@@ -479,35 +497,24 @@ func requireManagerAllowsGPHost(t *testing.T) {
 		t.Fatalf("no manager Deployment (control-plane=controller-manager) in namespace %q — deploy the "+
 			"chart first, or set WSS_MANAGER_NAMESPACE: %v", ns, err)
 	}
-	want := wssGPMock + "." + wssNS + ".svc.cluster.local"
-	if !strings.Contains(out, want) {
-		t.Fatalf("the deployed manager does not allow the GP mock host %q, so the SSRF-safe fetcher will "+
-			"block it and the ephemeris will never propagate.\n"+
-			"Deploy with ONE --ephemeris-allowed-private-hosts carrying the UNION of every mock host, e.g.\n"+
-			"  manager.args:\n"+
-			"    - --ephemeris-allowed-private-hosts=celestrak-mock.default.svc.cluster.local,%s\n"+
-			"Do NOT add a second occurrence of the flag: the later value replaces the earlier one.\n"+
-			"current args: %s", want, want, out)
+	var args []string
+	if err := json.Unmarshal([]byte(out), &args); err != nil {
+		t.Fatalf("manager args are not the JSON array kubectl usually prints (%q): %v", out, err)
 	}
+	return args
 }
 
-// requireEndpointAllowlist reports whether the manager runs with an endpoint allow-list, which
-// the #300 arm needs. Returned rather than fatal so the arm can skip with a clear reason on a
-// deployment that does not set it.
-func managerEndpointAllowlist(t *testing.T) string {
+// managerFlagList returns the comma-separated value of a repeatable-looking list flag, or nil if
+// it is absent. Exactly one occurrence is meaningful: these flags are plain strings, so a second
+// occurrence REPLACES the first rather than appending to it.
+func managerFlagList(t *testing.T, flag string) []string {
 	t.Helper()
-	ns := os.Getenv("WSS_MANAGER_NAMESPACE")
-	if ns == "" {
-		ns = "ntn-operators-system"
-	}
-	out, _ := kubectl(t, "-n", ns, "get", "deploy", "-l", "control-plane=controller-manager",
-		"-o", `jsonpath={.items[0].spec.template.spec.containers[?(@.name=="manager")].args}`)
-	for f := range strings.SplitSeq(strings.Trim(out, "[]"), " ") {
-		if _, after, ok := strings.Cut(f, "--remote-control-allowed-endpoint-hosts="); ok {
-			return strings.Trim(after, `"`)
+	for _, a := range managerArgs(t) {
+		if _, after, ok := strings.Cut(a, flag+"="); ok {
+			return strings.Split(after, ",")
 		}
 	}
-	return ""
+	return nil
 }
 
 // setupNamespace creates a namespace this suite OWNS, and refuses to touch one it does not.
@@ -567,6 +574,9 @@ func TestWSSCredentialedPush(t *testing.T) {
 	if os.Getenv("KUBECONFIG") == "" && os.Getenv("HOME") == "" {
 		t.Skip("no kubeconfig available")
 	}
+	// Check the deployed manager BEFORE creating anything: a cluster that cannot satisfy the
+	// suite should be left exactly as it was found.
+	requireManagerAllowsGPHost(t)
 	ca, server, client := issueCerts(t)
 
 	setupNamespace(t)
@@ -586,7 +596,6 @@ func TestWSSCredentialedPush(t *testing.T) {
 	})
 
 	t.Log("standing up the GP source and the gNB behind its TLS sidecar")
-	requireManagerAllowsGPHost(t)
 	deployGPMock(t)
 	deployGNB(t, ca, server)
 
@@ -738,8 +747,7 @@ spec:
 // was supposed to refuse to use.
 func runEndpointAllowlistArm(t *testing.T) {
 	t.Helper()
-	allow := managerEndpointAllowlist(t)
-	if allow == "" {
+	if len(managerFlagList(t, "--remote-control-allowed-endpoint-hosts")) == 0 {
 		t.Skip("manager runs without --remote-control-allowed-endpoint-hosts, so there is no allow-list " +
 			"to violate; deploy with one to cover #300")
 	}
