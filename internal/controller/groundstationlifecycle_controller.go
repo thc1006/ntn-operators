@@ -347,12 +347,24 @@ func (r *GroundStationLifecycleReconciler) reconcileHealth(
 		ObservedGeneration: gs.Generation,
 	})
 
-	// AntennaReady: simulated as True when node exists.
+	// AntennaReady: Unknown until a real probe exists (#68). Nothing here measures antenna
+	// lock, tracking state, motor faults or misalignment, so the operator cannot determine
+	// readiness — and Unknown is precisely what the API conventions reserve for "the
+	// controller is unable to determine the status". Reporting True with "Antenna system
+	// operational" asserted a hardware fact that was never observed: an operator alerting on
+	// it got a permanently-green signal that only ever meant "the Node object exists".
+	//
+	// RFLinkHealthy below already gets this right — it is set only when a monitoringEndpoint
+	// gives it something real to check, and REMOVED otherwise. It is removed rather than set
+	// Unknown because its absence reflects a choice the operator made (no endpoint
+	// configured); AntennaReady's reflects a capability this operator does not yet have, so
+	// it says so explicitly instead of vanishing and leaving the reader to guess.
 	meta.SetStatusCondition(&gs.Status.Conditions, metav1.Condition{
-		Type:               ntnv1alpha1.ConditionAntennaReady,
-		Status:             metav1.ConditionTrue,
-		Reason:             "AntennaOperational",
-		Message:            "Antenna system operational",
+		Type:   ntnv1alpha1.ConditionAntennaReady,
+		Status: metav1.ConditionUnknown,
+		Reason: "NoAntennaProbe",
+		Message: "antenna readiness cannot be determined: no hardware probe is implemented " +
+			"(tracked in issue #68); the Node being present says nothing about the antenna",
 		ObservedGeneration: gs.Generation,
 	})
 
