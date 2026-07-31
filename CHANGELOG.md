@@ -237,7 +237,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ApplyCellConfig` adopts under, extracted into a single shared `isAdoptableLeftover` so the two
   cannot drift apart again. This grants no new destructive power: adoption already ends in
   deletion, because an adopted ConfigMap carries a controller reference and is GC-cascaded when the
-  CR goes away. A ConfigMap owned by a different controller, an unlabeled foreign object, and a
+  CR goes away. The shared predicate is also **tightened**: it now requires the ConfigMap to have NO
+  owner references at all, not merely no *controller* owner reference. A ConfigMap carrying a plain
+  owner reference already belongs to another object's lifecycle, and adopting it would make the
+  operator a second owner that deletes it when this CR goes away while the other owner still claims
+  it. This excludes nothing real — the pre-atomic-ref version created the ConfigMap with no owner
+  references and its `EnsureOwnership` back-fill used `SetControllerReference` in a single `Update`,
+  so a genuine leftover has either our controller reference or none. A ConfigMap owned by a different controller, an unlabeled foreign object, and a
   labeled-but-empty impostor are still left untouched, and the skip is now logged. Mutation-tested.
 
 - **SGP4 propagation failures are now surfaced, not silently dropped.** A tracked element set that

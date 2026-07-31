@@ -311,6 +311,15 @@ func TestApplyAndCleanupAgreeOnOwnership(t *testing.T) {
 			Labels:    map[string]string{managedByLabel: managedByValue, componentLabel: componentValue},
 		}}
 	}
+	// Labeled, holds our config key, no CONTROLLER owner — but a plain owner reference to
+	// another object, so it already belongs to that object's lifecycle.
+	labeledNonControllerOwned := func() *corev1.ConfigMap {
+		cm := seedConfigMap(t, true, nil)
+		if err := controllerutil.SetOwnerReference(ownerFor("someone-else"), cm, ownerScheme(t)); err != nil {
+			t.Fatalf("SetOwnerReference: %v", err)
+		}
+		return cm
+	}
 
 	for _, tc := range []struct {
 		name string
@@ -321,6 +330,7 @@ func TestApplyAndCleanupAgreeOnOwnership(t *testing.T) {
 		{"owned by a different-UID CR", func() *corev1.ConfigMap { return seedConfigMap(t, true, otherOwner) }, false},
 		{"unlabeled foreign object", func() *corev1.ConfigMap { return seedConfigMap(t, false, nil) }, false},
 		{"labeled but no config key", labeledEmpty, false},
+		{"labeled but owned (non-controller) by another object", labeledNonControllerOwned, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			// Apply: does it claim the object?
