@@ -23,6 +23,7 @@ import (
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -245,15 +246,107 @@ func TestCleanup_OwnershipUID(t *testing.T) {
 		}
 	})
 
-	t.Run("skips an unowned ConfigMap", func(t *testing.T) {
+	// An unowned but operator-labeled leftover IS deleted: ApplyCellConfig adopts this exact
+	// object class, and an adopted ConfigMap is GC-cascaded when the CR goes away — so
+	// skipping it here never preserved it, it only leaked it when the CR was deleted before
+	// any reconcile adopted it. See TestApplyAndCleanupAgreeOnOwnership for the invariant.
+	t.Run("deletes an unowned pre-atomic-ref leftover", func(t *testing.T) {
 		p := newTestProviderWith(t, seedConfigMap(t, true, nil))
 		if err := p.Cleanup(ctx, ownerFor("cell-a")); err != nil {
 			t.Fatalf("cleanup: %v", err)
 		}
-		if !exists(p) {
-			t.Error("unowned ConfigMap must NOT be deleted")
+		if exists(p) {
+			t.Error("an adoptable pre-atomic-ref leftover must be deleted, not leaked")
 		}
 	})
+
+	t.Run("skips an unlabeled foreign ConfigMap", func(t *testing.T) {
+		p := newTestProviderWith(t, seedConfigMap(t, false, nil))
+		if err := p.Cleanup(ctx, ownerFor("cell-a")); err != nil {
+			t.Fatalf("cleanup: %v", err)
+		}
+		if !exists(p) {
+			t.Error("an unlabeled foreign ConfigMap must NOT be deleted")
+		}
+	})
+
+	t.Run("skips a labeled-but-empty impostor", func(t *testing.T) {
+		impostor := &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      cmName,
+				Namespace: "ntn-system",
+				Labels:    map[string]string{managedByLabel: managedByValue, componentLabel: componentValue},
+			},
+		}
+		p := newTestProviderWith(t, impostor)
+		if err := p.Cleanup(ctx, ownerFor("cell-a")); err != nil {
+			t.Fatalf("cleanup: %v", err)
+		}
+		if !exists(p) {
+			t.Error("a labeled-but-empty impostor never held our config; it must NOT be deleted")
+		}
+	})
+}
+
+// TestApplyAndCleanupAgreeOnOwnership is the invariant that the split between adoption and
+// deletion must never reopen: for every shape of same-named ConfigMap, ApplyCellConfig
+// adopting it and Cleanup deleting it are the SAME decision.
+//
+// They must agree because adoption already ends in deletion — SetControllerReference makes
+// the object GC-cascaded, so a CR delete removes it either way. When the two disagreed, an
+// object Apply was willing to seize and overwrite was one Cleanup refused to remove, and a CR
+// deleted before its first successful reconcile (an upgrade window, or a push that never
+// succeeded) leaked it permanently. The "labels are forgeable" objection cannot justify the
+// split either: it applies identically to adoption, which #210 already accepted.
+func TestApplyAndCleanupAgreeOnOwnership(t *testing.T) {
+	ctx := context.Background()
+	cmName := ConfigMapNameFor("cell-a")
+	otherOwner := ownerFor("cell-a")
+	otherOwner.UID = "different-uid"
+
+	labeledEmpty := func() *corev1.ConfigMap {
+		return &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{
+			Name:      cmName,
+			Namespace: "ntn-system",
+			Labels:    map[string]string{managedByLabel: managedByValue, componentLabel: componentValue},
+		}}
+	}
+
+	for _, tc := range []struct {
+		name string
+		seed func() *corev1.ConfigMap
+		ours bool // our artifact: Apply may adopt it AND Cleanup must delete it
+	}{
+		{"unowned + labeled + our config key", func() *corev1.ConfigMap { return seedConfigMap(t, true, nil) }, true},
+		{"owned by a different-UID CR", func() *corev1.ConfigMap { return seedConfigMap(t, true, otherOwner) }, false},
+		{"unlabeled foreign object", func() *corev1.ConfigMap { return seedConfigMap(t, false, nil) }, false},
+		{"labeled but no config key", labeledEmpty, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// Apply: does it claim the object?
+			pa := newTestProviderWith(t, tc.seed())
+			owner := ownerFor("cell-a")
+			applyErr := pa.ApplyCellConfig(ctx, owner, geoSpec(), ownerScheme(t))
+			adopted := applyErr == nil
+
+			// Cleanup: does it remove the object?
+			pc := newTestProviderWith(t, tc.seed())
+			if err := pc.Cleanup(ctx, ownerFor("cell-a")); err != nil {
+				t.Fatalf("cleanup returned an error: %v", err)
+			}
+			err := pc.client.Get(ctx, types.NamespacedName{Name: cmName, Namespace: "ntn-system"}, &corev1.ConfigMap{})
+			deleted := apierrors.IsNotFound(err)
+
+			if adopted != deleted {
+				t.Fatalf("Apply and Cleanup disagree: adopted=%v deleted=%v. An object Apply will seize "+
+					"must be one Cleanup will remove, or a CR deleted before its first reconcile leaks it",
+					adopted, deleted)
+			}
+			if adopted != tc.ours {
+				t.Errorf("expected ours=%v, got adopted=%v (applyErr=%v)", tc.ours, adopted, applyErr)
+			}
+		})
+	}
 }
 
 func TestApplyCellConfig_CreatesConfigMap(t *testing.T) {

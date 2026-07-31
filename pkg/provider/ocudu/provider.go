@@ -32,6 +32,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	ntnv1alpha1 "github.com/thc1006/ntn-operators/api/v1alpha1"
 	"github.com/thc1006/ntn-operators/pkg/provider"
@@ -106,17 +107,43 @@ func isOperatorManaged(cm *corev1.ConfigMap) bool {
 	return cm.Labels[managedByLabel] == managedByValue && cm.Labels[componentLabel] == componentValue
 }
 
-// Cleanup deletes the provider's ConfigMap for owner, but only when it is
-// controller-owned by owner (UID match via metav1.IsControlledBy) — a same-named
-// ConfigMap the operator does not own is left untouched. Called by the finalizer
-// during CR deletion.
+// isAdoptableLeftover reports whether cm is an unowned artifact of THIS provider left by a
+// pre-atomic-reference version: no controller at all, our management labels, and a non-empty
+// config key (a labeled-but-empty impostor never held our config, so it is not ours).
+//
+// Shared by ApplyCellConfig (which adopts such an object) and Cleanup (which deletes it) so
+// the two can never drift apart. The drift was the bug: adoption ends in deletion anyway —
+// an adopted ConfigMap carries a controller reference and is GC-cascaded the moment the CR
+// goes away — so a Cleanup that refused to delete this exact class did not preserve anything.
+// It only leaked the object when the CR was deleted before any reconcile got to adopt it,
+// which is the deletion-first path #210 left uncovered.
+func isAdoptableLeftover(cm *corev1.ConfigMap) bool {
+	return metav1.GetControllerOf(cm) == nil && isOperatorManaged(cm) && cm.Data[configDataKey] != ""
+}
+
+// Cleanup deletes the provider's ConfigMap for owner. Called by the finalizer during CR
+// deletion. It deletes when the ConfigMap is controller-owned by owner (UID match via
+// metav1.IsControlledBy), and when it is an unowned pre-atomic-ref leftover that
+// ApplyCellConfig would have adopted (isAdoptableLeftover) — same predicate, deliberately.
+// Anything else is left untouched: a ConfigMap owned by a different controller (name reuse,
+// another CR's artifact), an unlabeled foreign object, or a labeled-but-empty impostor.
 func (p *Provider) Cleanup(ctx context.Context, owner *ntnv1alpha1.NTNCellConfig) error {
+	log := logf.FromContext(ctx)
 	cm := &corev1.ConfigMap{}
 	key := types.NamespacedName{Name: ConfigMapNameFor(owner.GetName()), Namespace: owner.GetNamespace()}
 	if err := p.reader().Get(ctx, key, cm); err != nil {
 		return client.IgnoreNotFound(err)
 	}
-	if !metav1.IsControlledBy(cm, owner) {
+	switch {
+	case metav1.IsControlledBy(cm, owner):
+	case isAdoptableLeftover(cm):
+		// Worth a line in the log: this is a pre-atomic-ref artifact being reclaimed on the
+		// deletion path, which means no reconcile ever adopted it while the CR was alive.
+		log.Info("deleting an unowned pre-atomic-ref ConfigMap left by an older operator version",
+			"configmap", key.String())
+	default:
+		log.Info("ConfigMap at this provider's name is not ours to delete; leaving it in place",
+			"configmap", key.String())
 		return nil
 	}
 	// Delete under a UID precondition so the ownership check and the delete hit the SAME object: a
@@ -208,7 +235,7 @@ func (p *Provider) ApplyCellConfig(
 	// pre-adoption state or a freshly-adopted CM would skip its owner-ref persist.
 	alreadyOwned := metav1.IsControlledBy(cm, owner)
 	if !alreadyOwned {
-		if metav1.GetControllerOf(cm) != nil || !isOperatorManaged(cm) || cm.Data[configDataKey] == "" {
+		if !isAdoptableLeftover(cm) {
 			return fmt.Errorf("%w: %s/%s", provider.ErrConfigMapNotOwned, namespace, ConfigMapNameFor(crName))
 		}
 		if err := controllerutil.SetControllerReference(owner, cm, scheme); err != nil {

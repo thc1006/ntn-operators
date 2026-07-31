@@ -225,6 +225,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A legacy unowned ConfigMap is no longer leaked when the CR is deleted before its first
+  reconcile.** #210 reclaims pre-atomic-reference artifacts — a ConfigMap carrying the operator's
+  management labels and its `geo_ntn.yml` key but no owner reference, left behind when an older
+  version's best-effort `EnsureOwnership` write did not land — by **adopting** them in
+  `ApplyCellConfig`. But the reconciler runs the finalizer FIRST, so a CR deleted before any
+  successful post-upgrade reconcile never reaches `ApplyCellConfig`: `Cleanup` required strict
+  controller ownership, skipped the unowned leftover, removed the finalizer, and the ConfigMap was
+  orphaned with nothing left that could ever reclaim it — the exact artifact class #210 set out to
+  recover, on the one path it did not cover. `Cleanup` now deletes under the SAME predicate
+  `ApplyCellConfig` adopts under, extracted into a single shared `isAdoptableLeftover` so the two
+  cannot drift apart again. This grants no new destructive power: adoption already ends in
+  deletion, because an adopted ConfigMap carries a controller reference and is GC-cascaded when the
+  CR goes away. A ConfigMap owned by a different controller, an unlabeled foreign object, and a
+  labeled-but-empty impostor are still left untouched, and the skip is now logged. Mutation-tested.
+
 - **SGP4 propagation failures are now surfaced, not silently dropped.** A tracked element set that
   passed the epoch checks but failed `PropagateToECEF` (OMM→TLE conversion, propagation, or ECEF range
   validation) was dropped from `propagatedStates` with a bare `continue` — no condition, metric, or
