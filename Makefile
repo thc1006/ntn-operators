@@ -446,3 +446,7 @@ helm-history: ## Show Helm release history.
 .PHONY: helm-rollback
 helm-rollback: ## Rollback to previous Helm release.
 	$(HELM) rollback $(HELM_RELEASE) --namespace $(HELM_NAMESPACE)
+
+.PHONY: test-e2e-wss
+test-e2e-wss: ## Run the credentialed runtime-push E2E (#329, tag e2e_wss) against an ALREADY-DEPLOYED chart release. Needs NO image build: the gNB stand-in is stdlib Go run from a ConfigMap with the stock golang image, and the proxy is stock nginx — so this works on Kind and on a plain kubeadm cluster alike. Set WSS_MANAGER_NAMESPACE if the manager is not in ntn-operators-system.
+	E2E_WSS_DESTRUCTIVE=1 go test -tags=e2e_wss -count=1 ./test/e2e/ -run '^TestWSSCredentialedPush' -v -timeout 20m

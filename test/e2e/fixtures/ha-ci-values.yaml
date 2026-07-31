@@ -7,4 +7,11 @@
 manager:
   args:
     - --leader-elect
-    - --ephemeris-allowed-private-hosts=celestrak-mock.default.svc.cluster.local
+    # ONE occurrence carrying the UNION of every in-cluster mock host. This flag is a plain
+    # string, so Go's flag package calls Set per occurrence and a SECOND
+    # --ephemeris-allowed-private-hosts REPLACES this value rather than adding to it. An
+    # earlier version of the wss suite appended its own host at runtime, silently dropped
+    # celestrak-mock, and broke TestHAOutageContinuityAcrossFailover. Keep this a union.
+    - --ephemeris-allowed-private-hosts=celestrak-mock.default.svc.cluster.local,e2e-wss-gp.ntn-e2e-wss.svc.cluster.local
+    # The wss suite's #300 arm needs an allow-list that permits its proxy and nothing else.
+    - --remote-control-allowed-endpoint-hosts=e2e-wss-gnb.ntn-e2e-wss.svc
