@@ -66,6 +66,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A deployable TLS-termination sample for the credentialed runtime push, and the guide that was
+  missing.** The operator can speak `wss://` with a bearer token and mutual TLS, but OCUDU's
+  `remote_control` server is plaintext and unauthenticated — so the feature only works behind a
+  proxy, and the repository shipped **no sample using `remoteControl` at all** and no proxy/sidecar
+  pattern anywhere in `config/`, `docs/` or `dist/`. Adds
+  `config/samples/ntn_v1alpha1_ntncellconfig_remotecontrol_tls.yaml`, a deployable nginx sidecar
+  (`config/samples/remote-control-tls/`) that terminates TLS in the gNB's own pod so the plaintext
+  port never leaves it, and `docs/remote-control-tls.md` covering the Secret key contract, the SAN
+  requirement, how to read the proxy's `101`/`400`/`401` as a diagnostic, and the credential-rotation
+  recovery behaviour. Verified end to end on Kubernetes 1.36.3 with the operator running in-cluster:
+  mTLS refused a dial without a client certificate, the bearer was genuinely transmitted and checked,
+  and a well-formed `ntn_config_update` carrying SGP4-propagated ECEF from a live CelesTrak fetch
+  reached the plaintext backend. The NetworkPolicy interaction is documented but explicitly flagged
+  as unverified — the dev cluster runs Flannel, which does not implement NetworkPolicy.
+
 - **`ntn_operators_config_apply_ready` — the config-apply half of #216, which shipped only the
   push half.** `ntn_operators_config_apply_errors_total` is incremented **only** by an
   `ApplyCellConfig` failure, so three other ways the apply can be broken incremented it **zero**

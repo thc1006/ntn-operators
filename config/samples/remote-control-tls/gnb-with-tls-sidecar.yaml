@@ -1,0 +1,102 @@
+# A TLS-terminating sidecar in front of OCUDU's plaintext remote_control server.
+#
+# This is the deployment shape the credentialed runtime push assumes: OCUDU listens
+# PLAINTEXT and unauthenticated, so the wss:// + bearer + mTLS the operator speaks has
+# to be terminated by something. Putting that something in the SAME POD keeps the
+# plaintext port on the pod's loopback, where nothing else in the cluster can reach it.
+#
+# Verified end to end on Kubernetes 1.36.3: the operator dialled wss://, nginx enforced
+# the client certificate and the bearer, and a real ntn_config_update frame arrived at
+# the plaintext backend. See docs/remote-control-tls.md.
+#
+# Substitute your OCUDU gNB image and its remote_control port for the `gnb` container.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gnb-proxy-conf
+  labels:
+    app.kubernetes.io/name: ntn-operators
+data:
+  nginx.conf: |
+    events {}
+    http {
+      # Only forward the Upgrade header when the client actually asked for one.
+      map $http_upgrade $conn { default upgrade; '' close; }
+      server {
+        listen 8443 ssl;
+        ssl_certificate     /certs/tls.crt;
+        ssl_certificate_key /certs/tls.key;
+        # mTLS: require a client certificate issued by the same CA the operator trusts.
+        # Drop these two lines (and use tls.mode "tls") if you only want a bearer token.
+        ssl_client_certificate /certs/ca.crt;
+        ssl_verify_client on;
+        ssl_protocols TLSv1.2 TLSv1.3;
+        location / {
+          # Enforce the bearer rather than passing it through: without this the token
+          # is transmitted but never checked, which is not authentication.
+          # Read it from a file in production; inline here to keep the sample readable.
+          if ($http_authorization != "Bearer REPLACE_WITH_TOKEN") { return 401; }
+          proxy_pass http://127.0.0.1:8001;   # OCUDU remote_control, pod-local only
+          proxy_http_version 1.1;
+          proxy_set_header Upgrade $http_upgrade;
+          proxy_set_header Connection $conn;
+          proxy_set_header Host $host;
+          # The operator bounds the whole exchange at 5s; keep this comfortably above it.
+          proxy_read_timeout 60s;
+        }
+      }
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gnb
+  labels:
+    app.kubernetes.io/name: ntn-operators
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: gnb }
+  template:
+    metadata:
+      labels: { app: gnb }
+    spec:
+      containers:
+        # Your OCUDU gNB. remote_control stays PLAINTEXT and is never exposed by a
+        # Service — only the sidecar below can reach it, over the pod's loopback.
+        - name: gnb
+          image: REPLACE_WITH_OCUDU_GNB_IMAGE
+          ports:
+            - containerPort: 8001
+              name: remote-ctl
+        - name: proxy
+          image: nginx:1.29-alpine
+          ports:
+            - containerPort: 8443
+              name: wss
+          volumeMounts:
+            - { name: conf,  mountPath: /etc/nginx/nginx.conf, subPath: nginx.conf }
+            - { name: certs, mountPath: /certs, readOnly: true }
+      volumes:
+        - name: conf
+          configMap: { name: gnb-proxy-conf }
+        # Server certificate for the sidecar. Its SAN must cover the Service DNS name
+        # used in NTNCellConfig .spec.provider.remoteControl.endpoint.
+        - name: certs
+          secret: { secretName: gnb-proxy-tls }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gnb-proxy
+  labels:
+    app.kubernetes.io/name: ntn-operators
+spec:
+  selector: { app: gnb }
+  # Only the TLS port is published. The plaintext remote_control port is deliberately
+  # absent: a Service on 8001 would hand every pod in the cluster an unauthenticated
+  # path straight to the gNB.
+  ports:
+    - name: wss
+      port: 8443
+      targetPort: 8443
