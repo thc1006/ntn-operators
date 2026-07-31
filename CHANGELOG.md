@@ -31,6 +31,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`ntn_operators_config_apply_ready` — the config-apply half of #216, which shipped only the
+  push half.** `ntn_operators_config_apply_errors_total` is incremented **only** by an
+  `ApplyCellConfig` failure, so three other ways the apply can be broken incremented it **zero**
+  times *and* returned a nil error — making them invisible to `NTNConfigApplyErrors` (a rate alert
+  on that counter) **and** to `controller_runtime_reconcile_errors_total`: `InternalError` (the
+  provider registry is not configured), `UnsupportedProvider` (`spec.provider.type` unregistered,
+  which additionally does **not requeue** — exactly the permanent case a rate alert can never
+  sustain on), and `StatusCheckFailed` (the write may have landed but the post-apply read could not
+  verify it). The new gauge is 1 only on a verified apply and 0 on all four failure paths, holds its
+  value across scrapes regardless of requeue, and is released on CR deletion. Alert
+  **`NTNConfigApplyNotReady`** (`== 0` for 15m) and a runbook section keyed by the `ConfigApplied`
+  reason ship with it. Keyed `namespace`+`config` like `ephemeris_push_ready`, deliberately without
+  the counter's `provider` label so a provider-type edit cannot strand a stale series at 0.
+
 - **Durable conditional-GET validators for the OMM cache (polite restart/failover refetch).** The
   CelesTrak fetcher already used an in-memory `If-None-Match` conditional GET, but the ETag was lost on
   a process restart or leader failover, so the first post-failover fetch re-downloaded the full GP body.

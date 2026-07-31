@@ -91,6 +91,20 @@ spec:
           annotations:
             summary: "NTNCellConfig {{`{{ $labels.namespace }}/{{ $labels.config }}`}} provider apply is erroring"
             description: "Static provider config apply has failed in the last 15m."
+        # The config is not verifiably applied — the durable companion to the rate alert
+        # above. ConfigApplyErrorsTotal is incremented ONLY by an ApplyCellConfig failure, so
+        # InternalError (no provider registry), UnsupportedProvider (unregistered type, which
+        # does not even requeue) and StatusCheckFailed (post-apply verification) increment it
+        # zero times and return a nil error — invisible to both the rate alert and
+        # controller_runtime_reconcile_errors_total. This gauge holds 0 across all of them.
+        - alert: NTNConfigApplyNotReady
+          expr: ntn_operators_config_apply_ready == 0
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "NTNCellConfig {{`{{ $labels.namespace }}/{{ $labels.config }}`}} config is not verifiably applied"
+            description: "NTN config apply has been unverified or failing for 15m; read the ConfigApplied condition for the reason."
     - name: ntn-operators.failover
       rules:
         # Sustained failover churn — flapping between terrestrial and satellite.
