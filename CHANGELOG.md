@@ -233,6 +233,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`FailoverReady=True` now reports Reason `ConstellationMemberAvailable`, not the overstated
+  `SatelliteAvailable`.** The condition *type* is unchanged (`FailoverReady`), so anything keyed on the
+  type is unaffected; only the Reason string on the `True` case changes. A fresh, deliverable
+  constellation member being overhead is a **contact opportunity**, not delivered slice service —
+  actual service still needs the (absent) slice-to-cell binding, so `SatelliteAvailable` overstated it.
+  The Message now reads "A fresh deliverable constellation member has an active pass window (contact
+  opportunity, not slice service)". A dashboard or alert that matches on the Reason string
+  `SatelliteAvailable` must be updated to `ConstellationMemberAvailable`. See ADR-0008.
+
 - **`AntennaReady` no longer claims `True` for an antenna nobody measured.** The condition was set
   unconditionally to `True` / `AntennaOperational` / "Antenna system operational" whenever the backing
   Node existed — the code comment said `// AntennaReady: simulated as True when node exists.` Nothing

@@ -348,6 +348,29 @@ var _ = Describe("NTNSlice Controller", func() {
 		return eph
 	}
 
+	Context("Opportunity condition Reason (ADR-0008)", func() {
+		BeforeEach(func() { createSlice() })
+		AfterEach(func() { deleteSlice() })
+
+		It("sets FailoverReady=True with Reason ConstellationMemberAvailable, not the overstated SatelliteAvailable", func() {
+			eph := createEphemerisWithPass(true)
+			DeferCleanup(func() { _ = k8sClient.Delete(context.Background(), eph) })
+
+			_, err := newReconciler().Reconcile(context.Background(), reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			updated := &ntnv1alpha1.NTNSlice{}
+			Expect(k8sClient.Get(context.Background(), typeNamespacedName, updated)).To(Succeed())
+
+			cond := meta.FindStatusCondition(updated.Status.Conditions, ntnv1alpha1.ConditionFailoverReady)
+			Expect(cond).NotTo(BeNil())
+			Expect(cond.Status).To(Equal(metav1.ConditionTrue))
+			// ADR-0008: a member overhead is a CONTACT OPPORTUNITY, not delivered slice service.
+			Expect(cond.Reason).To(Equal("ConstellationMemberAvailable"))
+			Expect(cond.Message).To(ContainSubstring("contact opportunity, not slice service"))
+		})
+	})
+
 	Context("Switchback: satellite pass ends while on satellite", func() {
 		BeforeEach(func() { createSlice() })
 		AfterEach(func() { deleteSlice() })

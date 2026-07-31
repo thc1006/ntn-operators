@@ -7,7 +7,8 @@ last_verified: 2026-07-31
 deciders: [thc1006]
 supersedes: []
 superseded_by: []
-implementation: []
+implementation:
+  - "https://github.com/thc1006/ntn-operators/pull/346"
 tracking: []
 ---
 
