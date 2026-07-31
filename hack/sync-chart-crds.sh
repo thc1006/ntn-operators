@@ -27,8 +27,10 @@ for src in "$SRC_DIR"/*.yaml; do
 	base=$(basename "$src" | sed -E 's/^ntn\.operators\.dev_(.+)\.yaml$/\1.ntn.operators.dev.yaml/')
 	dest="$DEST_DIR/$base"
 
-	# Only touch CRDs already present in the chart (don't introduce new ones here).
-	[ -f "$dest" ] || continue
+	# Fail closed: a source CRD with no chart template must NOT be silently skipped — that ships a chart
+	# Helm users cannot install the CRD from (the original `|| continue` hid exactly this). Add the
+	# template (an empty file is enough; this script fills it) before regenerating.
+	[ -f "$dest" ] || { echo "ERROR: no Helm chart template for CRD '$src' (expected '$dest'); create it before 'make manifests'" >&2; exit 1; }
 
 	awk '
 		BEGIN { wrapped = 0 }
