@@ -297,6 +297,11 @@ jobs:
       # show the deployment shape works. Runs BEFORE the destructive HA step, which evicts pods and
       # mutates RBAC. Needs no image build: the gNB stand-in is stdlib Go run from a ConfigMap with the
       # stock golang image, and the proxy is stock nginx.
+      - name: Snapshot the manager pod template
+        run: |
+          kubectl -n ntn-operators-system get deploy -l control-plane=controller-manager \
+            -o jsonpath='{.items[0].spec.template}' > /tmp/mgr_before.json
+
       - name: Credentialed runtime-push E2E (wss/mTLS, #329)
         env:
           WSS_MANAGER_NAMESPACE: ntn-operators-system
@@ -315,7 +320,8 @@ jobs:
             'mtls\+bearer_reaches_the_plaintext_gNB_behind_the_proxy' \
             'wrong_bearer_is_RemoteEndpointRejected' \
             'token_without_ca.crt_is_refused_before_the_dial' \
-            'dropping_the_client_certificate_is_refused_by_the_proxy'; do
+            'dropping_the_client_certificate_is_refused_by_the_proxy' \
+            'endpoint_outside_the_admin_allow-list_is_refused_before_the_Secret_is_read'; do
             grep -Eq "^    --- PASS: TestWSSCredentialedPush/${arm}" /tmp/wss_e2e.out || {
               echo "FALSE GREEN: arm ${arm} did not run+PASS"; exit 1; }
           done
@@ -323,6 +329,27 @@ jobs:
           # asserted on conditions alone and the proxy chain was never exercised.
           grep -q 'frame on the wire: {"cmd":"ntn_config_update"' /tmp/wss_e2e.out || {
             echo "FALSE GREEN: no ntn_config_update frame reached the plaintext backend"; exit 1; }
+          # An arm that SKIPS is not coverage. #300's arm skips when the manager has no endpoint
+          # allow-list, which is correct for a stock deploy but a hole in CI, where ha-ci-values.yaml
+          # sets one.
+          if grep -Eq '^    --- SKIP: TestWSSCredentialedPush/' /tmp/wss_e2e.out; then
+            echo "FALSE GREEN: an arm skipped; ha-ci-values.yaml is meant to satisfy every precondition"
+            grep -E '^    --- SKIP' /tmp/wss_e2e.out; exit 1
+          fi
+
+      # The suite runs against the SHARED release, so it must leave the manager exactly as it found
+      # it. It once appended --ephemeris-allowed-private-hosts at runtime; that flag is a plain string,
+      # so the append REPLACED the celestrak-mock value and the HA step below timed out — while the wss
+      # step itself stayed green. Compare the pod template, not just the args, and do it here rather
+      # than trusting the test to police itself.
+      - name: Manager must be untouched by the wss E2E
+        run: |
+          set -euo pipefail
+          kubectl -n ntn-operators-system get deploy -l control-plane=controller-manager \
+            -o jsonpath='{.items[0].spec.template}' > /tmp/mgr_after.json
+          diff <(jq -S . /tmp/mgr_before.json) <(jq -S . /tmp/mgr_after.json) || {
+            echo "the wss E2E mutated the shared manager Deployment; configure it in ha-ci-values.yaml instead"
+            exit 1; }
 
       # These are DESTRUCTIVE (kill/evict pods, briefly break RBAC) so they run last, after the chart
       # validations above. The suite self-heals to 2 ready replicas between cases.

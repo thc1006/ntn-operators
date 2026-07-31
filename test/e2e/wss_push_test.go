@@ -42,9 +42,11 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
@@ -55,10 +57,14 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"sigs.k8s.io/yaml"
 )
 
 const (
-	wssNS       = "default" // the celestrak mock DNS + --ephemeris-allowed-private-hosts are pinned here
+	wssNS       = "ntn-e2e-wss" // dedicated + ownership-labelled; never "default" (see setupNamespace)
+	wssOwnerKey = "ntn.operators.dev/e2e-owner"
+	wssOwnerVal = "wss-push"
 	wssCell     = "e2e-wss-cell"
 	wssSatEph   = "e2e-wss-eph"
 	wssGNB      = "e2e-wss-gnb"
@@ -69,6 +75,12 @@ const (
 	wssNorad    = 25544
 	wssGPMock   = "e2e-wss-gp"
 )
+
+// wssRunNCI makes this run's frames distinguishable from any earlier run's. The backend log is
+// the evidence, and a Deployment whose spec did not change keeps its pod — so a re-run can read
+// a predecessor's frames and "prove" a push that never happened. Every frame assertion is scoped
+// to this value. NCI is 36 bits; this stays well inside it.
+var wssRunNCI = uint64(6733824 + time.Now().UnixNano()%1_000_000)
 
 // ---------------------------------------------------------------- helpers
 
@@ -121,24 +133,31 @@ func pushedCondition(t *testing.T) string {
 	return strings.TrimSpace(out)
 }
 
-// framesReceived counts ntn_config_update frames the PLAINTEXT backend actually accepted.
-// Read from the backend's own log, so it reflects the wire, not the operator's opinion.
-func framesReceived(t *testing.T) int {
+// runFrames returns the frames the PLAINTEXT backend accepted FOR THIS RUN, read from the
+// backend's own log so the evidence is the wire rather than the operator's opinion. Frames from
+// an earlier run are filtered out by NCI — see wssRunNCI.
+func runFrames(t *testing.T) []string {
 	t.Helper()
 	out, _ := kubectl(t, "-n", wssNS, "logs", "deploy/"+wssGNB, "-c", "gnb", "--tail=-1")
-	return strings.Count(out, "FRAME ")
+	mine := fmt.Sprintf(`"nci":%d`, wssRunNCI)
+	var frames []string
+	for l := range strings.SplitSeq(out, "\n") {
+		if _, after, ok := strings.Cut(l, "FRAME "); ok && strings.Contains(after, mine) {
+			frames = append(frames, after)
+		}
+	}
+	return frames
 }
+
+func framesReceived(t *testing.T) int { t.Helper(); return len(runFrames(t)) }
 
 func lastFrame(t *testing.T) string {
 	t.Helper()
-	out, _ := kubectl(t, "-n", wssNS, "logs", "deploy/"+wssGNB, "-c", "gnb", "--tail=-1")
-	var last string
-	for l := range strings.SplitSeq(out, "\n") {
-		if _, after, ok := strings.Cut(l, "FRAME "); ok {
-			last = after
-		}
+	f := runFrames(t)
+	if len(f) == 0 {
+		return ""
 	}
-	return last
+	return f[len(f)-1]
 }
 
 // ---------------------------------------------------------------- certificates
@@ -229,8 +248,10 @@ func freshGPJSON() string {
 		`"MEAN_MOTION_DOT":0.00019394,"MEAN_MOTION_DDOT":0}]`, epoch, wssNorad)
 }
 
-// sampleNginxConf extracts the nginx config from the SHIPPED sample so the sample itself is
-// under test. A copy inlined here would let the sample rot while the test stayed green.
+// sampleNginxConf reads the nginx config out of the SHIPPED sample so the sample itself is
+// under test — a copy inlined here would let the sample rot while the test stayed green. It
+// parses the YAML rather than slicing the text: block indentation, quoting and escapes are the
+// parser's job, and a re-indented sample must not silently yield a subtly different config.
 func sampleNginxConf(t *testing.T) string {
 	t.Helper()
 	root, err := os.Getwd()
@@ -242,26 +263,39 @@ func sampleNginxConf(t *testing.T) string {
 	if err != nil {
 		t.Fatalf("read sample %s: %v", p, err)
 	}
-	s := string(b)
-	_, body, ok := strings.Cut(s, "  nginx.conf: |")
-	if !ok {
-		t.Fatalf("sample no longer contains an 'nginx.conf: |' block — update this test with it")
+	var conf string
+	for doc := range strings.SplitSeq(string(b), "\n---") {
+		var cm struct {
+			Kind string            `json:"kind"`
+			Data map[string]string `json:"data"`
+		}
+		if err := yaml.Unmarshal([]byte(doc), &cm); err != nil {
+			continue // the sample may carry comment-only or non-object documents
+		}
+		if cm.Kind == "ConfigMap" && cm.Data["nginx.conf"] != "" {
+			conf = cm.Data["nginx.conf"]
+			break
+		}
 	}
-	if before, _, ok := strings.Cut(body, "\n---"); ok {
-		body = before
+	if conf == "" {
+		t.Fatalf("sample %s no longer has a ConfigMap carrying data[\"nginx.conf\"] — "+
+			"the test mounts that key, so update one to match the other", p)
 	}
-	// Strip the block indent and substitute the sample's placeholders.
-	lines := strings.Split(body, "\n")
-	out := make([]string, 0, len(lines))
-	for _, l := range lines {
-		out = append(out, strings.TrimPrefix(l, "    "))
-	}
-	conf := strings.Join(out, "\n")
 	conf = strings.ReplaceAll(conf, "REPLACE_WITH_TOKEN", wssToken)
 	if strings.Contains(conf, "REPLACE_WITH") {
 		t.Fatalf("sample nginx.conf still has an unsubstituted placeholder:\n%s", conf)
 	}
 	return conf
+}
+
+// proxyLogCount counts occurrences in the SIDECAR's own log. nginx writes both access and error
+// logs to stdout in the official image, so this is the proxy's account of what it did — the
+// point being that a refusal is observed at the proxy, not merely inferred from the operator's
+// condition. Always compared as a delta across one arm.
+func proxyLogCount(t *testing.T, sub string) int {
+	t.Helper()
+	out, _ := kubectl(t, "-n", wssNS, "logs", "deploy/"+wssGNB, "-c", "proxy", "--tail=-1")
+	return strings.Count(out, sub)
 }
 
 // ---------------------------------------------------------------- deployment
@@ -289,6 +323,10 @@ spec:
         - name: nginx
           image: nginx:1.29-alpine
           ports: [{containerPort: 80, name: http}]
+          # Ready means the fixture is actually servable, not merely that nginx started.
+          readinessProbe:
+            httpGet: {path: /gp.json, port: 80}
+            periodSeconds: 2
           volumeMounts:
             - {name: fixture, mountPath: /usr/share/nginx/html/gp.json, subPath: gp.json, readOnly: true}
       volumes:
@@ -319,8 +357,9 @@ func deployGNB(t *testing.T, ca, server certPair) {
 	if out, err := kubectl(t, "-n", wssNS, "create", "configmap", wssGNB+"-src", "--from-file=main.go="+stub); err != nil {
 		t.Fatalf("create stub configmap: %v: %s", err, out)
 	}
+	conf := sampleNginxConf(t)
 	cmd := exec.Command("kubectl", "-n", wssNS, "create", "configmap", wssGNB+"-conf", "--from-file=nginx.conf=/dev/stdin")
-	cmd.Stdin = strings.NewReader(sampleNginxConf(t))
+	cmd.Stdin = strings.NewReader(conf)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("create nginx configmap: %v: %s", err, out)
 	}
@@ -331,6 +370,12 @@ func deployGNB(t *testing.T, ca, server certPair) {
 		t.Fatalf("create proxy tls secret: %v", err)
 	}
 
+	// nginx reads its certificates and its config ONCE, at startup, and this Deployment's spec is
+	// otherwise identical between runs — so a re-run that mints a fresh CA would leave the old pod
+	// serving the old chain and every dial would fail x509 verification. Observed: a second run in
+	// a kept namespace failed every arm with "certificate signed by unknown authority". Rolling on
+	// a checksum of exactly what nginx loads is the Helm checksum/config pattern.
+	sum := sha256.Sum256(bytes.Join([][]byte{[]byte(conf), ca.certPEM, server.certPEM, server.keyPEM}, nil))
 	kubectlApply(t, fmt.Sprintf(`
 apiVersion: apps/v1
 kind: Deployment
@@ -339,7 +384,9 @@ spec:
   replicas: 1
   selector: {matchLabels: {app: %[1]s}}
   template:
-    metadata: {labels: {app: %[1]s}}
+    metadata:
+      labels: {app: %[1]s}
+      annotations: {ntn.operators.dev/nginx-inputs-sha256: "%[4]s"}
     spec:
       containers:
         - name: gnb
@@ -350,12 +397,21 @@ spec:
             - {name: GOFLAGS, value: -mod=mod}
             - {name: HOME,    value: /tmp}
           ports: [{containerPort: 8001}]
+          # go run compiles first, so the container is Running long before anything listens;
+          # without this probe, rollout status returns early and the first push races the build.
+          readinessProbe:
+            tcpSocket: {port: 8001}
+            periodSeconds: 5
+            failureThreshold: 48
           volumeMounts:
             - {name: src, mountPath: /src}
             - {name: tmp, mountPath: /tmp}
         - name: proxy
           image: nginx:1.29-alpine
           ports: [{containerPort: 8443, name: wss}]
+          readinessProbe:
+            tcpSocket: {port: 8443}
+            periodSeconds: 2
           volumeMounts:
             - {name: conf,  mountPath: /etc/nginx/nginx.conf, subPath: nginx.conf}
             - {name: certs, mountPath: /certs, readOnly: true}
@@ -371,8 +427,8 @@ metadata: {name: %[3]s, namespace: %[2]s}
 spec:
   selector: {app: %[1]s}
   ports: [{name: wss, port: 8443, targetPort: 8443}]
-`, wssGNB, wssNS, wssSvc))
-	if _, err := kubectl(t, "-n", wssNS, "rollout", "status", "deploy/"+wssGNB, "--timeout=240s"); err != nil {
+`, wssGNB, wssNS, wssSvc, hex.EncodeToString(sum[:8])))
+	if _, err := kubectl(t, "-n", wssNS, "rollout", "status", "deploy/"+wssGNB, "--timeout=300s"); err != nil {
 		t.Fatalf("gnb not ready: %v", err)
 	}
 }
@@ -401,43 +457,100 @@ func createSecret(t *testing.T, name string, data map[string][]byte, optIn bool)
 	return nil
 }
 
-// ensureManagerAllowsGPHost makes the suite self-contained: the GP mock lives on a private
-// ClusterIP, so without this flag the SSRF-safe fetcher blocks it and the ephemeris never
-// propagates — a failure that looks like "the push is broken" but is not. Patching here
-// rather than requiring a special deploy keeps the suite runnable against any already-
-// deployed chart, which is what `make test-e2e-wss` promises.
-func ensureManagerAllowsGPHost(t *testing.T) {
+// requireManagerAllowsGPHost VERIFIES the manager configuration; it deliberately does NOT
+// patch it. An earlier version appended "--ephemeris-allowed-private-hosts=<our host>" to the
+// running Deployment. That flag is a plain string, so Go's flag package calls Set once per
+// occurrence and the LAST one wins: the append silently REPLACED the value
+// ha-ci-values.yaml sets for celestrak-mock, and TestHAOutageContinuityAcrossFailover — which
+// runs after this suite — timed out with the manager rejecting the CelesTrak mock. The suite
+// itself stayed green, which is exactly what makes shared-state mutation from a test dangerous.
+//
+// A test that runs against an already-deployed chart must not reconfigure the controller that
+// every other test shares. Configure the union at deploy time and assert it here.
+func requireManagerAllowsGPHost(t *testing.T) {
 	t.Helper()
 	ns := os.Getenv("WSS_MANAGER_NAMESPACE")
 	if ns == "" {
 		ns = "ntn-operators-system"
 	}
-	want := "--ephemeris-allowed-private-hosts=" + wssGPMock + "." + wssNS + ".svc.cluster.local"
-	out, err := kubectl(t, "-n", ns, "get", "deploy", "-o",
-		`jsonpath={.items[0].metadata.name}{"\t"}{.items[0].spec.template.spec.containers[0].args}`)
+	out, err := kubectl(t, "-n", ns, "get", "deploy", "-l", "control-plane=controller-manager",
+		"-o", `jsonpath={.items[0].spec.template.spec.containers[?(@.name=="manager")].args}`)
 	if err != nil {
-		t.Fatalf("no manager Deployment in namespace %q — deploy the chart first "+
-			"(set WSS_MANAGER_NAMESPACE if it lives elsewhere): %v", ns, err)
+		t.Fatalf("no manager Deployment (control-plane=controller-manager) in namespace %q — deploy the "+
+			"chart first, or set WSS_MANAGER_NAMESPACE: %v", ns, err)
 	}
-	parts := strings.SplitN(strings.TrimSpace(out), "\t", 2)
-	if len(parts) != 2 {
-		t.Fatalf("unexpected manager describe output: %q", out)
-	}
-	name, args := parts[0], parts[1]
-	if strings.Contains(args, want) {
-		return
-	}
-	t.Logf("patching manager %s/%s with %s", ns, name, want)
-	if out, err := kubectl(t, "-n", ns, "patch", "deploy", name, "--type=json",
-		fmt.Sprintf(`-p=[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":%q}]`, want)); err != nil {
-		t.Fatalf("patch manager args: %v: %s", err, out)
-	}
-	if out, err := kubectl(t, "-n", ns, "rollout", "status", "deploy/"+name, "--timeout=240s"); err != nil {
-		t.Fatalf("manager did not roll out after the args patch: %v: %s", err, out)
+	want := wssGPMock + "." + wssNS + ".svc.cluster.local"
+	if !strings.Contains(out, want) {
+		t.Fatalf("the deployed manager does not allow the GP mock host %q, so the SSRF-safe fetcher will "+
+			"block it and the ephemeris will never propagate.\n"+
+			"Deploy with ONE --ephemeris-allowed-private-hosts carrying the UNION of every mock host, e.g.\n"+
+			"  manager.args:\n"+
+			"    - --ephemeris-allowed-private-hosts=celestrak-mock.default.svc.cluster.local,%s\n"+
+			"Do NOT add a second occurrence of the flag: the later value replaces the earlier one.\n"+
+			"current args: %s", want, want, out)
 	}
 }
 
-// waitCondition waits for the EXACT expected "status/reason". Waiting merely for a False
+// requireEndpointAllowlist reports whether the manager runs with an endpoint allow-list, which
+// the #300 arm needs. Returned rather than fatal so the arm can skip with a clear reason on a
+// deployment that does not set it.
+func managerEndpointAllowlist(t *testing.T) string {
+	t.Helper()
+	ns := os.Getenv("WSS_MANAGER_NAMESPACE")
+	if ns == "" {
+		ns = "ntn-operators-system"
+	}
+	out, _ := kubectl(t, "-n", ns, "get", "deploy", "-l", "control-plane=controller-manager",
+		"-o", `jsonpath={.items[0].spec.template.spec.containers[?(@.name=="manager")].args}`)
+	for f := range strings.SplitSeq(strings.Trim(out, "[]"), " ") {
+		if _, after, ok := strings.Cut(f, "--remote-control-allowed-endpoint-hosts="); ok {
+			return strings.Trim(after, `"`)
+		}
+	}
+	return ""
+}
+
+// setupNamespace creates a namespace this suite OWNS, and refuses to touch one it does not.
+// The fixtures used to live in "default" under fixed names, so a re-run on a shared cluster
+// could overwrite — and then delete — resources the suite never created.
+func setupNamespace(t *testing.T) {
+	t.Helper()
+	if os.Getenv("E2E_WSS_DESTRUCTIVE") != "1" {
+		t.Skip("this suite creates and then DELETES namespace " + wssNS + " on the cluster kubectl " +
+			"currently points at. Run `make test-e2e-wss`, or set E2E_WSS_DESTRUCTIVE=1, to confirm " +
+			"that is the cluster you meant.")
+	}
+	out, err := kubectl(t, "get", "ns", wssNS, "-o", `jsonpath={.metadata.labels.`+
+		strings.ReplaceAll(wssOwnerKey, ".", `\.`)+`}`)
+	switch {
+	case err != nil: // absent — create it, owned
+		kubectlApply(t, fmt.Sprintf(`
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: %s
+  labels: {%q: %q}
+`, wssNS, wssOwnerKey, wssOwnerVal))
+	case strings.TrimSpace(out) == wssOwnerVal:
+		// Ours. If a previous run left it Terminating, every create below would fail with
+		// "namespace is terminating"; wait it out and recreate.
+		phase, _ := kubectl(t, "get", "ns", wssNS, "-o", `jsonpath={.status.phase}`)
+		if strings.TrimSpace(phase) == "Terminating" {
+			eventuallyWSS(t, 3*time.Minute, "previous run's namespace to finish terminating", func() (bool, string) {
+				_, err := kubectl(t, "get", "ns", wssNS)
+				return err != nil, "still Terminating"
+			})
+			kubectlApply(t, fmt.Sprintf("apiVersion: v1\nkind: Namespace\nmetadata:\n  name: %s\n  labels: {%q: %q}\n",
+				wssNS, wssOwnerKey, wssOwnerVal))
+		}
+	default:
+		t.Fatalf("namespace %q exists but is not owned by this suite (%s=%q). Refusing to run: this suite "+
+			"deletes the whole namespace on cleanup and will not do that to somebody else's resources.",
+			wssNS, wssOwnerKey, strings.TrimSpace(out))
+	}
+}
+
+// waitCondition waits// waitCondition waits for the EXACT expected "status/reason". Waiting merely for a False
 // prefix would let an arm assert while the PREVIOUS arm's reason is still on the object —
 // which fails intermittently rather than never, and is the worse kind of flake.
 func waitCondition(t *testing.T, want string, timeout time.Duration) {
@@ -456,19 +569,25 @@ func TestWSSCredentialedPush(t *testing.T) {
 	}
 	ca, server, client := issueCerts(t)
 
+	setupNamespace(t)
 	t.Cleanup(func() {
-		_, _ = kubectl(t, "-n", wssNS, "delete", "ntncellconfig", wssCell, "--ignore-not-found", "--wait=false")
-		_, _ = kubectl(t, "-n", wssNS, "delete", "satelliteephemeris", wssSatEph, "--ignore-not-found", "--wait=false")
-		_, _ = kubectl(t, "-n", wssNS, "delete", "deploy", wssGNB, wssGPMock, "--ignore-not-found", "--wait=false")
-		_, _ = kubectl(t, "-n", wssNS, "delete", "svc", wssSvc, wssGPMock, "--ignore-not-found", "--wait=false")
-		_, _ = kubectl(t, "-n", wssNS, "delete", "secret", wssCredName, wssNoCA, wssGNB+"-tls", "--ignore-not-found")
-		_, _ = kubectl(t, "-n", wssNS, "delete", "configmap",
-			wssGNB+"-src", wssGNB+"-conf", wssGPMock+"-fixture", "--ignore-not-found")
+		if os.Getenv("E2E_WSS_KEEP") == "1" {
+			t.Logf("E2E_WSS_KEEP=1: leaving namespace %s up for inspection; the next run will "+
+				"refuse to start until it is deleted or re-adopted", wssNS)
+			return
+		}
+		// Delete the namespace this suite owns, rather than deleting fixed names one by one and
+		// risking removing something the suite never created. Finalizers on the CR need the
+		// manager alive, so clear them first — a namespace stuck Terminating would block the
+		// next run's ownership check.
+		_, _ = kubectl(t, "-n", wssNS, "patch", "ntncellconfig", wssCell, "--type=merge",
+			"-p", `{"metadata":{"finalizers":[]}}`)
+		_, _ = kubectl(t, "delete", "ns", wssNS, "--ignore-not-found", "--wait=false")
 	})
 
 	t.Log("standing up the GP source and the gNB behind its TLS sidecar")
+	requireManagerAllowsGPHost(t)
 	deployGPMock(t)
-	ensureManagerAllowsGPHost(t)
 	deployGNB(t, ca, server)
 
 	// The credential the operator will present: CA to trust the sidecar, a client
@@ -518,13 +637,13 @@ spec:
     remoteControl:
       endpoint: "%[3]s.%[2]s.svc:8443"
       tls: {mode: mtls, secretName: %[4]s}
-  cellID: {plmn: "00101", nci: 6733824}
+  cellID: {plmn: "00101", nci: %[7]d}
   ephemerisRef: %[5]s
   ephemerisNoradID: %[6]d
   ntn:
     cellSpecificKoffset: 100
     ephemerisECEF: {posX: 1000000, posY: 2000000, posZ: 3000000, velX: 0, velY: 0, velZ: 0}
-`, wssCell, wssNS, wssSvc, wssCredName, wssSatEph, wssNorad))
+`, wssCell, wssNS, wssSvc, wssCredName, wssSatEph, wssNorad, wssRunNCI))
 
 	// --- arm 1: the whole chain works, and the PLAINTEXT backend proves it -------------
 	t.Run("mtls+bearer reaches the plaintext gNB behind the proxy", func(t *testing.T) {
@@ -548,7 +667,7 @@ spec:
 		if env.Cmd != "ntn_config_update" || len(env.Cells) != 1 {
 			t.Fatalf("wrong envelope on the wire: %s", frame)
 		}
-		if env.Cells[0].PLMN != "00101" || env.Cells[0].NCI != 6733824 {
+		if env.Cells[0].PLMN != "00101" || env.Cells[0].NCI != wssRunNCI {
 			t.Errorf("frame targets the wrong cell: %+v", env.Cells[0])
 		}
 		if env.Cells[0].Epoch <= time.Now().UnixMilli() {
@@ -559,12 +678,16 @@ spec:
 
 	// --- arm 2: the bearer is genuinely checked, and a 401 is classified as retry-later -
 	t.Run("wrong bearer is RemoteEndpointRejected, not a permanent rejection", func(t *testing.T) {
-		before := framesReceived(t)
+		before, before401 := framesReceived(t), proxyLogCount(t, `" 401 `)
 		patchSecretToken(t, wssCredName, "definitely-not-the-token")
 		bumpGeneration(t, "wrong-bearer")
 		waitCondition(t, "False/RemoteEndpointRejected", 3*time.Minute)
 		if now := framesReceived(t); now != before {
 			t.Errorf("frames went %d -> %d: a rejected handshake must not deliver a payload", before, now)
+		}
+		if now := proxyLogCount(t, `" 401 `); now == before401 {
+			t.Errorf("the proxy logged no new 401: the condition may be reporting a rejection that "+
+				"never reached the bearer check (401 count stayed at %d)", before401)
 		}
 		patchSecretToken(t, wssCredName, wssToken)
 		bumpGeneration(t, "restore-bearer")
@@ -585,15 +708,57 @@ spec:
 
 	// --- arm 4: mTLS is actually enforced by the proxy ---------------------------------
 	t.Run("dropping the client certificate is refused by the proxy", func(t *testing.T) {
-		before := framesReceived(t)
+		// nginx answers a missing client certificate with 400 in the access log. Its
+		// "client sent no required SSL certificate" line is logged at info level, and the sample
+		// sets no error_log directive, so the default (error) hides it — the status code is the
+		// observable that does not depend on the sample's log level.
+		const proxyReject = `" 400 `
+		before, beforeTLS := framesReceived(t), proxyLogCount(t, proxyReject)
 		patchTLSMode(t, "tls") // mode=tls presents no client certificate
 		waitCondition(t, "False/RemoteEndpointRejected", 3*time.Minute)
 		if now := framesReceived(t); now != before {
 			t.Errorf("frames went %d -> %d: mTLS did not actually gate the connection", before, now)
 		}
+		if now := proxyLogCount(t, proxyReject); now == beforeTLS {
+			t.Errorf("the proxy logged no new 400: the connection may have failed before it ever "+
+				"reached the proxy, and this arm would still pass (count stayed at %d)", beforeTLS)
+		}
 		patchTLSMode(t, "mtls")
 		waitCondition(t, "True/Pushed", 3*time.Minute)
 	})
+
+	t.Run("endpoint outside the admin allow-list is refused before the Secret is read", func(t *testing.T) {
+		runEndpointAllowlistArm(t)
+	})
+}
+
+// --- arm 5: #300 — an endpoint outside the admin allow-list is refused, and the Secret is
+// never read. This is the confused-deputy boundary for credentialed pushes: the check has to
+// happen BEFORE the credential is resolved, or the operator has already loaded the secret it
+// was supposed to refuse to use.
+func runEndpointAllowlistArm(t *testing.T) {
+	t.Helper()
+	allow := managerEndpointAllowlist(t)
+	if allow == "" {
+		t.Skip("manager runs without --remote-control-allowed-endpoint-hosts, so there is no allow-list " +
+			"to violate; deploy with one to cover #300")
+	}
+	before := framesReceived(t)
+	// Point at a host that is definitely not on the list. It does not need to exist: the refusal
+	// must happen before anything is dialled.
+	if out, err := kubectl(t, "-n", wssNS, "patch", "ntncellconfig", wssCell, "--type=merge",
+		`-p={"spec":{"provider":{"remoteControl":{"endpoint":"not-allowed.example.invalid:8443"}}}}`); err != nil {
+		t.Fatalf("patch endpoint: %v: %s", err, out)
+	}
+	waitCondition(t, "False/RemoteControlEndpointNotAllowed", 3*time.Minute)
+	if now := framesReceived(t); now != before {
+		t.Errorf("frames went %d -> %d: a non-allow-listed endpoint must never be dialled", before, now)
+	}
+	if out, err := kubectl(t, "-n", wssNS, "patch", "ntncellconfig", wssCell, "--type=merge",
+		fmt.Sprintf(`-p={"spec":{"provider":{"remoteControl":{"endpoint":"%s.%s.svc:8443"}}}}`, wssSvc, wssNS)); err != nil {
+		t.Fatalf("restore endpoint: %v: %s", err, out)
+	}
+	waitCondition(t, "True/Pushed", 3*time.Minute)
 }
 
 func patchSecretToken(t *testing.T, name, token string) {
