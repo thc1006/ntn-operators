@@ -82,8 +82,8 @@ func TestPushEphemerisUpdateIfNeeded_RemoteControlEndpointAllowlist(t *testing.T
 		if err == nil || !errors.Is(err, errRemoteControlEndpointNotAllowed) {
 			t.Fatalf("want errRemoteControlEndpointNotAllowed (endpoint checked before the Secret read), got %v", err)
 		}
-		if reason := ephemerisPushConditionReason(err); reason != ephemerisReasonRemoteControlConfig {
-			t.Fatalf("must classify as %q, got %q", ephemerisReasonRemoteControlConfig, reason)
+		if reason := ephemerisPushConditionReason(err); reason != ephemerisReasonRemoteControlEndpointNotAllowed {
+			t.Fatalf("must classify as %q, got %q", ephemerisReasonRemoteControlEndpointNotAllowed, reason)
 		}
 		if pushed {
 			t.Fatal("the credential must NOT be sent to a non-allowlisted endpoint (the provider was called)")

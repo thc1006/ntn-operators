@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **Closed a residual Secret existence/type oracle in the `remoteControl.tls` credential path.** #219
+  unified the CR-facing *message* for a `remoteControl.tls` resolution failure but not the *reason*: a
+  missing/unreadable Secret classified as `ProviderPushFailed` (1 min requeue) while a present-but-bad
+  one (wrong type / missing opt-in label / malformed cert) classified as `RemoteControlConfigInvalid`
+  (5 min requeue). Since the controller writes that reason verbatim into
+  `status.conditions[].reason` — and stamps it on the per-failure `EphemerisPushErrorsTotal` metric — a
+  principal who can write an `NTNCellConfig` but has no `secrets/get` could still distinguish "my
+  guessed Secret exists but isn't a valid credential" from "it is missing/unreadable", defeating #219's
+  "No Secret existence/type oracle" claim. Every `remoteControl.tls` failure now surfaces the single
+  uniform reason `RemoteControlCredentialUnavailable` with the uniform message **and** the same 5 min
+  self-heal cadence, so neither the condition, the metric label, nor the metric's per-failure increment
+  *rate* (a channel the message/reason split alone left open) can tell the cases apart. The specific
+  cause is still logged for the operator (who can read Secrets); genuinely transient errors still
+  recover fast via the ~3 min ephemeris heartbeat. A table-driven regression pins that all seven
+  failure modes (missing, unreadable, unlabelled, service-account token, bootstrap token, malformed CA,
+  malformed client cert) yield an identical public reason, message, and requeue interval. The sibling
+  endpoint allow-list (`--remote-control-allowed-endpoint-hosts`) keeps its own distinct reason
+  `RemoteControlEndpointNotAllowed`: it fires before the Secret read and reflects admin egress policy,
+  not Secret state, so folding it into the uniform credential reason would be inaccurate and needless.
+
 ### Added
 
 - **Durable conditional-GET validators for the OMM cache (polite restart/failover refetch).** The

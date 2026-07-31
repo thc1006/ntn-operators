@@ -25,7 +25,6 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
-	"errors"
 	"math/big"
 	"testing"
 	"time"
@@ -33,7 +32,9 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	ntnv1alpha1 "github.com/thc1006/ntn-operators/api/v1alpha1"
 	"github.com/thc1006/ntn-operators/pkg/provider"
@@ -199,9 +200,6 @@ func TestResolveRemoteControlTLS(t *testing.T) {
 		if tok != "" {
 			t.Fatalf("no token may be returned on rejection, got %q", tok)
 		}
-		if !errors.Is(err, errRemoteControlCredentialInvalid) {
-			t.Errorf("a credential-config rejection must be classified permanent (wrap errRemoteControlCredentialInvalid) so it does not tight-requeue; got %v", err)
-		}
 	})
 
 	t.Run("service-account-token Secret → rejected even if labelled", func(t *testing.T) {
@@ -223,9 +221,6 @@ func TestResolveRemoteControlTLS(t *testing.T) {
 		if tok != "" {
 			t.Fatalf("the apiserver token must never be returned, got %q", tok)
 		}
-		if !errors.Is(err, errRemoteControlCredentialInvalid) {
-			t.Errorf("a rejected Secret type must be classified permanent (wrap errRemoteControlCredentialInvalid); got %v", err)
-		}
 	})
 
 	t.Run("bootstrap-token Secret → rejected even if labelled", func(t *testing.T) {
@@ -244,25 +239,24 @@ func TestResolveRemoteControlTLS(t *testing.T) {
 		if err == nil || tok != "" {
 			t.Fatal("a bootstrap-token Secret must never be usable as a remote-control credential")
 		}
-		if !errors.Is(err, errRemoteControlCredentialInvalid) {
-			t.Errorf("must be classified permanent; got %v", err)
-		}
 	})
 }
 
-// TestEphemerisPushRequeue_RemoteControlConfigSelfHeals pins that a deterministic
+// TestEphemerisPushRequeue_RemoteControlCredentialSelfHeals pins that a
 // remoteControl.tls credential error requeues on a low-frequency SELF-HEAL poll — not a tight
 // per-minute retry, and not never. Its fix is a Secret edit, which the controller does NOT watch
 // (only NTNCellConfig + SatelliteEphemeris are watched; secrets are get-only), so without a
 // self-requeue the cell recovers only on the next SatelliteEphemeris heartbeat fan-out, and never
 // if the producer stalls. A transient ProviderPushFailed still tight-requeues (control).
-func TestEphemerisPushRequeue_RemoteControlConfigSelfHeals(t *testing.T) {
-	if !ephemerisPushShouldRequeue(ephemerisReasonRemoteControlConfig) {
-		t.Error("RemoteControlConfigInvalid must self-requeue: its Secret fix is not watched, so no requeue would strand the cell")
+func TestEphemerisPushRequeue_RemoteControlCredentialSelfHeals(t *testing.T) {
+	if !ephemerisPushShouldRequeue(ephemerisReasonRemoteControlCredential) {
+		t.Error("RemoteControlCredentialUnavailable must self-requeue: its Secret fix is not watched, so no requeue would strand the cell")
 	}
-	if got := ephemerisPushRequeueInterval(ephemerisReasonRemoteControlConfig); got != remoteControlConfigRequeue {
-		t.Errorf("credential-config requeue = %v, want %v (a slow self-heal poll, not a tight retry)", got, remoteControlConfigRequeue)
+	if got := ephemerisPushRequeueInterval(ephemerisReasonRemoteControlCredential); got != remoteControlConfigRequeue {
+		t.Errorf("credential requeue = %v, want %v (a slow self-heal poll, not a tight retry)", got, remoteControlConfigRequeue)
 	}
+	// A generic ProviderPushFailed (an actual gNB push failure, NOT a credential failure) still
+	// tight-requeues — control that the 5m interval is credential-specific, not a blanket slowdown.
 	if !ephemerisPushShouldRequeue(ephemerisReasonProviderPushFailed) {
 		t.Error("a transient ProviderPushFailed must still requeue (control)")
 	}
@@ -271,12 +265,13 @@ func TestEphemerisPushRequeue_RemoteControlConfigSelfHeals(t *testing.T) {
 	}
 }
 
-// TestPushEphemerisUpdateIfNeeded_BadCredentialClassifiesRemoteControlConfig proves the input to
-// the self-heal requeue: an un-opted-in (unlabelled) remoteControl.tls Secret makes the runtime
-// push fail with the RemoteControlConfigInvalid reason. Combined with the classification above,
-// this is the end-to-end guarantee — a bad Secret schedules a bounded self-heal retry rather than
-// stranding the cell, since a Secret edit does not re-trigger reconcile.
-func TestPushEphemerisUpdateIfNeeded_BadCredentialClassifiesRemoteControlConfig(t *testing.T) {
+// TestPushEphemerisUpdateIfNeeded_BadCredentialClassifiesRemoteControlCredential proves the input
+// to the self-heal requeue: an un-opted-in (unlabelled) remoteControl.tls Secret makes the runtime
+// push fail with the uniform RemoteControlCredentialUnavailable reason. Combined with the
+// requeue-classification above, this is the end-to-end guarantee — a bad Secret schedules a
+// bounded self-heal retry rather than stranding the cell, since a Secret edit does not re-trigger
+// reconcile.
+func TestPushEphemerisUpdateIfNeeded_BadCredentialClassifiesRemoteControlCredential(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := ntnv1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
@@ -302,8 +297,8 @@ func TestPushEphemerisUpdateIfNeeded_BadCredentialClassifiesRemoteControlConfig(
 		t.Fatal("an un-opted-in remoteControl.tls Secret must fail the push")
 	}
 	reason := ephemerisPushConditionReason(err)
-	if reason != ephemerisReasonRemoteControlConfig {
-		t.Fatalf("a bad credential must classify as %q, got %q", ephemerisReasonRemoteControlConfig, reason)
+	if reason != ephemerisReasonRemoteControlCredential {
+		t.Fatalf("a bad credential must classify as %q, got %q", ephemerisReasonRemoteControlCredential, reason)
 	}
 	// And that reason self-heal-requeues (the Secret fix is unwatched), so the cell is not stranded.
 	if !ephemerisPushShouldRequeue(reason) || ephemerisPushRequeueInterval(reason) != remoteControlConfigRequeue {
@@ -313,7 +308,7 @@ func TestPushEphemerisUpdateIfNeeded_BadCredentialClassifiesRemoteControlConfig(
 }
 
 // TestPushEphemerisUpdateIfNeeded_SecretFixRecovers is the end-to-end coverage the review asked for
-// on the RemoteControlConfigInvalid self-heal (#282): patch ONLY the Secret and observe recovery. A
+// on the RemoteControlCredentialUnavailable self-heal (#282): patch ONLY the Secret and observe recovery. A
 // remoteControl.tls Secret missing the opt-in label fails the push as a credential-config error;
 // adding the label (no spec edit, no ephemeris change) makes the very next push — which is exactly
 // what the 5m self-heal requeue re-runs — succeed. That is what lets the cell recover even when the
@@ -328,7 +323,7 @@ func TestPushEphemerisUpdateIfNeeded_SecretFixRecovers(t *testing.T) {
 	}
 	certPEM, _ := selfSignedPEM(t)
 	eph := ephWithPropagatedState(time.Now().Add(time.Hour).UnixMilli())
-	// Valid cert material, but NOT opted in (no owner label) → RemoteControlConfigInvalid.
+	// Valid cert material, but NOT opted in (no owner label) → RemoteControlCredentialUnavailable.
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: "cred", Namespace: eph.Namespace},
 		Data:       map[string][]byte{"ca.crt": certPEM},
@@ -340,8 +335,8 @@ func TestPushEphemerisUpdateIfNeeded_SecretFixRecovers(t *testing.T) {
 
 	// Push 1: the un-opted-in Secret fails the push as a credential-config error.
 	if _, _, err := r.pushEphemerisUpdateIfNeeded(context.Background(), cc, &cc.Spec, &provider.MockProvider{}); err == nil ||
-		ephemerisPushConditionReason(err) != ephemerisReasonRemoteControlConfig {
-		t.Fatalf("push 1: want a RemoteControlConfigInvalid failure, got %v", err)
+		ephemerisPushConditionReason(err) != ephemerisReasonRemoteControlCredential {
+		t.Fatalf("push 1: want a RemoteControlCredentialUnavailable failure, got %v", err)
 	}
 
 	// Patch ONLY the Secret — add the opt-in label. No spec edit, no ephemeris change.
@@ -356,5 +351,99 @@ func TestPushEphemerisUpdateIfNeeded_SecretFixRecovers(t *testing.T) {
 	if err != nil || !pushed || mock.RuntimeCalls != 1 {
 		t.Fatalf("push 2 (post-Secret-fix) must recover with a successful push; got pushed=%v err=%v calls=%d",
 			pushed, err, mock.RuntimeCalls)
+	}
+}
+
+// TestPushEphemerisUpdateIfNeeded_CredentialFailuresUniform is the security regression the review
+// asked for: EVERY remoteControl.tls resolution failure — a missing/unreadable Secret and a
+// present-but-invalid one alike — must surface the IDENTICAL public reason, message, AND requeue
+// cadence on the CR, so a principal who can write the NTNCellConfig but not read Secrets cannot
+// distinguish a missing Secret from a present-but-bad one (a Secret existence/type oracle; #219).
+// The uniform cadence matters because EphemerisPushErrorsTotal counts per-failure, so a split
+// interval would leak the same distinction via the metric's increment rate.
+func TestPushEphemerisUpdateIfNeeded_CredentialFailuresUniform(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := ntnv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	certPEM, _ := selfSignedPEM(t)
+
+	const secretName = "cred"
+	eph := ephWithPropagatedState(time.Now().Add(time.Hour).UnixMilli())
+	ns := eph.Namespace // resolveRemoteControlTLS looks the Secret up in the ephemeris namespace
+	labelled := map[string]string{remoteControlCredentialLabel: "true"}
+	mkSecret := func(labels map[string]string, typ corev1.SecretType, data map[string][]byte) *corev1.Secret {
+		return &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: ns, Labels: labels},
+			Type:       typ,
+			Data:       data,
+		}
+	}
+
+	cases := []struct {
+		name    string
+		mode    string
+		secret  *corev1.Secret // nil ⇒ Secret ABSENT (missing)
+		readErr bool           // inject a Secret GET failure (unreadable / forbidden)
+	}{
+		{name: "missing", mode: "tls", secret: nil},
+		{name: "read-failure", mode: "tls", readErr: true,
+			secret: mkSecret(labelled, "", map[string][]byte{"ca.crt": certPEM})},
+		{name: "unlabelled", mode: "tls",
+			secret: mkSecret(nil, "", map[string][]byte{"ca.crt": certPEM})},
+		{name: "service-account-token", mode: "tls",
+			secret: mkSecret(labelled, corev1.SecretTypeServiceAccountToken, map[string][]byte{"token": []byte("apiserver"), "ca.crt": certPEM})},
+		{name: "bootstrap-token", mode: "tls",
+			secret: mkSecret(labelled, secretTypeBootstrapToken, map[string][]byte{"token": []byte("bootstrap"), "ca.crt": certPEM})},
+		{name: "malformed-ca", mode: "tls",
+			secret: mkSecret(labelled, "", map[string][]byte{"ca.crt": []byte("not-pem")})},
+		{name: "malformed-client-cert", mode: "mtls",
+			secret: mkSecret(labelled, "", map[string][]byte{"ca.crt": certPEM, "tls.crt": []byte("bad"), "tls.key": []byte("bad")})},
+	}
+
+	wantMsg := errRemoteControlCredentialUnavailable.Error()
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			objs := []client.Object{eph.DeepCopy()}
+			if tc.secret != nil {
+				objs = append(objs, tc.secret)
+			}
+			b := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...)
+			if tc.readErr {
+				b = b.WithInterceptorFuncs(interceptor.Funcs{
+					Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+						if _, ok := obj.(*corev1.Secret); ok {
+							return context.DeadlineExceeded // a transient/unreadable Secret GET
+						}
+						return c.Get(ctx, key, obj, opts...)
+					},
+				})
+			}
+			c := b.Build()
+			r := &NTNCellConfigReconciler{Client: c, APIReader: c}
+			cc := ccWithRemoteControl()
+			cc.Spec.Provider.RemoteControl.TLS = &ntnv1alpha1.RemoteControlTLS{Mode: tc.mode, SecretName: secretName}
+
+			_, _, err := r.pushEphemerisUpdateIfNeeded(context.Background(), cc, &cc.Spec, &provider.MockProvider{})
+			if err == nil {
+				t.Fatalf("%s: expected a credential failure", tc.name)
+			}
+			// UNIFORM public reason — no Secret existence/type oracle.
+			if got := ephemerisPushConditionReason(err); got != ephemerisReasonRemoteControlCredential {
+				t.Errorf("%s: public reason = %q, want the uniform %q", tc.name, got, ephemerisReasonRemoteControlCredential)
+			}
+			// UNIFORM public message.
+			if got := err.Error(); got != wantMsg {
+				t.Errorf("%s: public message = %q, want the uniform %q", tc.name, got, wantMsg)
+			}
+			// UNIFORM self-heal cadence — so the per-failure error metric's increment rate cannot
+			// distinguish the cases either.
+			if iv := ephemerisPushRequeueInterval(ephemerisPushConditionReason(err)); iv != remoteControlConfigRequeue {
+				t.Errorf("%s: requeue interval = %v, want the uniform %v", tc.name, iv, remoteControlConfigRequeue)
+			}
+		})
 	}
 }

@@ -337,9 +337,9 @@ func pushNTNConfigUpdate(
 		// A definitive HTTP handshake response (a refused redirect, an auth rejection,
 		// or any non-101 in the 3xx/4xx range) is a PERMANENT config/credential problem,
 		// not transient unreachability — classify it non-retryable so the reconciler does
-		// not tight-requeue it every minute (mirroring RemoteControlConfigInvalid). A nil
-		// response is a connection-level failure (dial/TLS/timeout, or a 5xx server error)
-		// and stays retryable. coder/websocket owns resp.Body, so we only read the status.
+		// not tight-requeue it every minute. A nil response is a connection-level failure
+		// (dial/TLS/timeout, or a 5xx server error) and stays retryable. coder/websocket
+		// owns resp.Body, so we only read the status.
 		if resp != nil && resp.StatusCode >= 300 && resp.StatusCode < 500 {
 			return &wsError{wsHandshakeRejected, fmt.Sprintf("handshake to %s rejected: HTTP %d", endpoint, resp.StatusCode)}
 		}
