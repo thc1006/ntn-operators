@@ -108,8 +108,16 @@ func isOperatorManaged(cm *corev1.ConfigMap) bool {
 }
 
 // isAdoptableLeftover reports whether cm is an unowned artifact of THIS provider left by a
-// pre-atomic-reference version: no controller at all, our management labels, and a non-empty
-// config key (a labeled-but-empty impostor never held our config, so it is not ours).
+// pre-atomic-reference version: NO owner references at all, our management labels, and a
+// non-empty config key (a labeled-but-empty impostor never held our config, so it is not ours).
+//
+// "No owner references" rather than "no CONTROLLER owner reference" is deliberate. A ConfigMap
+// carrying a non-controller owner reference already belongs to something else's lifecycle;
+// adopting it would make us a second owner and — with Cleanup below — delete it when this CR
+// goes away, while the other owner still claims it. The tighter test costs nothing here: the
+// pre-atomic-ref version wrote the ConfigMap with no owner references at all and its
+// EnsureOwnership back-fill used SetControllerReference in a single Update, so a genuine
+// leftover either has our controller reference or has none — never a partial non-controller one.
 //
 // Shared by ApplyCellConfig (which adopts such an object) and Cleanup (which deletes it) so
 // the two can never drift apart. The drift was the bug: adoption ends in deletion anyway —
@@ -118,7 +126,7 @@ func isOperatorManaged(cm *corev1.ConfigMap) bool {
 // It only leaked the object when the CR was deleted before any reconcile got to adopt it,
 // which is the deletion-first path #210 left uncovered.
 func isAdoptableLeftover(cm *corev1.ConfigMap) bool {
-	return metav1.GetControllerOf(cm) == nil && isOperatorManaged(cm) && cm.Data[configDataKey] != ""
+	return len(cm.OwnerReferences) == 0 && isOperatorManaged(cm) && cm.Data[configDataKey] != ""
 }
 
 // Cleanup deletes the provider's ConfigMap for owner. Called by the finalizer during CR
