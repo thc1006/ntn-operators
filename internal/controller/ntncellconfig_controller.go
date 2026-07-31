@@ -28,6 +28,7 @@ import (
 	"net"
 	"time"
 
+	"golang.org/x/net/http/httpguts"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -82,8 +83,9 @@ const (
 	ephemerisReasonEphemerisStale       = "EphemerisStale"
 	// ephemerisReasonRemoteControlCredential is the UNIFORM CR-facing reason for EVERY
 	// remoteControl.tls resolution failure — Secret missing, unreadable, wrong type, unlabelled,
-	// or malformed cert. It deliberately does NOT distinguish "missing/unreadable" from
-	// "present-but-invalid": a split reason (or a split retry cadence, which the per-failure
+	// malformed cert, or a token that is not a valid HTTP header value. It deliberately does NOT
+	// distinguish "missing/unreadable" from "present-but-invalid": a split reason (or a split retry
+	// cadence, which the per-failure
 	// EphemerisPushErrorsTotal would leak via its increment rate) would let a principal who can
 	// write the NTNCellConfig but not read Secrets probe Secret existence and type (an oracle).
 	ephemerisReasonRemoteControlCredential = "RemoteControlCredentialUnavailable"
@@ -822,7 +824,7 @@ func (r *NTNCellConfigReconciler) pushRuntimeEphemeris(
 	tlsConfig, authToken, tlsErr := r.resolveRemoteControlTLS(ctx, eph.Namespace, spec.Provider.RemoteControl)
 	if tlsErr != nil {
 		// A deterministic credential/config error (wrong Secret type, missing opt-in label,
-		// malformed cert) does not clear on retry — only on a Secret or spec edit. The spec is
+		// malformed cert/token) does not clear on retry — only on a Secret or spec edit. The spec is
 		// watched, but the Secret is NOT (the controller watches only NTNCellConfig +
 		// SatelliteEphemeris, and secrets are get-only), so a Secret fix does not re-trigger
 		// reconcile. It therefore gets a low-frequency bounded self-heal requeue
@@ -883,7 +885,7 @@ const (
 
 // errRemoteControlCredentialUnavailable is the UNIFORM, CR-facing message for any
 // remoteControl.tls resolution failure. The specific cause (Secret missing / wrong
-// type / unlabelled / malformed cert) is logged for the operator but never surfaced
+// type / unlabelled / malformed cert / malformed token) is logged for the operator but never surfaced
 // on the CR condition/event: it would otherwise let a principal who can write the CR
 // but not read Secrets probe Secret existence and type (an oracle).
 var errRemoteControlCredentialUnavailable = errors.New("referenced remote-control credential is unavailable or not authorized")
@@ -893,6 +895,11 @@ var errRemoteControlCredentialUnavailable = errors.New("referenced remote-contro
 // this is NOT a Secret oracle — the endpoint is CR-author-set and already known to the writer — so it
 // names the endpoint. It is deterministic (config), so it self-heals on a spec/flag change, not a retry.
 var errRemoteControlEndpointNotAllowed = errors.New("remoteControl.tls endpoint is not in the operator's remote-control allow-list")
+
+// maxRemoteControlTokenBytes bounds the bearer token so the "Authorization: Bearer <token>"
+// header stays well under any HTTP header-size limit and far below the 1 MiB Secret cap.
+// 8 KiB is generous for any real shared secret or JWT.
+const maxRemoteControlTokenBytes = 8 * 1024
 
 // resolveRemoteControlTLS builds the TLS config and bearer token for the runtime
 // push from the Secret referenced by remoteControl.tls. It reads the Secret from
@@ -970,8 +977,24 @@ func (r *NTNCellConfigReconciler) resolveRemoteControlTLS(
 		}
 		cfg.Certificates = []tls.Certificate{pair}
 	}
-	// Optional shared secret, sent as Authorization: Bearer (only over the TLS conn).
-	return cfg, string(secret.Data["token"]), nil
+	// Optional shared secret, sent as "Authorization: Bearer <token>" (only over the TLS conn).
+	// A Secret holds arbitrary bytes; a token carrying a CR/LF/NUL — most often a trailing newline
+	// from `kubectl create secret --from-file` — makes net/http reject the header at dial time,
+	// which today misclassifies a credential-format error as a transient gNB unreachability and
+	// tight-retries it. Reject it here so it takes the SAME uniform credential reason and slow
+	// self-heal as every other bad credential (the caller logs this error; it never names the token).
+	token := string(secret.Data["token"])
+	if token != "" {
+		if len(token) > maxRemoteControlTokenBytes {
+			return nil, "", fmt.Errorf("remoteControl.tls secret %q: token is %d bytes, over the %d-byte limit",
+				t.SecretName, len(token), maxRemoteControlTokenBytes)
+		}
+		if !httpguts.ValidHeaderFieldValue("Bearer " + token) {
+			return nil, "", fmt.Errorf("remoteControl.tls secret %q: token is not a valid HTTP header value "+
+				"(a control byte such as CR/LF/NUL — e.g. a trailing newline?)", t.SecretName)
+		}
+	}
+	return cfg, token, nil
 }
 
 // uniquePropagatedNorads counts distinct NORAD IDs among the states. Used to fail closed when a cell

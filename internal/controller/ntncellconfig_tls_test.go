@@ -17,6 +17,7 @@ limitations under the License.
 package controller
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -26,6 +27,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"math/big"
+	"strings"
 	"testing"
 	"time"
 
@@ -238,6 +240,76 @@ func TestResolveRemoteControlTLS(t *testing.T) {
 		_, tok, err := r.resolveRemoteControlTLS(ctx, ns, rc)
 		if err == nil || tok != "" {
 			t.Fatal("a bootstrap-token Secret must never be usable as a remote-control credential")
+		}
+	})
+}
+
+// TestResolveRemoteControlTLS_TokenValidation covers the bearer-token guard: a Secret holds arbitrary
+// bytes, so a token with a control byte (most often a trailing newline from `kubectl create secret
+// --from-file`) or one near the 1 MiB Secret cap must be rejected at resolve time — taking the uniform
+// credential reason rather than misclassifying as a transient gNB failure at dial time — and the error
+// must never contain the token bytes.
+func TestResolveRemoteControlTLS_TokenValidation(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := ntnv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	const ns = "ns1"
+	ctx := context.Background()
+	// A labelled Opaque Secret carrying only the token; ca.crt is omitted (system roots), which does
+	// not affect the token check.
+	newRWithToken := func(token []byte) *NTNCellConfigReconciler {
+		sec := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: "s", Namespace: ns,
+				Labels: map[string]string{remoteControlCredentialLabel: "true"}},
+			Data: map[string][]byte{"token": token},
+		}
+		c := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(sec).Build()
+		return &NTNCellConfigReconciler{Client: c, APIReader: c}
+	}
+	rc := &ntnv1alpha1.RemoteControlRef{Endpoint: "h:1",
+		TLS: &ntnv1alpha1.RemoteControlTLS{Mode: "tls", SecretName: "s"}}
+
+	for _, tc := range []struct {
+		name  string
+		token []byte
+	}{
+		{"trailing newline", []byte("s3cr3t\n")},
+		{"embedded CRLF", []byte("s3\r\ncr3t")},
+		{"embedded NUL", []byte("s3\x00cr3t")},
+	} {
+		t.Run("token with "+tc.name+" → rejected without leaking it", func(t *testing.T) {
+			_, tok, err := newRWithToken(tc.token).resolveRemoteControlTLS(ctx, ns, rc)
+			if err == nil {
+				t.Fatal("a token that is not a valid HTTP header value must be rejected")
+			}
+			if tok != "" {
+				t.Fatalf("no token may be returned on rejection, got %q", tok)
+			}
+			if strings.Contains(err.Error(), string(tc.token)) || strings.Contains(err.Error(), "cr3t") {
+				t.Errorf("error must not leak the token bytes: %v", err)
+			}
+		})
+	}
+
+	t.Run("oversized token → rejected", func(t *testing.T) {
+		big := bytes.Repeat([]byte("a"), maxRemoteControlTokenBytes+1)
+		if _, tok, err := newRWithToken(big).resolveRemoteControlTLS(ctx, ns, rc); err == nil || tok != "" {
+			t.Fatalf("a token over %d bytes must be rejected, got tok=%q err=%v", maxRemoteControlTokenBytes, tok, err)
+		}
+	})
+
+	t.Run("valid token with base64/JWT special chars, exactly at the cap, passes", func(t *testing.T) {
+		// '.', '-', '_', '+', '/', '=' are valid header bytes, and the cap is exclusive (> cap rejects,
+		// == cap passes), so a token of exactly maxRemoteControlTokenBytes valid bytes stays.
+		valid := []byte("ab.cd-ef_gh+ij/kl=")
+		valid = append(valid, bytes.Repeat([]byte("x"), maxRemoteControlTokenBytes-len(valid))...)
+		_, tok, err := newRWithToken(valid).resolveRemoteControlTLS(ctx, ns, rc)
+		if err != nil || len(tok) != maxRemoteControlTokenBytes {
+			t.Fatalf("a valid token at the cap must pass, got len=%d err=%v", len(tok), err)
 		}
 	})
 }
