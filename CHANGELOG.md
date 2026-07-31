@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **The kustomize base now ships an opt-in default-deny egress NetworkPolicy for the operator (#299).**
+  The Helm chart already restricts operator egress via `networkPolicy.enable`, but the kustomize base
+  (`config/network-policy/`) only had the metrics *ingress* rule, so a non-Helm deployment had no
+  egress control. `config/network-policy/allow-egress-traffic.yaml` adds the network-layer half of the
+  `remoteControl.endpoint` SSRF defense: default-deny egress with explicit allows for DNS, HTTPS 443
+  (API server / CelesTrak / Space-Track), and the per-CR Prometheus (9090) and gNB (8001) ports. It is
+  part of the already opt-in `config/network-policy` bundle (disabled by default; needs a
+  NetworkPolicy-enforcing CNI), so existing deployments are unchanged. The file documents that the
+  port-only gNB rule must be replaced with a CIDR-scoped `to:` block to actually bound where the
+  operator may dial — the app-layer `--remote-control-allowed-endpoint-hosts` allow-list is the
+  complementary control.
+
 - **Closed a residual Secret existence/type oracle in the `remoteControl.tls` credential path.** #219
   unified the CR-facing *message* for a `remoteControl.tls` resolution failure but not the *reason*: a
   missing/unreadable Secret classified as `ProviderPushFailed` (1 min requeue) while a present-but-bad

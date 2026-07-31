@@ -1,0 +1,61 @@
+# Default-deny EGRESS for the operator, with explicit allows. This is the network-layer
+# half of the remoteControl.endpoint SSRF defense (issue #299); the app layer is the
+# --remote-control-allowed-endpoint-hosts / --prometheus-allowed-endpoint-hosts flags.
+# The Helm chart ships the same policy behind `networkPolicy.enable` (dist/chart) with
+# per-CR port values; this is the parity resource for the kustomize base.
+#
+# OPT-IN: the whole config/network-policy bundle is disabled by default (uncomment
+# `- ../network-policy` in config/default/kustomization.yaml to enable). It needs a CNI
+# that ENFORCES NetworkPolicy (Calico/Cilium) — Kind's default kindnet does NOT enforce it,
+# so this is inert on the e2e cluster.
+#
+# ⚠ SSRF NOTE: the gNB/Prometheus rules below allow those PORTS to ANY destination, which
+# does NOT stop the operator from dialing an arbitrary host on that port. To actually close
+# the probing surface, DELETE the port-only gNB rule and instead scope the port to your
+# sanctioned gNB subnet with a `to: [ipBlock: {cidr: ...}]` block (see the commented example).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  labels:
+    app.kubernetes.io/name: ntn-operators
+    app.kubernetes.io/managed-by: kustomize
+  name: allow-egress-traffic
+  namespace: system
+spec:
+  podSelector:
+    matchLabels:
+      control-plane: controller-manager
+      app.kubernetes.io/name: ntn-operators
+  policyTypes:
+    - Egress
+  egress:
+    # HTTPS 443: Kubernetes API server + CelesTrak + Space-Track (GP-data fetch).
+    - ports:
+        - port: 443
+          protocol: TCP
+    # DNS resolution.
+    - ports:
+        - port: 53
+          protocol: TCP
+        - port: 53
+          protocol: UDP
+    # In-cluster Prometheus queried by NTNSlice.spec.metricsSource.prometheus (default 9090).
+    # Remove if no NTNSlice uses a prometheus metricsSource.
+    - ports:
+        - port: 9090
+          protocol: TCP
+    # gNB remote_control WebSocket targeted by NTNCellConfig.spec.provider.remoteControl.endpoint
+    # (default 8001). Remove if no NTNCellConfig configures a runtime push. See the SSRF note
+    # above: to bound WHERE the push may connect, replace this port-only rule with a scoped one:
+    #   - to:
+    #       - ipBlock:
+    #           cidr: 10.20.0.0/16    # your sanctioned gNB subnet
+    #     ports:
+    #       - port: 8001
+    #         protocol: TCP
+    - ports:
+        - port: 8001
+          protocol: TCP
+    # NOTE: the ground-station monitoring probe (GroundStationLifecycle.spec.monitoring.endpoint)
+    # is another CR-controlled egress. If you use it on a non-443 port, add that port here (and
+    # prefer a CIDR-scoped block, same as the gNB rule).
