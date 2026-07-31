@@ -94,6 +94,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Pass-prediction failures now carry a specific `PassesPredicted=False` reason instead of a blanket
+  `PredictionFailed`.** The failure event gate keys on `(Status, Reason, ObservedGeneration)` and
+  deliberately ignores the message, so two different root causes at the same generation (e.g. a
+  referenced ground station that is absent, then later created with an invalid latitude) produced no
+  fresh Event — the `.message` updated, but event history and event-driven alerting could not tell the
+  causes apart. Distinct causes are now tagged with stable, low-cardinality reasons —
+  `GroundStationNotFound`, `InvalidGroundStationLocation`, `InvalidPredictionConfig`,
+  `PredictionComputationFailed` — while a transient/unclassified read still falls back to
+  `PredictionFailed`. The message is still ignored by the gate (no Event flood on message-only
+  changes), and the `PassesPredicted` *status* is unchanged, so the NTNSlice consumer's 3-state gate
+  (which keys on `True`, not the reason) is unaffected. Operators that alerted specifically on
+  `reason == PredictionFailed` for these cases should widen to the `PassesPredicted=False` status.
+
 - **Pass prediction now runs on its own lower cadence, off the propagation heartbeat (#234, ADR 0006).**
   The SatelliteEphemeris reconcile propagates and publishes the runtime-push epoch **first**, then runs
   the expensive pass-window sweep only once per 15 minutes (was on every ~3-minute heartbeat) in a
