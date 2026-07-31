@@ -129,7 +129,7 @@ setup-test-e2e: ## Set up a Kind cluster for e2e tests if it does not exist
 test-e2e: manifests generate fmt vet ## Run the e2e tests. Defaults to a Kind environment; set E2E_USE_EXISTING_CLUSTER=true (and MANAGER_IMAGE) to target an existing cluster instead.
 	@if [ -z "$$E2E_USE_EXISTING_CLUSTER" ]; then $(MAKE) setup-test-e2e; \
 	else echo "E2E_USE_EXISTING_CLUSTER set — skipping Kind setup"; fi
-	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go test -tags=e2e ./test/e2e/ -v -ginkgo.v
+	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go test -tags=e2e -count=1 -timeout 15m ./test/e2e/ -v -ginkgo.v -ginkgo.fail-on-pending -ginkgo.fail-on-empty -ginkgo.json-report=/tmp/e2e-report.json
 	@if [ -z "$$E2E_USE_EXISTING_CLUSTER" ]; then $(MAKE) cleanup-test-e2e; \
 	else echo "E2E_USE_EXISTING_CLUSTER set — skipping Kind teardown"; fi
 

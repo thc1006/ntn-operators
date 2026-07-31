@@ -3,47 +3,36 @@ name: E2E Tests
 on:
   push:
     branches: [main]
-    paths:
+    # The E2E suite applies config/samples/*.yaml and builds the production Dockerfile in BeforeSuite,
+    # so those MUST trigger it. config/network-policy and config/prometheus were removed: they are
+    # commented out in config/default/kustomization.yaml, so `make deploy` never applies them — keeping
+    # them here was fake coverage (a change ran E2E but was not actually deployed/tested).
+    paths: &e2e_paths
       - 'internal/**'
       - 'pkg/**'
       - 'api/**'
       - 'cmd/**'
-      # config/** narrowed to subdirectories that actually affect
-      # controller behaviour. Skips config/samples/ (sample CRs) and
-      # config/grafana/ (dashboard JSON) which have zero impact on the
-      # reconciler — they used to trigger e2e on doc-only PRs and
-      # collide with CelesTrak network flake. If config/webhook/ or
-      # other controller-affecting subdirs land later, add them here.
       - 'config/crd/**'
       - 'config/default/**'
       - 'config/manager/**'
-      - 'config/network-policy/**'
-      - 'config/prometheus/**'
       - 'config/rbac/**'
+      - 'config/samples/**'
       - 'test/**'
       - 'hack/**'
+      - 'Dockerfile'
+      - '.dockerignore'
       - 'go.mod'
       - 'go.sum'
       - 'Makefile'
+      # Kept broad on purpose: narrowing to test-e2e.yml would leave this check Pending (never triggered)
+      # on PRs that touch other workflow files, which blocks merge if it is a required status check.
       - '.github/workflows/**'
   pull_request:
-    paths:
-      - 'internal/**'
-      - 'pkg/**'
-      - 'api/**'
-      - 'cmd/**'
-      - 'config/crd/**'
-      - 'config/default/**'
-      - 'config/manager/**'
-      - 'config/network-policy/**'
-      - 'config/prometheus/**'
-      - 'config/rbac/**'
-      - 'test/**'
-      - 'hack/**'
-      - 'go.mod'
-      - 'go.sum'
-      - 'Makefile'
-      - '.github/workflows/**'
+    paths: *e2e_paths
+
+# Least-privilege GITHUB_TOKEN: this job only reads the repo.
+permissions:
+  contents: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -53,15 +42,41 @@ jobs:
   test-e2e:
     name: E2E on Kind
     runs-on: ubuntu-24.04
+    # Cap a hung Docker build / Kind / Ginkgo so the job fails fast rather than at GitHub's 6h ceiling.
+    timeout-minutes: 25
+    env:
+      KIND_CLUSTER: ntn-operators-test-e2e
+      # Guarantee BuildKit so the Dockerfile's `# syntax` directive + `--mount=type=cache` are honored
+      # (default on modern Docker, but make it explicit — without it the build fails on the cache mounts).
+      DOCKER_BUILDKIT: "1"
+      # cert-manager is NOT needed: webhooks and the cert-manager metrics-cert are commented out in
+      # config/default, and the metrics endpoint self-signs via controller-runtime. Skip the ~27s install.
+      CERT_MANAGER_INSTALL_SKIP: "true"
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # This job runs PR-modifiable Makefile/scripts/Go tests; do not leave the checkout token on disk.
+          persist-credentials: false
 
       - name: Setup Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
           cache: true
+
+      # `make test-e2e` runs `manifests generate fmt` first, so without this it would silently regenerate
+      # and reformat, then test the FIXED tree — a developer who forgot to commit DeepCopy/CRD/RBAC or ran
+      # unformatted code would still go green. Verify the committed tree here FIRST; the subsequent
+      # regenerate/format in `make test-e2e` is then a no-op and the suite tests exactly what is committed.
+      - name: Verify generated artifacts + formatting are committed
+        run: |
+          set -euo pipefail
+          make manifests generate
+          git diff --exit-code -- api config/crd config/rbac dist/chart/templates/crd \
+            || { echo "FAIL: generated artifacts are stale — run 'make manifests generate' and commit"; exit 1; }
+          unformatted=$(gofmt -l $(git ls-files '*.go'))
+          [ -z "$unformatted" ] || { printf 'FAIL: unformatted Go files:\n%s\n' "$unformatted"; exit 1; }
 
       - name: Install Kind
         uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14.0
@@ -70,3 +85,50 @@ jobs:
 
       - name: Run E2E tests
         run: make test-e2e
+
+      # Belt-and-suspenders vs a false green: `make test-e2e`'s -ginkgo.fail-on-pending / fail-on-empty
+      # catch pending or zero-spec runs, but a runtime Skip() would still pass go test. Assert the JSON
+      # report shows at least the current baseline of It specs and that EVERY one passed.
+      - name: Verify E2E specs actually ran and passed (no silent skips)
+        run: |
+          set -euo pipefail
+          report=/tmp/e2e-report.json
+          [ -f "$report" ] || { echo "FAIL: no Ginkgo JSON report at $report — the suite did not run"; exit 1; }
+          jq -e '
+            [ .[].SpecReports[]? | select(.LeafNodeType == "It") ] as $specs
+            | ($specs | length) >= 6 and ([ $specs[] | select(.State != "passed") ] | length) == 0
+          ' "$report" >/dev/null \
+            || { echo "FAIL: expected >= 6 It specs all passed (0 skipped/pending/failed):"; \
+                 jq '[ .[].SpecReports[]? | select(.LeafNodeType=="It") | .State ] | group_by(.) | map({(.[0]): length})' "$report"; \
+                 exit 1; }
+          echo "E2E spec guard OK: $(jq '[ .[].SpecReports[]? | select(.LeafNodeType=="It") ] | length' "$report") It specs, all passed"
+
+      # On failure, dump cluster state (the Ginkgo AfterEach diagnostics do not run for BeforeSuite/BeforeAll
+      # failures, pending/skipped specs, or after teardown) so a failure is diagnosable without a re-run.
+      - name: Collect failure diagnostics
+        if: ${{ failure() }}
+        run: |
+          set +e
+          mkdir -p /tmp/e2e-diagnostics
+          kubectl get all,cm,secret,lease,pdb,networkpolicy -A -o wide > /tmp/e2e-diagnostics/resources.txt 2>&1
+          kubectl get events -A --sort-by=.lastTimestamp > /tmp/e2e-diagnostics/events.txt 2>&1
+          kubectl describe pods -A > /tmp/e2e-diagnostics/pods.txt 2>&1
+          kubectl logs -n ntn-operators-system -l control-plane=controller-manager \
+            --all-containers --prefix --tail=-1 > /tmp/e2e-diagnostics/manager.log 2>&1
+          kind export logs /tmp/e2e-diagnostics/kind --name "$KIND_CLUSTER" 2>&1
+          echo "===== manager.log (tail) ====="; tail -60 /tmp/e2e-diagnostics/manager.log
+
+      - name: Upload failure diagnostics
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: e2e-failure-diagnostics
+          path: /tmp/e2e-diagnostics
+          if-no-files-found: ignore
+          retention-days: 7
+
+      # `make test-e2e` tears the cluster down only on success (cleanup is a separate recipe line after the
+      # test); on a test failure or a cancel-in-progress it is skipped and the cluster leaks. Guarantee it.
+      - name: Ensure Kind cleanup
+        if: ${{ always() }}
+        run: kind delete cluster --name "$KIND_CLUSTER" 2>/dev/null || true
