@@ -1173,12 +1173,28 @@ func (e *haEnv) waitEpochAdvances(t *testing.T, beyond int64, timeout time.Durat
 }
 
 // cacheConfigMapDigest returns the durable cache ConfigMap's payload digest, ok=false if absent.
+//
+// Found by the marker label and owner, NEVER by name. The name is an implementation detail that
+// has already changed once — ADR-0007 replaced <cr>-omm-cache with a hash-suffixed form — and this
+// test hardcoding it meant the rename compiled, passed `make test`, passed vet, and only failed
+// here, because this file is behind the e2e_ha build tag. Label lookup is also what the runbook
+// tells an operator to do, so the test now exercises the documented path.
 func (e *haEnv) cacheConfigMapDigest() (string, bool) {
-	cm, err := e.cs.CoreV1().ConfigMaps(outageNS).Get(e.ctx, satephName+"-omm-cache", metav1.GetOptions{})
+	list, err := e.cs.CoreV1().ConfigMaps(outageNS).List(e.ctx, metav1.ListOptions{
+		LabelSelector: "ntn.operators.dev/omm-cache=true",
+	})
 	if err != nil {
 		return "", false
 	}
-	return cm.Annotations["ntn.operators.dev/omm-digest"], true
+	for _, cm := range list.Items {
+		// One namespace can hold caches for several CRs; take the one owned by ours.
+		for _, ref := range cm.OwnerReferences {
+			if ref.Kind == "SatelliteEphemeris" && ref.Name == satephName {
+				return cm.Annotations["ntn.operators.dev/omm-digest"], true
+			}
+		}
+	}
+	return "", false
 }
 
 // TestHAOutageContinuityAcrossFailover is the MANDATED acceptance test for the durable OMM cache:
@@ -1207,7 +1223,7 @@ func TestHAOutageContinuityAcrossFailover(t *testing.T) {
 		_ = e.cs.AppsV1().Deployments(outageNS).Delete(bg, mockName, metav1.DeleteOptions{})
 		_ = e.cs.CoreV1().Services(outageNS).Delete(bg, mockName, metav1.DeleteOptions{})
 		_ = e.cs.CoreV1().ConfigMaps(outageNS).Delete(bg, mockFixtureCM, metav1.DeleteOptions{})
-		// The <name>-omm-cache ConfigMap is owner-ref'd to the CR, so GC removes it with the CR.
+		// The cache ConfigMap is owner-ref'd to the CR, so GC removes it with the CR.
 	})
 
 	// WARM: leader fetches, persists the durable cache, propagates.
@@ -1215,7 +1231,8 @@ func TestHAOutageContinuityAcrossFailover(t *testing.T) {
 		"SatelliteEphemeris to warm — a stall here usually means the chart lacks "+
 			"--ephemeris-allowed-private-hosts=celestrak-mock.default.svc.cluster.local")
 	if _, ok := e.cacheConfigMapDigest(); !ok {
-		t.Fatalf("durable cache ConfigMap %s-omm-cache absent after warm — persist not wired or RBAC-denied", satephName)
+		t.Fatalf("no durable cache ConfigMap labelled ntn.operators.dev/omm-cache=true and owned by "+
+			"SatelliteEphemeris/%s after warm — persist not wired, RBAC-denied, or the owner ref is missing", satephName)
 	}
 	t.Logf("warm: epoch=%d, durable cache present", warm)
 
