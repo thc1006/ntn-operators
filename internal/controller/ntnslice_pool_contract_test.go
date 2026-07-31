@@ -58,7 +58,8 @@ func TestCheckSatelliteAvailability_PoolMemberOverheadKeepsPathAvailable(t *test
 	cli := fake.NewClientBuilder().WithScheme(sch).WithObjects(eph, slice).Build()
 	r := &NTNSliceReconciler{Client: cli, Scheme: sch}
 
-	available, known, _ := r.checkSatelliteAvailability(context.Background(), slice, now)
+	ev := r.checkSatelliteAvailability(context.Background(), slice, now)
+	available, known := ev.available, ev.known
 	if !available || !known {
 		t.Fatalf("pool contract (ADR-0008): an overhead, deliverable member must make the path available; got (available=%v, known=%v)", available, known)
 	}

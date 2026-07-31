@@ -86,6 +86,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   correctly. Sustained `refused_identity` under the legacy cache name is how the truncation
   collision above surfaces on a cluster that has not yet repersisted; the runbook carries the query.
 
+- **`NTNSlice.status.contactCandidate` records the constellation member behind the current
+  `FailoverReady` evaluation** — NORAD ID, display name, ground station, AOS/LOS, source and
+  propagated epochs, `validUntil`, and the selection rule (ADR-0008). `FailoverReady=True` alone
+  says a contact opportunity exists but not which member it rests on, so an operator could not tell
+  a healthy handover between members from the same member re-evaluated, nor audit the decision
+  afterwards. Selection is deterministic — earliest LOS, ties broken on NORAD then ground station —
+  because a field that flips between two equally valid members on every reconcile is status churn
+  pretending to be information. `validUntil` is the **earlier** of LOS and the element set aging
+  past the delivery freshness bound: reporting LOS alone would promise a window the runtime push
+  would refuse to use before it closes. It is written and cleared with the condition it explains, so
+  it can never outlive it. This remains a **contact opportunity, not delivered service**: nothing
+  here asserts the slice's serving cell is configured for this member, and per ADR-0008 no
+  `SliceServiceAvailable` condition is introduced until an explicit cell binding exists.
 - **End-to-end coverage for the credentialed runtime push (`wss://` + bearer + mTLS), closing #329.**
   Everything under #206, #295, #297, #313, #318 and #322 was unit-tested against `httptest`, which
   cannot show that the *deployment shape* works — and `test/e2e/` contained zero tests touching
@@ -252,6 +265,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   an overly broad domain cookie. Mutation-tested.
 
 ### Changed
+
+- **`NTNSlice`'s `FailoverReady` reasons now name the cause, replacing the single overstated
+  `SatelliteUnavailable`.** ⚠ **These strings are API-visible — dashboards and alerts that key on
+  them need updating.** The condition **type is unchanged** (`FailoverReady`): renaming a condition
+  type is a monitoring-compatibility break for no semantic gain (ADR-0008). What changed is which
+  reason each cause reports:
+
+  | Cause | Was | Now |
+  |---|---|---|
+  | dangling `spec.satellitePath.ephemerisRef` | `False/SatelliteUnavailable` | `False/EphemerisRefNotFound` |
+  | no member overhead | `False/SatelliteUnavailable` | `False/NoActiveContact` |
+  | member overhead but its element set is past the delivery freshness bound | `False/SatelliteUnavailable` | `False/AllCandidatesStale` |
+  | producer's pass prediction is not current (`PassesPredicted` ≠ True) | `Unknown/SatelliteReadFailed` | `Unknown/PredictionUnavailable` |
+  | transient `SatelliteEphemeris` read error | `Unknown/SatelliteReadFailed` | unchanged |
+
+  These need different operator responses and only one of them — staleness — self-heals on the next
+  successful fetch, so collapsing them cost an operator the diagnosis during the exact outage the
+  condition exists to report. `True/ConstellationMemberAvailable` was already in place.
 
 - **`FailoverReady=True` now reports Reason `ConstellationMemberAvailable`, not the overstated
   `SatelliteAvailable`.** The condition *type* is unchanged (`FailoverReady`), so anything keyed on the
