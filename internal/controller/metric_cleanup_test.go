@@ -48,14 +48,8 @@ func TestSatelliteEphemerisReconcile_DeletedReleasesMetricSeries(t *testing.T) {
 		t.Fatalf("AddToScheme: %v", err)
 	}
 
-	// Seed per-CR series, as a live reconcile would (keyed by namespace+ephemeris).
-	del := prometheus.Labels{"namespace": "ns", "ephemeris": "deleted-eph"}
-	persistLbl := prometheus.Labels{"namespace": "ns", "ephemeris": "deleted-eph", "result": "success"}
-	restoreLbl := prometheus.Labels{"namespace": "ns", "ephemeris": "deleted-eph", "result": "hydrated"}
-	ntnmetrics.GPSatelliteCount.With(del).Set(7)
-	ntnmetrics.OMMCachePersistTotal.With(persistLbl).Inc()
-	ntnmetrics.OMMCacheRestoreTotal.With(restoreLbl).Inc()
-	ntnmetrics.OMMCacheRestoredAgeSeconds.With(del).Set(120)
+	// Seed a per-CR series, as a live reconcile would (keyed by namespace+name).
+	ntnmetrics.GPSatelliteCount.With(prometheus.Labels{"namespace": "ns", "ephemeris": "deleted-eph"}).Set(7)
 	before := testutil.CollectAndCount(ntnmetrics.GPSatelliteCount)
 
 	// Empty client → Get returns NotFound (the CR is "deleted").
@@ -75,16 +69,6 @@ func TestSatelliteEphemerisReconcile_DeletedReleasesMetricSeries(t *testing.T) {
 	if after != before-1 {
 		t.Errorf("deleted CR's metric series was not released: series count before=%d after=%d (want after=before-1)",
 			before, after)
-	}
-	// The OMM-cache series must be released too, or they leak for every deleted CR.
-	if got := testutil.ToFloat64(ntnmetrics.OMMCachePersistTotal.With(persistLbl)); got != 0 {
-		t.Errorf("OMMCachePersistTotal not released on delete: got %v", got)
-	}
-	if got := testutil.ToFloat64(ntnmetrics.OMMCacheRestoreTotal.With(restoreLbl)); got != 0 {
-		t.Errorf("OMMCacheRestoreTotal not released on delete: got %v", got)
-	}
-	if got := testutil.ToFloat64(ntnmetrics.OMMCacheRestoredAgeSeconds.With(del)); got != 0 {
-		t.Errorf("OMMCacheRestoredAgeSeconds not released on delete: got %v", got)
 	}
 }
 
@@ -508,5 +492,52 @@ func TestEphemerisEpochStaleCount_WriteDeleteRoundTrip(t *testing.T) {
 	}
 	if afterDelete := testutil.CollectAndCount(ntnmetrics.EphemerisEpochStaleCount); afterDelete != base {
 		t.Errorf("stale series leaked (write/delete key drift): base=%d afterDelete=%d", base, afterDelete)
+	}
+}
+
+// TestSatelliteEphemerisReconcile_DeletedReleasesOMMCacheSeries extends the same rule to the
+// durable-cache metrics. They are per-CR (namespace+ephemeris), so without this they accumulate
+// dead series across create/delete churn — and the restored-age gauge would keep reporting an age
+// for a CR that no longer exists, which reads as a stale cache rather than as no cache.
+func TestSatelliteEphemerisReconcile_DeletedReleasesOMMCacheSeries(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := ntnv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme: %v", err)
+	}
+	gone := prometheus.Labels{"namespace": "ns", "ephemeris": "gone-eph"}
+	stays := prometheus.Labels{"namespace": "other", "ephemeris": "gone-eph"}
+	ntnmetrics.OMMCachePersistTotal.With(prometheus.Labels{"namespace": "ns", "ephemeris": "gone-eph", "result": "success"}).Inc()
+	ntnmetrics.OMMCacheRestoreTotal.With(prometheus.Labels{"namespace": "ns", "ephemeris": "gone-eph", "result": "hydrated"}).Inc()
+	ntnmetrics.OMMCacheRestoredAgeSeconds.With(gone).Set(3600)
+	ntnmetrics.OMMCacheRestoredAgeSeconds.With(stays).Set(1800) // same name, different namespace
+
+	c := fake.NewClientBuilder().WithScheme(scheme).Build()
+	r := &SatelliteEphemerisReconciler{Client: c, Scheme: scheme, Recorder: events.NewFakeRecorder(10)}
+	if _, err := r.Reconcile(context.Background(), reconcile.Request{
+		NamespacedName: types.NamespacedName{Name: "gone-eph", Namespace: "ns"},
+	}); err != nil {
+		t.Fatalf("reconcile of deleted CR should not error: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name string
+		got  func() (float64, bool)
+	}{
+		{"persist", func() (float64, bool) {
+			return counterValue(t, ntnmetrics.OMMCachePersistTotal,
+				prometheus.Labels{"namespace": "ns", "ephemeris": "gone-eph", "result": "success"})
+		}},
+		{"restore", func() (float64, bool) {
+			return counterValue(t, ntnmetrics.OMMCacheRestoreTotal,
+				prometheus.Labels{"namespace": "ns", "ephemeris": "gone-eph", "result": "hydrated"})
+		}},
+		{"restored-age", func() (float64, bool) { return gaugeValue(t, ntnmetrics.OMMCacheRestoredAgeSeconds, gone) }},
+	} {
+		if _, found := tc.got(); found {
+			t.Errorf("%s series survived the CR's deletion", tc.name)
+		}
+	}
+	if _, found := gaugeValue(t, ntnmetrics.OMMCacheRestoredAgeSeconds, stays); !found {
+		t.Error("deleting one CR wiped a same-named CR's series in another namespace (#180 regression)")
 	}
 }

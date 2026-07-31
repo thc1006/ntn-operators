@@ -539,3 +539,62 @@ func TestOMMCache_LegacyNameStillIdentityGated(t *testing.T) {
 		t.Errorf("refused_identity counter %v -> %v (found=%v)", before, after, ok)
 	}
 }
+
+// TestOMMCache_MigrationLeavesLegacyObject locks the claim made in the changelog and the runbook:
+// the controller never deletes the legacy object. It holds no `delete` verb on configmaps, so
+// code that tried would fail at runtime in a path whose errors are deliberately swallowed —
+// silently, on the exact upgrade this migration exists to make safe. The owner reference is what
+// removes it, together with the CR.
+func TestOMMCache_MigrationLeavesLegacyObject(t *testing.T) {
+	sch := ommCacheScheme(t)
+	eph := newOMMCacheEph("eph-keep", "uid-keep")
+	cli := fake.NewClientBuilder().WithScheme(sch).WithObjects(eph).Build()
+	r := &SatelliteEphemerisReconciler{Client: cli, Scheme: sch, Recorder: events.NewFakeRecorder(50)}
+	ctx := context.Background()
+	fetchKey := fetchInputKey(eph.Spec)
+	seedLegacyCache(t, ctx, cli, eph, fetchKey, eph.UID)
+
+	if !r.restoreOMMCache(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: eph.Namespace, Name: eph.Name}}, eph, fetchKey) {
+		t.Fatal("legacy cache was not restored")
+	}
+	if err := cli.Get(ctx, types.NamespacedName{Namespace: eph.Namespace,
+		Name: legacyOMMCacheConfigMapName(eph.Name)}, &corev1.ConfigMap{}); err != nil {
+		t.Fatalf("the legacy object was removed; the controller has no delete verb for that: %v", err)
+	}
+}
+
+// TestOMMCache_HashedNameWinsOverLegacy proves precedence. Both objects can exist for one
+// reconcile after an upgrade, and they can disagree: the hashed one is what persist keeps current,
+// so reading the legacy one instead would serve a stale element set and keep serving it.
+func TestOMMCache_HashedNameWinsOverLegacy(t *testing.T) {
+	sch := ommCacheScheme(t)
+	eph := newOMMCacheEph("eph-prec", "uid-prec")
+	cli := fake.NewClientBuilder().WithScheme(sch).WithObjects(eph).Build()
+	r := &SatelliteEphemerisReconciler{Client: cli, Scheme: sch, Recorder: events.NewFakeRecorder(50)}
+	ctx := context.Background()
+	key := types.NamespacedName{Namespace: eph.Namespace, Name: eph.Name}
+	fetchKey := fetchInputKey(eph.Spec)
+
+	// Legacy holds an old fetch; the hashed name holds a newer one.
+	seedLegacyCache(t, ctx, cli, eph, fetchKey, eph.UID) // fetchedAt = now-90m
+	fresh := time.Now().Add(-5 * time.Minute).UTC().Truncate(time.Millisecond)
+	r.persistOMMCache(ctx, eph, ommResultAt(fresh), fetchKey)
+
+	before, _ := counterValue(t, metrics.OMMCacheRestoreTotal,
+		prometheus.Labels{"namespace": eph.Namespace, "ephemeris": eph.Name, "result": "migrated"})
+	if !r.restoreOMMCache(ctx, ctrl.Request{NamespacedName: key}, eph, fetchKey) {
+		t.Fatal("restore returned false with a valid hashed-name cache present")
+	}
+	got, ok := r.cachedOMMResult(key)
+	if !ok {
+		t.Fatal("cache still cold")
+	}
+	if !got.result.FetchedAt.Equal(fresh) {
+		t.Errorf("restored FetchedAt = %s, want the hashed-name object's %s — the legacy object won",
+			got.result.FetchedAt, fresh)
+	}
+	if after, _ := counterValue(t, metrics.OMMCacheRestoreTotal,
+		prometheus.Labels{"namespace": eph.Namespace, "ephemeris": eph.Name, "result": "migrated"}); after != before {
+		t.Errorf("counted a migration (%v -> %v) when the hashed name already had the data", before, after)
+	}
+}

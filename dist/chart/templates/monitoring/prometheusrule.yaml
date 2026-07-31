@@ -143,16 +143,26 @@ spec:
         # ADR-0007: persisting the last-good OMM set is deliberately best-effort — a failure must
         # not fail live reconciliation. That is precisely why it needs an alert: without one the
         # cache can be failing to write for weeks and the first symptom is a restart with nothing
-        # to propagate, during the upstream outage the cache exists for. One blip is expected
-        # (conflict, transient apiserver error); sustained failure means restart continuity is gone.
+        # to propagate, during the upstream outage the cache exists for.
+        #
+        # The window is 24h because persist runs once per successful FETCH, and refreshInterval
+        # defaults to 4h with a 2h floor. Any window measured in minutes usually contains no
+        # persist attempt at all, so it would report "no failures" from having observed nothing.
+        # `unless` is what makes this a statement about the cache rather than about one write: it
+        # fires only when the failures came with NO successful persist in the same window, so a
+        # transient conflict that the next fetch fixes stays silent, and a cache that is genuinely
+        # not being written does not. A refreshInterval longer than 24h makes this silent rather
+        # than wrong — nothing was attempted, so nothing is claimed.
         - alert: NTNOMMCachePersistFailing
-          expr: increase(ntn_operators_omm_cache_persist_total{result!="success"}[30m]) > 0
-          for: 30m
+          expr: |-
+            sum by (namespace, ephemeris, result) (increase(ntn_operators_omm_cache_persist_total{result!="success"}[24h])) > 0
+            unless on (namespace, ephemeris)
+            sum by (namespace, ephemeris) (increase(ntn_operators_omm_cache_persist_total{result="success"}[24h])) > 0
           labels:
             severity: warning
           annotations:
             summary: "Durable OMM cache is not being written for {{`{{ $labels.namespace }}`}}/{{`{{ $labels.ephemeris }}`}}"
-            description: "Durable OMM cache writes have been failing for 30m (result={{`{{ $labels.result }}`}}). Live propagation is unaffected, but a restart or leader failover will have no last-good element set to fall back on. skipped_oversize means the tracked set exceeds the ConfigMap bound; failed means the write itself is erroring."
+            description: "No successful durable OMM cache write in 24h, and at least one failure ({{`{{ $labels.result }}`}}). Live propagation is unaffected, but a restart or leader failover has no last-good element set to fall back on. failed: the write itself is erroring (RBAC, quota, apiserver). skipped_oversize: the tracked set exceeds the ConfigMap bound — narrow spec.satellites.noradIDs. skipped_marshal: treat as a bug."
         # A restore that is refused is worse than one that never happens: the object is there and
         # does not check out. Scoped to the CORRUPTION reasons on purpose — restore runs on every
         # reconcile while the in-memory cache is cold, so a legitimate delete/recreate whose old

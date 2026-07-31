@@ -443,8 +443,23 @@ if the rate persists across a restart.
 
 ## NTNOMMCachePersistFailing
 
-**Fires when** `increase(ntn_operators_omm_cache_persist_total{result!="success"}[30m]) > 0`
-for 30m. Labels: `namespace`, `ephemeris`, `result`.
+**Fires when** there has been **no successful** durable-cache write in 24h *and* at
+least one failure in the same window. Labels: `namespace`, `ephemeris`, `result`.
+
+```promql
+sum by (namespace, ephemeris, result) (increase(ntn_operators_omm_cache_persist_total{result!="success"}[24h])) > 0
+unless on (namespace, ephemeris)
+sum by (namespace, ephemeris) (increase(ntn_operators_omm_cache_persist_total{result="success"}[24h])) > 0
+```
+
+**Why 24h, and why `unless`.** Persist runs once per successful *fetch*, and
+`refreshInterval` defaults to **4h** with a **2h** floor — so any window measured in
+minutes usually contains no persist attempt at all and would report "no failures" from
+having observed nothing. The `unless` clause is what makes this a statement about the
+*cache* rather than about one write: a transient conflict the next fetch fixes stays
+silent; a cache that is genuinely not being written does not. A `refreshInterval` above
+24h makes this alert silent rather than wrong — nothing was attempted, so nothing is
+claimed.
 
 **Impact.** None right now — and that is the point. Persisting the last-good OMM set
 is best-effort by design (ADR-0007): a write failure must never fail live

@@ -72,7 +72,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   first symptom is a restart with nothing to propagate, during the upstream outage the cache exists
   for. New metrics `ntn_operators_omm_cache_persist_total{result}`,
   `ntn_operators_omm_cache_restore_total{result}` and `ntn_operators_omm_cache_restored_age_seconds`,
-  plus alerts `NTNOMMCachePersistFailing` and `NTNOMMCacheRestoreRefused` with runbook entries. A
+  plus alerts `NTNOMMCachePersistFailing` and `NTNOMMCacheRestoreRefused` with runbook entries. The
+  persist alert is windowed at 24h and gated with `unless` on a successful write in the same window,
+  because persist runs once per successful *fetch* and `refreshInterval` defaults to 4h with a 2h
+  floor — a shorter window would usually contain no attempt at all and report "no failures" from
+  having observed nothing. Per-CR series are released on CR deletion, matching the existing
+  `DeletePartialMatch` cleanup for the other ephemeris metrics. A
   plain restore *miss* is deliberately not counted — every first-ever reconcile misses, so it would
   drown the refusals, which are the signal. `refused_identity` is counted but deliberately **not**
   alerted: restore runs on every reconcile while the in-memory cache is cold, so a legitimate
