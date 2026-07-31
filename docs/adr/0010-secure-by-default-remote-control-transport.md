@@ -1,0 +1,82 @@
+# ADR 0010 — Secure-by-default remote-control transport (v1alpha2)
+
+- Status: **Proposed** (design; implementation deferred to the phased plan below — no code lands with this ADR)
+- Date: 2026-07-31
+- Deciders: @thc1006
+- Relates to: #214 / #315 (v1alpha2 conversion + storage migration — already planned to retire the deprecated `spec.satellites.constellation` no-op field, so the version bump + conversion webhook are coming regardless; this ADR rides on that work), #299 (SSRF egress control / `ServiceReference` residual), #251 + ADR-0009 (endpoint allow-list + confused-deputy boundary), #309 (credential `ValidatingAdmissionPolicy`), #317 (egress NetworkPolicy).
+
+## Context
+
+`NTNCellConfig.spec.provider.remoteControl` today (v1alpha1) carries an **optional** `tls` block. When it is absent, the operator dials **plaintext `ws://`**. That is the core problem: **omission decides transport**, so forgetting `tls` silently downgrades to plaintext — the opposite of secure-by-default.
+
+The controls added around it are all opt-in / off by default, so none of them *forces* a secure transport:
+
+- The endpoint allow-list (#251; ADR-0009 Amendment 2 extended it to gate plaintext too) defaults to **permit-all** (empty).
+- The credential `ValidatingAdmissionPolicy` (#309) is an opt-in chart artifact (`credentialRefPolicy.enable`, default `false`).
+- The egress NetworkPolicy (#317) is opt-in.
+
+Two facts make v1alpha1 unfixable in place:
+
+1. **`tls == nil` is a load-bearing value** — it means "plaintext, deliberately." A CRD default or an in-place rejection cannot distinguish "I want plaintext" from "I forgot TLS" without breaking existing objects.
+2. **The credential VAP is pinned to v1alpha1.** `dist/chart/templates/admission/credential-ref-policy.yaml` sets `matchConstraints.resourceRules[].apiVersions: ["v1alpha1"]`. A new API version would **bypass the Secret-authorization check entirely** unless it ships its own policy — verified 2026-07-31.
+
+A v1alpha2 + conversion webhook is **already on the roadmap** (#214 / #315) to retire `spec.satellites.constellation`. The secure-transport redesign should therefore be designed *now* and land *with* that version bump, rather than motivating a separate one.
+
+## Decision
+
+Introduce **`v1alpha2`** with a **required** transport mode, eliminating implicit plaintext. The work is split into **MUST** (decided here) and **DEFER** (recorded here, deliberately *not* built now for proportionality — see Alternatives).
+
+### MUST — the secure-by-default core
+
+1. **`transport.mode` is required, no default.** Enum `{tls, mtls, plaintext}`. A missing mode is a schema rejection (**fail-closed**). Do **not** add `// +kubebuilder:default` — a default just moves the implicit-behavior problem (see Alternatives).
+2. **Plaintext must be written explicitly** (`mode: plaintext`); it is never implied by omission. `kubectl explain`, GitOps diffs, and review all show plaintext as a deliberate choice.
+3. **CEL structural rules** on the CRD (evaluated in-apiserver, no webhook):
+   - `service` XOR `address` (exactly one target).
+   - `tls`/`mtls` require a `tls` block; `plaintext` forbids it.
+   - Raw `address` + `plaintext` is denied unless it is a loopback host **and** loopback plaintext is explicitly enabled (see the loopback note); a `Service` target is always same-namespace by construction, so namespace is never user-settable.
+4. **Conversion webhook**, hub-and-spoke with `v1alpha2` as the hub, doing a **lossless round-trip**. The load-bearing rule: **`v1alpha1 tls == nil` converts to an explicit `mode: plaintext`** — never to a missing mode that defaulting could later silently upgrade to TLS. Conversion **preserves** semantics; it must not "repair" a legacy plaintext object into TLS, which would change live network behaviour during a version bump.
+5. **v1alpha1 ratcheting** (admission): a *new* object or a *newly introduced* plaintext transport is denied; an *existing* plaintext object whose `remoteControl` is **unchanged** is grandfathered (`Warn` + `Audit`); a change that *widens* the plaintext attack surface (new/edited plaintext endpoint) is denied. Without this, v1alpha1 stays a complete bypass of every v1alpha2 guarantee. Use VAP `oldObject` (and/or CRD transition rules via `oldSelf`).
+6. **A v1alpha2-specific credential VAP.** The v1alpha1 policy's CEL references v1alpha1 field paths (`spec.provider.remoteControl.tls.secretName`) and matches only `v1alpha1`; v1alpha2's path differs (`…remoteControl.transport.tls.secretName`). Ship **two** policies, not one over-loaded CEL. v1alpha2's is `Deny`, `failurePolicy: Fail`, `parameterNotFoundAction: Deny` from day one (a brand-new API has no back-compat burden).
+
+### DEFER — recorded, not built now (proportionality per ADR-0009)
+
+- **Admin transport allow-list as an *admission* control:** express it as a **VAP with a `ConfigMap` `paramKind`** (a Kubernetes built-in), **not** a new `RemoteControlPolicy` CRD. A new CRD is not the same object ADR-0009 rejected (that was a cross-namespace credential *grant*), but it triggers the *same* proportionality objection ADR-0009 raised — a new CRD means the 4-copy CRD sync (`config/crd`, chart, bundle, Nephio) + samples + chart wiring + API docs + its own versioning, for the same minority feature — while the existing runtime flag allow-list (#251), the credential VAP (#309), and the egress NetworkPolicy (#317) already layer runtime/admission/network defence. A `ConfigMap` param gives the same admission-time feedback with none of the CRD-subsystem cost.
+- **`ServiceReference` target** (resolve a same-namespace `Service`, reject `type: ExternalName`, use the Service DNS as the default TLS `ServerName`): this is the #299 residual and the highest-value production path, but it is the part most likely to introduce conversion bugs — a `Service` target has **no lossless representation in v1alpha1** (down-conversion to `host:port` loses the Service identity + policy binding, needing a carefully round-trip-tested conversion annotation). Ship v1alpha2 with a structured **`address`** target first; add `service` as an **additive** v1alpha2 field once the conversion path is soaked. (The review's Option B.)
+
+## Rationale
+
+- **Required mode is the only true fix.** Any default — even `tls` — keeps "an omitted field decides the transport," and worse, mis-converts legacy plaintext (a `v1alpha1 tls==nil` becoming a defaulted-to-TLS v1alpha2) — a silent security-behaviour change during conversion.
+- **Lossless, plaintext-preserving conversion is mandatory** because the webhook sits on the API read/write path and runs on stored-vs-requested version mismatch; "improving" a legacy object's security during conversion would change what the operator dials.
+- **v1alpha1 without ratcheting is a bypass.** Grandfathering unchanged legacy objects while denying new/widened plaintext is the standard "old data grandfathered, new data must comply" pattern (CEL transition rules / VAP `oldObject`).
+- **VAP is sufficient infra.** GA since Kubernetes 1.30; the chart already requires ≥1.31. But VAP type-checking does **not** fully validate CEL against the matched CRD schema, so the existing server-side dry-run of rendered policies must stay, plus live positive/negative admission tests.
+- **A ConfigMap-param VAP is the proportionate policy mechanism** — admission-time feedback and a fail-closed default (`parameterNotFoundAction: Deny`) without a new CRD subsystem for a minority feature (ADR-0009).
+- **Loopback is not a shortcut.** `127.0.0.1`/`::1` is the *controller-manager* Pod's loopback, not the gNB Pod's; only containers in the *same* Pod share `localhost`. The standard Helm topology is a central controller with the gNB/proxy in a separate Pod reached via a Service, so loopback plaintext must be **off by default** and only meaningful for a genuine same-Pod sidecar deployment.
+
+## Consequences
+
+- The conversion webhook is on the API critical path: a request needing conversion fails if the webhook is unavailable. It must be served by the existing **2-replica / PDB / leader-independent** topology (every replica serves the webhook, not only the leader), and rolled out **webhook-infra-first, then CRD-adds-v1alpha2** so the CRD never calls a not-yet-ready webhook.
+- **Storage migration is phased** (served-both/storage-v1alpha1 → storage-v1alpha2 → rewrite stored objects → clean `status.storedVersions` → eventually `v1alpha1 served: false`), never in one PR, and `storedVersions` must be reduced to `["v1alpha2"]` before removing v1alpha1 storage.
+- The new version + conversion extends the **4-copy CRD sync** and the CI drift checks (test-chart.yml / test-e2e.yml already enforce these).
+- No behaviour changes for existing v1alpha1 deployments until they opt into the migration; v1alpha1 stays `served: true` for at least one explicit deprecation window.
+
+## Rollout / phased plan (one PR per phase — NOT one mega-PR)
+
+1. **This ADR.**
+2. `api/v1alpha2` types + **pure conversion round-trip tests** (no storage or controller change).
+3. **Conversion webhook infrastructure** (server, Service, serving cert, chart/bundle/Nephio wiring, HA tests) — CRD still v1alpha1-only.
+4. **CRD serves v1alpha2** (`storage: false`) — soak conversion under GET/CREATE/UPDATE/WATCH/round-trip/rollback.
+5. **v1alpha2 credential + transport VAP (`Deny`)** + **v1alpha1 `Warn`/`Audit` ratchet** + the `ConfigMap`-param transport allow-list.
+6. **Controller resolves the structured target** (`address`; `service` when it lands additively) with the layered check: admission ∩ runtime allow-list ∩ NetworkPolicy (intersection, never union).
+7. **Storage version switch** + stored-object migration tooling.
+8. **v1alpha1 deprecation ratchet** — deny new v1alpha1 objects, allow only migration edits, eventually `served: false`.
+
+## Alternatives considered
+
+- **Flip v1alpha1 semantics in place** (default `mode: tls`, or reject `tls == nil`): breaks existing plaintext deployments on upgrade and corrupts conversion of legacy objects. Rejected.
+- **`RemoteControlPolicy` CRD** (the review's proposal): not the identical object ADR-0009 rejected, but it repeats ADR-0009's disproportionate new-CRD-subsystem cost for this minority feature. Use a `ConfigMap`-param VAP instead. Deferred, not rejected on merit — a future multi-tenant policy story could revisit it.
+- **`ServiceReference` in the first v1alpha2 PR**: couples the highest-value feature to the riskiest conversion path. Deferred to an additive field (review's Option B).
+- **Default `mode: tls`**: keeps implicit-transport behaviour and mis-converts legacy plaintext. Rejected (Decision 1/7).
+
+## Testing (built with the implementation, not this ADR)
+
+Schema/CEL matrix (missing/unknown mode; `service`+`address`; empty target; `plaintext`+`tls`; `tls`/`mtls` without `tls`; raw non-loopback plaintext; IPv4/IPv6 loopback; malformed IPv6; port 0/65536). Admission with a restricted ServiceAccount (CR-write-but-no-`secrets get` → Deny; grant `get` → allow; policy-not-found → Deny; v1alpha1 grandfather vs widen). Service resolution (missing/absent-port/UDP/ExternalName/ClusterIP/headless; deletion + bounded recovery; SAN = `<service>.<namespace>.svc`). Conversion round-trips (plaintext/tls/mtls; `address`↔`service`; metadata/finalizer/ownerReferences/status preserved; annotation carries **no** Secret content; a v1alpha1 client editing the projected endpoint must not have a stale annotation override its new intent; list + multi-object ConversionReview; webhook restart; cert rotation; either of the 2 replicas terminating). Storage migration + rollback. **Mutation tests** (drop required-mode; `parameterNotFoundAction: Allow`; VAP forgets v1alpha2; allow ExternalName; remove the loopback check; `service`/`address` XOR→OR; conversion turning `nil` TLS into TLS; down-conversion annotation ignored). Kind E2E on the declared-minimum and current Kubernetes; the real OCUDU + TLS-proxy path still succeeds.
