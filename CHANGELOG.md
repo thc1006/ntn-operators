@@ -24,7 +24,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cause is still logged for the operator (who can read Secrets); genuinely transient errors still
   recover fast via the ~3 min ephemeris heartbeat. A table-driven regression pins that all seven
   failure modes (missing, unreadable, unlabelled, service-account token, bootstrap token, malformed CA,
-  malformed client cert) yield an identical public reason, message, and requeue interval.
+  malformed client cert) yield an identical public reason, message, and requeue interval. The sibling
+  endpoint allow-list (`--remote-control-allowed-endpoint-hosts`) keeps its own distinct reason
+  `RemoteControlEndpointNotAllowed`: it fires before the Secret read and reflects admin egress policy,
+  not Secret state, so folding it into the uniform credential reason would be inaccurate and needless.
 
 ### Added
 

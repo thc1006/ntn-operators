@@ -87,6 +87,12 @@ const (
 	// EphemerisPushErrorsTotal would leak via its increment rate) would let a principal who can
 	// write the NTNCellConfig but not read Secrets probe Secret existence and type (an oracle).
 	ephemerisReasonRemoteControlCredential = "RemoteControlCredentialUnavailable"
+	// ephemerisReasonRemoteControlEndpointNotAllowed is the reason when a credentialed push is refused
+	// because its endpoint is outside the admin --remote-control-allowed-endpoint-hosts list (#300,
+	// ADR-0009). It is DISTINCT from the credential reason on purpose: the check runs before the Secret
+	// read and concerns admin egress policy, not Secret state, so it leaks nothing about a Secret and
+	// need not fold into the oracle-closing uniform credential reason.
+	ephemerisReasonRemoteControlEndpointNotAllowed = "RemoteControlEndpointNotAllowed"
 	// ephemerisReasonSelectionAmbiguous fails a push CLOSED when spec.ephemerisNoradID is unset but
 	// the referenced SatelliteEphemeris exposes more than one satellite: the controller refuses to
 	// guess which one to serve (silently pushing the first would switch satellites whenever the
@@ -182,7 +188,10 @@ const remoteControlConfigRequeue = 5 * time.Minute
 // self-heals slowly (its Secret fix is unwatched, so this is a poll, not a hammer); every other
 // requeuing reason is a transient failure that retries tightly.
 func ephemerisPushRequeueInterval(reason string) time.Duration {
-	if reason == ephemerisReasonRemoteControlCredential {
+	// Both remoteControl config errors self-heal slowly: the credential fix is an unwatched Secret
+	// edit, and the endpoint fix is an admin allowlist change (operator flag). A low-frequency poll
+	// beats a tight per-minute retry for either.
+	if reason == ephemerisReasonRemoteControlCredential || reason == ephemerisReasonRemoteControlEndpointNotAllowed {
 		return remoteControlConfigRequeue
 	}
 	return time.Minute
@@ -805,7 +814,7 @@ func (r *NTNCellConfigReconciler) pushRuntimeEphemeris(
 		if err := r.RemoteControlAllowedHosts.Check("https://" + rc.Endpoint); err != nil {
 			logf.FromContext(ctx).Error(err, "refusing to send a remoteControl.tls credential to an "+
 				"endpoint outside --remote-control-allowed-endpoint-hosts", "cell", cc.Name, "endpoint", rc.Endpoint)
-			return false, marker, newEphemerisPushError(ephemerisReasonRemoteControlConfig, errRemoteControlEndpointNotAllowed)
+			return false, marker, newEphemerisPushError(ephemerisReasonRemoteControlEndpointNotAllowed, errRemoteControlEndpointNotAllowed)
 		}
 	}
 	// Resolve opt-in transport security (wss:// + shared secret / mTLS) from the
