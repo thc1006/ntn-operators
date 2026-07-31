@@ -26,13 +26,23 @@
 - slice-to-cell/cell-group binding;
 - cell activation/deactivation;
 - true session continuity/UPF integration;
-- automated wss/mTLS E2E;
 - conversion webhook and v1alpha2 migration;
 - credential grant CRD/controller;
 - structured ground-station hardware agent;
 - policy-capable NetworkPolicy E2E;
 - six-digit NORAD regression coverage;
 - collision-resistant OMM cache migration.
+
+## Landed since this bundle was written
+
+- **Automated wss/mTLS E2E** — #332 covers the credentialed runtime push at the
+  wire level (bearer rejection, unpinned CA, mTLS enforcement, endpoint
+  allow-list) against a TLS-terminating proxy in front of a plaintext backend.
+  It does **not** cover NetworkPolicy enforcement, which stays listed above: the
+  chain being tested is not the same as every remote-control control being tested.
+- **Fabricated antenna readiness** — #335 changed `AntennaReady` from a node-exists
+  `True` to `Unknown/NoAntennaProbe`, which is the correction ADR 0012 requires.
+  The evidence-based agent contract itself remains unimplemented (#68).
 
 ## Claims deliberately not made
 
