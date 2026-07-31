@@ -95,6 +95,12 @@ const (
 	// read and concerns admin egress policy, not Secret state, so it leaks nothing about a Secret and
 	// need not fold into the oracle-closing uniform credential reason.
 	ephemerisReasonRemoteControlEndpointNotAllowed = "RemoteControlEndpointNotAllowed"
+	// ephemerisReasonRemoteEndpointRejected marks a runtime push whose WebSocket handshake the
+	// remote endpoint REFUSED (a refused redirect, 401/403, 429, or another 4xx from the gNB or
+	// a proxy). Distinct from ProviderPushRejected, which is the gNB rejecting the payload after
+	// a successful handshake: there the fix is a spec edit (watched), here it is external state
+	// (a credential, a proxy rule, the gNB) that nothing watches — so it self-heals on a poll.
+	ephemerisReasonRemoteEndpointRejected = "RemoteEndpointRejected"
 	// ephemerisReasonSelectionAmbiguous fails a push CLOSED when spec.ephemerisNoradID is unset but
 	// the referenced SatelliteEphemeris exposes more than one satellite: the controller refuses to
 	// guess which one to serve (silently pushing the first would switch satellites whenever the
@@ -160,10 +166,12 @@ func ephemerisPushConditionReason(err error) string {
 // versus recovering on its own via a watched change. The reasons below clear only on a spec edit
 // (generation bump) or a SatelliteEphemeris refresh (new marker) — both watched — so a self-requeue
 // would just hammer a still-failing push. Everything else requeues: a transient failure (API GET
-// error, gNB unreachable), AND RemoteControlCredentialUnavailable, whose fix (a Secret edit) is NOT watched
-// — the controller watches only NTNCellConfig + SatelliteEphemeris and secrets are get-only by
-// design, so without a self-requeue such a cell recovers only on the next ephemeris heartbeat, and
-// never if the producer stalls. ephemerisPushRequeueInterval sets the cadence.
+// error, gNB unreachable), AND the unwatched-fix reasons — RemoteControlCredentialUnavailable (a
+// Secret edit), RemoteControlEndpointNotAllowed (an admin allowlist edit), and RemoteEndpointRejected
+// (a credential, proxy or gNB change behind the endpoint) — whose fixes the controller does not watch
+// (it watches only NTNCellConfig + SatelliteEphemeris and secrets are get-only), so without a
+// self-requeue such a cell recovers only on the next ephemeris heartbeat, and never if the producer
+// stalls. ephemerisPushRequeueInterval sets the cadence.
 func ephemerisPushShouldRequeue(reason string) bool {
 	switch reason {
 	case ephemerisReasonRefNotFound,
@@ -177,26 +185,26 @@ func ephemerisPushShouldRequeue(reason string) bool {
 	}
 }
 
-// remoteControlConfigRequeue is the low-frequency self-heal poll for any
-// RemoteControlCredentialUnavailable failure. Its fix is a Secret edit (create / label / repair),
-// which the controller does not watch, so the cell must poll to recover rather than rely on the
-// (possibly absent) SatelliteEphemeris heartbeat fan-out. It is applied UNIFORMLY to every
-// credential failure — including a transient/absent-Secret read error — so the retry cadence
-// carries no signal that distinguishes a missing Secret from a present-but-invalid one; the
-// ~3-minute ephemeris heartbeat remains the fast-recovery path for a genuinely transient error.
+// remoteControlConfigRequeue is the low-frequency self-heal poll for a failure whose fix the
+// controller cannot observe: a Secret edit (RemoteControlCredentialUnavailable), an admin allowlist
+// edit (RemoteControlEndpointNotAllowed), or external state behind the remote endpoint
+// (RemoteEndpointRejected). None is watched, so the cell must poll to recover rather than rely on
+// the (possibly absent) SatelliteEphemeris heartbeat fan-out. The credential poll is applied
+// UNIFORMLY to every credential failure so its cadence carries no missing-vs-present-Secret signal.
 const remoteControlConfigRequeue = 5 * time.Minute
 
-// ephemerisPushRequeueInterval is the backoff for a requeuing push failure: a credential error
-// self-heals slowly (its Secret fix is unwatched, so this is a poll, not a hammer); every other
-// requeuing reason is a transient failure that retries tightly.
+// ephemerisPushRequeueInterval is the backoff for a requeuing push failure: an unwatched-fix error
+// self-heals slowly (a poll, not a hammer); every other requeuing reason is a transient failure
+// that retries tightly.
 func ephemerisPushRequeueInterval(reason string) time.Duration {
-	// Both remoteControl config errors self-heal slowly: the credential fix is an unwatched Secret
-	// edit, and the endpoint fix is an admin allowlist change (operator flag). A low-frequency poll
-	// beats a tight per-minute retry for either.
-	if reason == ephemerisReasonRemoteControlCredential || reason == ephemerisReasonRemoteControlEndpointNotAllowed {
+	switch reason {
+	case ephemerisReasonRemoteControlCredential,
+		ephemerisReasonRemoteControlEndpointNotAllowed,
+		ephemerisReasonRemoteEndpointRejected:
 		return remoteControlConfigRequeue
+	default:
+		return time.Minute
 	}
-	return time.Minute
 }
 
 // +kubebuilder:rbac:groups=ntn.operators.dev,resources=ntncellconfigs,verbs=get;list;watch;create;update;patch;delete
@@ -869,11 +877,16 @@ func (r *NTNCellConfigReconciler) pushRuntimeEphemeris(
 		AuthToken: authToken,
 	}
 	if err := prov.PushRuntimeUpdate(ctx, target, update); err != nil {
-		// A permanent rejection (bad config / malformed frame) must not tight-loop;
-		// only a transient failure (gNB unreachable) is worth retrying.
+		// Three cadences, not two. A permanent rejection (bad config / malformed frame)
+		// must not requeue at all — its fix bumps the generation, which re-triggers us. A
+		// refused handshake must not tight-loop either, but its fix (credential, proxy,
+		// gNB) is unwatched, so it polls. Everything else is transient and retries tightly.
 		reason := ephemerisReasonProviderPushFailed
-		if errors.Is(err, provider.ErrRuntimePushRejected) {
+		switch {
+		case errors.Is(err, provider.ErrRuntimePushRejected):
 			reason = ephemerisReasonProviderPushRejected
+		case errors.Is(err, provider.ErrRuntimePushRetryLater):
+			reason = ephemerisReasonRemoteEndpointRejected
 		}
 		return false, marker, newEphemerisPushError(reason, fmt.Errorf("provider PushRuntimeUpdate: %w", err))
 	}

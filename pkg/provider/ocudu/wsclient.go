@@ -252,7 +252,9 @@ func buildNTNConfigUpdate(u provider.RuntimeUpdate) (ntnConfigUpdateEnvelope, er
 type wsErrorKind int
 
 const (
-	// wsUnreachable: dial/write/read failed — transient, worth a requeue.
+	// wsUnreachable: dial/write/read failed — transient, worth a requeue. Also covers a
+	// handshake the endpoint answered with a repeat-me status (408/425): the dial did fail,
+	// and the correct response is the same tight retry.
 	wsUnreachable wsErrorKind = iota
 	// wsPayloadTooLarge: frame exceeds OCUDU's 16 KB cap — permanent.
 	wsPayloadTooLarge
@@ -262,7 +264,8 @@ const (
 	wsRejected
 	// wsHandshakeRejected: the handshake got a definitive HTTP response (a refused
 	// redirect, an auth rejection, or another non-101 in the 3xx/4xx range) rather
-	// than an Upgrade — permanent (config/credential), must not tight-requeue.
+	// than an Upgrade — the endpoint is reachable and said no, so a tight retry is
+	// pointless, but the fix is unwatched external state, so it must still be polled.
 	wsHandshakeRejected
 )
 
@@ -274,9 +277,37 @@ type wsError struct {
 
 func (e *wsError) Error() string { return e.msg }
 
-// retryable reports whether the failure is worth requeuing (transient) vs a
-// permanent config/protocol error the operator should not hammer.
-func (e *wsError) retryable() bool { return e.kind == wsUnreachable }
+// wsRetryPolicy is how the reconciler should schedule the next attempt. Deliberately
+// three-valued, not a retryable/permanent bool: "must not tight-requeue" and "must
+// never retry" are different claims, and only the second one is safe when the fix is
+// something no controller watch can observe.
+type wsRetryPolicy int
+
+const (
+	// wsRetryTight: transient — retry on the normal per-minute cadence.
+	wsRetryTight wsRetryPolicy = iota
+	// wsRetrySlow: the endpoint refused us and the fix lives outside the cluster (a
+	// credential, a proxy rule, the gNB itself). Unwatched, so poll for it slowly.
+	wsRetrySlow
+	// wsRetryNever: the fix is a WATCHED change — a spec edit bumps the generation, an
+	// ephemeris refresh brings a new marker — which re-triggers reconcile on its own.
+	wsRetryNever
+)
+
+// retryPolicy maps a failure kind to its requeue cadence.
+func (e *wsError) retryPolicy() wsRetryPolicy {
+	switch e.kind {
+	case wsUnreachable:
+		return wsRetryTight
+	case wsHandshakeRejected:
+		return wsRetrySlow
+	case wsPayloadTooLarge, wsMarshal, wsRejected:
+		return wsRetryNever
+	}
+	// Unreachable for the kinds above; a future kind defaults to the safe cadence
+	// (poll slowly) rather than silently stranding the cell forever.
+	return wsRetrySlow
+}
 
 // pushNTNConfigUpdate dials the gNB remote_control WebSocket, sends a single
 // ntn_config_update text frame, reads the one-line reply, and returns nil on
@@ -334,13 +365,25 @@ func pushNTNConfigUpdate(
 	}
 	conn, resp, err := websocket.Dial(dialCtx, scheme+endpoint, dialOpts)
 	if err != nil {
-		// A definitive HTTP handshake response (a refused redirect, an auth rejection,
-		// or any non-101 in the 3xx/4xx range) is a PERMANENT config/credential problem,
-		// not transient unreachability — classify it non-retryable so the reconciler does
-		// not tight-requeue it every minute. A nil response is a connection-level failure
-		// (dial/TLS/timeout, or a 5xx server error) and stays retryable. coder/websocket
-		// owns resp.Body, so we only read the status.
+		// A definitive HTTP handshake response (a refused redirect, an auth rejection, or
+		// any other non-101 in the 3xx/4xx range) means the endpoint is reachable and said
+		// no — a tight per-minute retry cannot fix it. But it is NOT permanent either: the
+		// gNB, the proxy in front of it and the credential we present are all external
+		// state this controller does not watch, so "never retry" would strand the cell
+		// until some unrelated ephemeris heartbeat happens to fan out — and forever if the
+		// producer stalls. It gets the slow self-heal poll instead, exactly as the local
+		// credential path does (RemoteControlCredentialUnavailable, #282). A nil response is a
+		// connection-level failure (dial/TLS/timeout, or a 5xx) and keeps the tight
+		// cadence. coder/websocket owns resp.Body, so we only read the status.
 		if resp != nil && resp.StatusCode >= 300 && resp.StatusCode < 500 {
+			// 408 and 425 ask for the SAME request again (RFC 9110 §15.5.9, RFC 8470 §5.2),
+			// so they are the handshake's own transient failures, not a rejection.
+			if resp.StatusCode == http.StatusRequestTimeout || resp.StatusCode == http.StatusTooEarly {
+				return &wsError{
+					wsUnreachable,
+					fmt.Sprintf("handshake to %s did not complete: HTTP %d", endpoint, resp.StatusCode),
+				}
+			}
 			return &wsError{wsHandshakeRejected, fmt.Sprintf("handshake to %s rejected: HTTP %d", endpoint, resp.StatusCode)}
 		}
 		return &wsError{wsUnreachable, fmt.Sprintf("dial %s: %v", endpoint, err)}
