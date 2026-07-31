@@ -287,9 +287,19 @@ func TestOMMCache_PersistSkipsOversizePayload(t *testing.T) {
 // landed on ONE ConfigMap: the UID annotation stopped a wrong restore, but the losers kept
 // overwriting an object their own restore then refused, silently losing restart continuity.
 func TestOMMCache_ConfigMapNameIsCollisionResistant(t *testing.T) {
-	long := strings.Repeat("x", 260) // legal: names are bounded at 253, this is the truncating case
-	a := newOMMCacheEph(long+"-alpha", "uid-a")
-	b := newOMMCacheEph(long+"-bravo", "uid-b")
+	// 250 chars: a name the apiserver ACCEPTS (DNS-1123 subdomain caps at 253) that is still long
+	// enough to truncate, since the legacy scheme cut at 253-len("-omm-cache") = 243. Using a
+	// 266-char name here would prove the property for an object that can never exist, and would
+	// make the bug read as theoretical when it is reachable with a perfectly valid CR.
+	stem := strings.Repeat("x", 244)
+	a := newOMMCacheEph(stem+"-alpha", "uid-a")
+	b := newOMMCacheEph(stem+"-bravo", "uid-b")
+	for _, eph := range []*ntnv1alpha1.SatelliteEphemeris{a, b} {
+		if errs := validation.IsDNS1123Subdomain(eph.Name); len(errs) > 0 {
+			t.Fatalf("this test's own CR name %d chars is not a legal object name (%v) — the collision "+
+				"it demonstrates would be unreachable in production", len(eph.Name), errs)
+		}
+	}
 
 	if legacyOMMCacheConfigMapName(a.Name) != legacyOMMCacheConfigMapName(b.Name) {
 		t.Fatal("the legacy scheme no longer collides on these inputs, so this test proves nothing " +
@@ -312,7 +322,7 @@ func TestOMMCache_ConfigMapNameIsCollisionResistant(t *testing.T) {
 	}
 
 	for _, eph := range []*ntnv1alpha1.SatelliteEphemeris{a, b, newOMMCacheEph("eph-a", "uid-s"),
-		newOMMCacheEph(strings.Repeat("y", 242)+".", "uid-dot")} {
+		newOMMCacheEph(strings.Repeat("y", 242)+".z", "uid-dot")} {
 		name := ommCacheConfigMapName(eph)
 		if len(name) > maxConfigMapNameLen {
 			t.Errorf("name for %q is %d chars, over the %d limit", eph.Name, len(name), maxConfigMapNameLen)
@@ -509,6 +519,19 @@ func TestOMMCache_MigratesFromLegacyName(t *testing.T) {
 		prometheus.Labels{"namespace": eph.Namespace, "ephemeris": eph.Name, "result": "migrated"}); !ok || after != before+1 {
 		t.Errorf("migrated counter %v -> %v (found=%v); a silent migration is one nobody can audit",
 			before, after, ok)
+	}
+
+	// The migrated object must stand on its own. Copying the payload without every annotation the
+	// restore gates read would produce an object that looks migrated and is then refused on the
+	// NEXT cold start — the migration would have moved the data and lost the ability to use it,
+	// and the legacy object it superseded is the only reason that would not be fatal.
+	r.ommCache.Delete(key)
+	if !r.restoreOMMCache(ctx, ctrl.Request{NamespacedName: key}, eph, fetchKey) {
+		t.Fatal("the migrated object is not restorable on its own")
+	}
+	if now, _ := counterValue(t, metrics.OMMCacheRestoreTotal,
+		prometheus.Labels{"namespace": eph.Namespace, "ephemeris": eph.Name, "result": "migrated"}); now != before+1 {
+		t.Error("the second restore migrated again; it should have hydrated from the object just written")
 	}
 }
 

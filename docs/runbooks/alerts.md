@@ -503,11 +503,12 @@ sum by (namespace, ephemeris, result) (increase(ntn_operators_omm_cache_persist_
 Labels: `namespace`, `ephemeris`, `result`.
 
 **`refused_identity` is deliberately excluded.** Restore runs on *every* reconcile while
-the in-memory cache is cold, so a legitimate delete/recreate whose old cache object
-still exists increments that counter once per reconcile until the first successful
-fetch — and during the upstream outage this feature exists for, that is a lot of
-reconciles. An alert on it would fire hardest precisely when the operator is behaving
-correctly. Query it instead:
+the in-memory cache is cold, so two ordinary operations increment it once per reconcile
+until the first successful fetch: a delete/recreate whose old cache object still exists,
+and **any `spec.source` edit** — the persisted object still carries the previous source's
+fetch identity, and is correctly refused until the next fetch overwrites it. During the
+upstream outage this feature exists for, that is a lot of reconciles. An alert on it
+would fire hardest precisely when the operator is behaving correctly. Query it instead:
 
 ```promql
 # Sustained across many cold reconciles, under the LEGACY name, is the pre-ADR-0007

@@ -15,7 +15,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"maps"
 	"strconv"
 	"strings"
 	"time"
@@ -318,12 +317,24 @@ func (r *SatelliteEphemerisReconciler) copyCacheForward(
 	ctx context.Context, eph *ntnv1alpha1.SatelliteEphemeris, legacy *corev1.ConfigMap,
 ) {
 	log := logf.FromContext(ctx)
+	// Copy the annotations this cache defines, not everything the old object happened to carry.
+	// The payload is already bounded at 900 KiB under a 1 MiB object limit, so cloning an
+	// arbitrarily large foreign annotation could push the create over the limit — and the failure
+	// would land in this swallowed best-effort path. Nothing else on a legacy object is meaningful
+	// here anyway.
+	ann := map[string]string{}
+	for _, k := range []string{ommCacheAnnFetchKey, ommCacheAnnFetchedAt, ommCacheAnnDigest,
+		ommCacheAnnUID, ommCacheAnnCount, ommCacheAnnETag, ommCacheAnnLastModified} {
+		if v, ok := legacy.Annotations[k]; ok {
+			ann[k] = v
+		}
+	}
 	cm := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace:   eph.Namespace,
 			Name:        ommCacheConfigMapName(eph),
 			Labels:      map[string]string{ommCacheLabelKey: ommCacheLabelValue},
-			Annotations: maps.Clone(legacy.Annotations),
+			Annotations: ann,
 		},
 		Data: map[string]string{ommCacheDataKey: legacy.Data[ommCacheDataKey]},
 	}
