@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -181,5 +182,64 @@ func TestContactCandidate_PredictionUnavailableIsNotAReadFailure(t *testing.T) {
 	}
 	if ev.candidate != nil {
 		t.Errorf("candidate %+v built from predictions the producer disowned", ev.candidate)
+	}
+}
+
+// TestContactCandidate_ClearedWhenMetricsGoUnreliable is the invariant the field's own doc claims:
+// written and cleared WITH the condition it explains. setMetricsDegraded owns FailoverReady for
+// that reconcile (the satellite branch is skipped), so a candidate left behind would present a
+// constellation member as the evidence for a condition that is actually about metrics — stale
+// evidence that looks current, which is worse than no field at all.
+func TestContactCandidate_ClearedWhenMetricsGoUnreliable(t *testing.T) {
+	slice := candidateSlice()
+	slice.Status.ContactCandidate = &ntnv1alpha1.ContactCandidate{
+		NoradID: 40000, Satellite: "B", GroundStation: "gs-b", SelectionReason: "EarliestLOS",
+	}
+	r := &NTNSliceReconciler{}
+	r.setMetricsDegraded(slice, "MetricsReaderError", "reader is down")
+
+	cond := meta.FindStatusCondition(slice.Status.Conditions, ntnv1alpha1.ConditionFailoverReady)
+	if cond == nil || cond.Status != metav1.ConditionUnknown || cond.Reason != "MetricsReaderError" {
+		t.Fatalf("FailoverReady = %+v, want Unknown/MetricsReaderError", cond)
+	}
+	if slice.Status.ContactCandidate != nil {
+		t.Errorf("candidate %+v survived a condition it had no part in", slice.Status.ContactCandidate)
+	}
+}
+
+// TestContactCandidate_StableInputsDoNotChurnStatus ties the determinism requirement to the
+// ACCEPTED write-churn bound (#234 / ADR-0006): persistStatusIfChanged skips the write when the
+// status deep-equals its previous value, so a candidate that is merely *plausible* rather than
+// deterministic would rewrite status on EVERY reconcile of an unchanged constellation. Determinism
+// is what keeps that decision intact, not a readability preference.
+func TestContactCandidate_StableInputsDoNotChurnStatus(t *testing.T) {
+	now := time.Date(2026, 7, 30, 12, 0, 0, 0, time.UTC)
+	fresh := now.Add(-time.Hour).UnixMilli()
+	sch := makeScheme(t)
+	// Two members overhead with IDENTICAL windows apart from identity: the case where an
+	// order-dependent pick would flip.
+	eph := candidateEph(
+		[]ntnv1alpha1.PassWindow{
+			{Satellite: "A", NoradID: 25544, GroundStation: "gs",
+				AOS: metav1.Time{Time: now.Add(-time.Minute)}, LOS: metav1.Time{Time: now.Add(time.Hour)}},
+			{Satellite: "B", NoradID: 40000, GroundStation: "gs",
+				AOS: metav1.Time{Time: now.Add(-time.Minute)}, LOS: metav1.Time{Time: now.Add(time.Hour)}},
+		},
+		[]ntnv1alpha1.PropagatedState{
+			{NoradID: 25544, SourceEpochUnixMs: fresh}, {NoradID: 40000, SourceEpochUnixMs: fresh},
+		})
+	cli := fake.NewClientBuilder().WithScheme(sch).WithObjects(eph, candidateSlice()).Build()
+	r := &NTNSliceReconciler{Client: cli, Scheme: sch}
+
+	first := r.checkSatelliteAvailability(context.Background(), candidateSlice(), now)
+	for i := range 5 {
+		got := r.checkSatelliteAvailability(context.Background(), candidateSlice(), now)
+		if !reflect.DeepEqual(first.candidate, got.candidate) {
+			t.Fatalf("evaluation %d produced a different candidate for unchanged inputs (%+v vs %+v); "+
+				"persistStatusIfChanged would then write status every reconcile", i+2, first.candidate, got.candidate)
+		}
+	}
+	if first.candidate.NoradID != 25544 {
+		t.Errorf("tie on LOS must break on the lower NORAD, got %d", first.candidate.NoradID)
 	}
 }

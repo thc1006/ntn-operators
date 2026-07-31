@@ -743,6 +743,10 @@ func (r *NTNSliceReconciler) readPathQuality(ctx context.Context, ns *ntnv1alpha
 // after also applying the fail-static decision (so the orbital signal can still
 // switch off a set satellite — findings.md I-8).
 func (r *NTNSliceReconciler) setMetricsDegraded(ns *ntnv1alpha1.NTNSlice, reason, msg string) {
+	// This path OWNS FailoverReady for this reconcile — the satellite branch is skipped when
+	// quality is unreliable — so it owns clearing the candidate too. Leaving it would present a
+	// constellation member as the evidence behind a condition that is actually about metrics.
+	ns.Status.ContactCandidate = nil
 	meta.SetStatusCondition(&ns.Status.Conditions, metav1.Condition{
 		Type:               ntnv1alpha1.ConditionFailoverReady,
 		Status:             metav1.ConditionUnknown,
@@ -840,7 +844,10 @@ func failoverReadyCondition(contact contactEval) metav1.Condition {
 		c.Status = metav1.ConditionFalse
 		c.Message = contact.detail
 		if c.Message == "" {
-			c.Message = "No satellite pass window active or SatelliteEphemeris not found"
+			// Every False path above sets a detail; this only guards a future one that forgets.
+			// It deliberately does NOT enumerate causes any more — each has its own reason now,
+			// and a message listing two of them would contradict the reason beside it.
+			c.Message = "satellite path unavailable"
 		}
 	}
 	return c

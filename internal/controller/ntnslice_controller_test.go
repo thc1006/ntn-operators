@@ -1237,6 +1237,75 @@ var _ = Describe("NTNSlice Controller", func() {
 			Expect(updated.Status.ContactCandidate).To(BeNil(),
 				"no candidate may be reported when no member is overhead")
 		})
+
+		// Against the REAL apiserver, because this is the one failure the unit tests structurally
+		// cannot see: the fake client has no CRD schema, so a field that the published CRD does not
+		// declare is silently PRUNED on write and every unit test still passes. Only a round-trip
+		// through envtest proves status.contactCandidate is actually persistable.
+		It("should round-trip a contact candidate through the CRD schema", func() {
+			eph := &ntnv1alpha1.SatelliteEphemeris{
+				ObjectMeta: metav1.ObjectMeta{Name: "oneweb-constellation", Namespace: namespace},
+				Spec: ntnv1alpha1.SatelliteEphemerisSpec{
+					Source: ntnv1alpha1.EphemerisSource{
+						Type: "CelesTrak", URL: "https://test",
+						RefreshInterval: metav1.Duration{Duration: 4 * time.Hour},
+					},
+				},
+			}
+			Expect(k8sClient.Create(context.Background(), eph)).To(Succeed())
+			DeferCleanup(func() { _ = k8sClient.Delete(context.Background(), eph) })
+
+			// The reconciler's clock is pinned (newReconciler above), so the window must be built
+			// around THAT instant. A time.Now()-based fixture is simply not overhead at 2026-04-17
+			// and the candidate would be nil for a reason that has nothing to do with the schema.
+			now := time.Date(2026, 4, 17, 12, 0, 0, 0, time.UTC)
+			fresh := now.Add(-time.Hour).UnixMilli()
+			eph.Status.SatelliteCount = 651
+			eph.Status.NextPassWindows = []ntnv1alpha1.PassWindow{{
+				Satellite: "ONEWEB-0012", NoradID: 40000, GroundStation: "gs-taipei",
+				AOS:          metav1.Time{Time: now.Add(-5 * time.Minute)},
+				LOS:          metav1.Time{Time: now.Add(10 * time.Minute)},
+				MaxElevation: "42.5",
+			}}
+			eph.Status.PropagatedStates = []ntnv1alpha1.PropagatedState{{
+				Satellite: "ONEWEB-0012", NoradID: 40000,
+				SourceEpochUnixMs: fresh, EpochUnixMs: now.Add(time.Minute).UnixMilli(),
+			}}
+			meta.SetStatusCondition(&eph.Status.Conditions, metav1.Condition{
+				Type: ntnv1alpha1.ConditionPassesPredicted, Status: metav1.ConditionTrue, Reason: "Predicted",
+			})
+			Expect(k8sClient.Status().Update(context.Background(), eph)).To(Succeed())
+
+			reconciler := newReconciler()
+			_, err := reconciler.Reconcile(context.Background(), reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			updated := &ntnv1alpha1.NTNSlice{}
+			Expect(k8sClient.Get(context.Background(), typeNamespacedName, updated)).To(Succeed())
+			// Assert the CONDITION first: a nil candidate has several possible causes, and only
+			// after this does nil isolate to the schema. An assertion message that names one cause
+			// for an ambiguous failure sends the next reader to the wrong place.
+			cond := meta.FindStatusCondition(updated.Status.Conditions, ntnv1alpha1.ConditionFailoverReady)
+			Expect(cond).NotTo(BeNil())
+			Expect(cond.Reason).To(Equal("ConstellationMemberAvailable"),
+				"the fixture must actually put a deliverable member overhead, or this proves nothing")
+			c := updated.Status.ContactCandidate
+			Expect(c).NotTo(BeNil(), "the condition says a member is overhead but no candidate came "+
+				"back from the apiserver — the published CRD schema does not declare "+
+				"status.contactCandidate, so it was pruned on write")
+			// Every field individually: a partially declared schema prunes per-field, silently.
+			Expect(c.NoradID).To(Equal(40000))
+			Expect(c.Satellite).To(Equal("ONEWEB-0012"))
+			Expect(c.GroundStation).To(Equal("gs-taipei"))
+			Expect(c.AOS).NotTo(BeNil())
+			Expect(c.LOS).NotTo(BeNil())
+			Expect(c.SourceEpochUnixMs).To(Equal(fresh))
+			Expect(c.PropagatedEpochUnixMs).To(Equal(now.Add(time.Minute).UnixMilli()))
+			Expect(c.ValidUntil).NotTo(BeNil())
+			Expect(c.SelectionReason).To(Equal("EarliestLOS"))
+		})
 	})
 
 	// Exercises the REAL finalizer-driven deletion path against the envtest
