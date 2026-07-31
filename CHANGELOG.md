@@ -66,6 +66,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **ADR-0010 — an owner-issued grant for `remoteControl.tls` credentials (Proposed).** Records the
+  design for a `RemoteControlCredentialGrant` CRD created by the Secret's owner, naming which
+  NTNCellConfig may use the credential, against which endpoint, in which auth mode. It exists because
+  three gaps on `main` share one shape — the Secret's owner cannot express, revocably, what their
+  credential is for: #309's admission policy is evaluated only at write time so withdrawing RBAC does
+  not re-evaluate existing CRs; #300's endpoint allow-list is admin-global, so any labelled Secret can
+  be paired with any allow-listed endpoint; and Secrets are `get`-only by design, so a withdrawal of
+  consent is invisible until the next real push. The ADR **partly supersedes ADR-0009**, whose
+  recommendation to prefer a SubjectAccessReview over a grant CRD does not survive the revocability
+  and endpoint-binding requirements — a SAR is a point-in-time check on a write and cannot express a
+  destination. #309 is explicitly kept as the cheap default tier; the grant is opt-in behind
+  `--require-credential-grant`. The ADR is candid that it does **not** close #298: rotating a Secret's
+  *contents* fires no watch, so that path keeps the ~3-minute bound.
+
 - **A deployable TLS-termination sample for the credentialed runtime push, and the guide that was
   missing.** The operator can speak `wss://` with a bearer token and mutual TLS, but OCUDU's
   `remote_control` server is plaintext and unauthenticated — so the feature only works behind a

@@ -3,6 +3,7 @@
 - Status: **Accepted**, **amended 2026-07-31 (twice)** — see [Amendment (1)](#amendment-2026-07-31--the-deferral-rationale-was-wrong) and [Amendment (2)](#amendment-2026-07-31-2--the-endpoint-allow-list-now-gates-plaintext-destinations-too). The interim endpoint allow-list stands (and now gates plaintext destinations too); the deferral of the full per-CR authorization does **not**.
 - Date: 2026-07-31
 - Deciders: @thc1006
+- ⚠ **Partly superseded by [ADR-0010](0010-remote-control-credential-grant.md)**: the *Rationale* bullet preferring a SubjectAccessReview at admission **over** a ReferenceGrant-style CRD no longer holds once revocability and endpoint binding are required — a SAR is a point-in-time check on a write and cannot express a destination. The interim endpoint allow-list and the shipped admission policy (#309) both stand; ADR-0010 adds an owner-issued grant as the opt-in stronger tier.
 - Relates to: #219 (label/type opt-in gate), #251 (this confused-deputy follow-up), the N-12 runtime TLS/bearer/mTLS push. Builds on the existing SSRF allow-list (`--prometheus-allowed-endpoint-hosts`, `--ephemeris-allowed-private-hosts`) and `pkg/netutil.EndpointAllowlist`.
 
 ## Context
