@@ -1054,7 +1054,7 @@ func (e *haEnv) deployCelestrakMock(t *testing.T) {
 				Spec: corev1.PodSpec{
 					Containers: []corev1.Container{{
 						Name:  "nginx",
-						Image: "nginx:1.27-alpine",
+						Image: "nginx:1.27-alpine@sha256:65645c7bb6a0661892a8b03b89d0743208a18dd2f3f17a54ef4b76fb8e2f2a10",
 						Ports: []corev1.ContainerPort{{Name: "http", ContainerPort: 80}},
 						VolumeMounts: []corev1.VolumeMount{{
 							Name: "fixture", MountPath: "/usr/share/nginx/html/gp.json", SubPath: "gp.json", ReadOnly: true,
