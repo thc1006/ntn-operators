@@ -341,8 +341,11 @@ func (r *NTNSliceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 			c = metav1.Condition{Status: metav1.ConditionUnknown, Reason: "SatelliteReadFailed",
 				Message: "Satellite availability unknown: transient SatelliteEphemeris read error; holding current path"}
 		case satelliteAvailable:
-			c = metav1.Condition{Status: metav1.ConditionTrue, Reason: "SatelliteAvailable",
-				Message: "Satellite pass window active"}
+			// Contact OPPORTUNITY, not delivered slice service: a fresh deliverable member is
+			// overhead (see checkSatelliteAvailability), but service still needs the absent
+			// slice-to-cell binding. "SatelliteAvailable" overstated that (ADR-0008).
+			c = metav1.Condition{Status: metav1.ConditionTrue, Reason: "ConstellationMemberAvailable",
+				Message: "A fresh deliverable constellation member has an active pass window (contact opportunity, not slice service)"}
 		default:
 			msg := satelliteDetail
 			if msg == "" {
