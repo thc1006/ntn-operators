@@ -83,7 +83,8 @@ const celestrakMockHost = "celestrak-mock.default.svc.cluster.local"
 // To skip CertManager installation, set: CERT_MANAGER_INSTALL_SKIP=true
 // To run against a pre-existing cluster (e.g. kubeadm) with the manager
 // image already pushed to a registry the cluster can pull from, set:
-//   E2E_USE_EXISTING_CLUSTER=1 MANAGER_IMAGE=<your-registry>/ntn-operators:v0.0.1
+//
+//	E2E_USE_EXISTING_CLUSTER=1 MANAGER_IMAGE=<your-registry>/ntn-operators:v0.0.1
 func TestE2E(t *testing.T) {
 	RegisterFailHandler(Fail)
 	_, _ = fmt.Fprintf(GinkgoWriter, "Starting ntn-operators e2e test suite\n")
