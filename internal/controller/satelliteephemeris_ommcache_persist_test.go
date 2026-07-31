@@ -126,6 +126,31 @@ func TestOMMCache_PersistRestoreRoundTrip(t *testing.T) {
 	}
 }
 
+// TestSixDigitNORAD_CachePersistRestore proves the durable OMM cache round-trips a 6-digit NORAD
+// (CelesTrak issues 100000+ since 2026-07): the int catalog marshals to JSON and parses back intact.
+func TestSixDigitNORAD_CachePersistRestore(t *testing.T) {
+	sch := ommCacheScheme(t)
+	eph := newOMMCacheEph("eph-6d", "uid-6d")
+	cli := fake.NewClientBuilder().WithScheme(sch).WithObjects(eph).Build()
+	r := &SatelliteEphemerisReconciler{Client: cli, Scheme: sch, Recorder: events.NewFakeRecorder(50)}
+	ctx := context.Background()
+	key := types.NamespacedName{Namespace: eph.Namespace, Name: eph.Name}
+
+	omm := issOMMForTest()
+	omm.NoradCatID = 100000
+	fetchedAt := time.Date(2026, 7, 30, 12, 0, 0, 0, time.UTC)
+	fetchKey := fetchInputKey(eph.Spec)
+	r.persistOMMCache(ctx, eph, ephemeris.GPFetchResult{OMMs: []sgp4.OMM{omm}, SatelliteCount: 1, FetchedAt: fetchedAt}, fetchKey)
+
+	if !r.restoreOMMCache(ctx, ctrl.Request{NamespacedName: key}, eph, fetchKey) {
+		t.Fatalf("restore of a 6-digit-NORAD cache failed")
+	}
+	got, ok := r.cachedOMMResult(key)
+	if !ok || len(got.result.OMMs) != 1 || got.result.OMMs[0].NoradCatID != 100000 {
+		t.Fatalf("6-digit NORAD did not round-trip through the cache: %+v", got)
+	}
+}
+
 // TestOMMCache_RestoreRejectsInvalid proves restore refuses corrupt or wrong-owner/source data,
 // so a tampered or orphaned ConfigMap never poisons the cache.
 func TestOMMCache_RestoreRejectsInvalid(t *testing.T) {

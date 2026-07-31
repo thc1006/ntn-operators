@@ -38,9 +38,14 @@ func TestSelectPropagatedState(t *testing.T) {
 	states := []ntnv1alpha1.PropagatedState{
 		{NoradID: 100, ECEF: ntnv1alpha1.EphemerisECEF{PosX: 1}},
 		{NoradID: 200, ECEF: ntnv1alpha1.EphemerisECEF{PosX: 2}},
+		{NoradID: 100000, ECEF: ntnv1alpha1.EphemerisECEF{PosX: 3}}, // CelesTrak 100000+ six-digit catalog
 	}
 	if got := selectPropagatedState(states, new(200)); got == nil || got.NoradID != 200 {
 		t.Fatalf("by-noradID selection failed: %+v", got)
+	}
+	// A six-digit NORAD (CelesTrak exhausted the 5-digit space in 2026-07) must select cleanly.
+	if got := selectPropagatedState(states, new(100000)); got == nil || got.NoradID != 100000 {
+		t.Fatalf("six-digit NORAD selection failed: %+v", got)
 	}
 	if got := selectPropagatedState(states, nil); got == nil || got.NoradID != 100 {
 		t.Fatalf("nil selector should pick first: %+v", got)
