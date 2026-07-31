@@ -25,6 +25,10 @@ make ko-build    # Build container image with ko (local)
 4. **Observable** — custom Prometheus metrics for all domain events
 5. **GitOps-ready** — all config is YAML, ArgoCD/Flux friendly
 
+## Architecture Decisions
+
+Architecture decisions are recorded in [`docs/adr/`](docs/adr/README.md), the single authoritative source for what each decision is, its status, and what supersedes it. Read the index before proposing or changing a design. Follow [`docs/adr/ADR_STYLE_GUIDE.md`](docs/adr/ADR_STYLE_GUIDE.md) when adding or amending an ADR, and run `make adr-lint` to validate.
+
 ## Pull Request Guidelines
 
 - Run `make lint && make test` before opening a PR
