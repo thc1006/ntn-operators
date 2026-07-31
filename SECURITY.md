@@ -35,6 +35,7 @@ This project implements the following security practices:
 - **Namespace isolation**: Controllers enforce that provider operations stay within the CR's own namespace
 - **CEL CRD validation**: Server-side validation rules (URL scheme, lat/lon range, credential requirements) without webhook infrastructure
 - **Secret management**: SpaceTrack credentials read from K8s Secrets with a minimal RBAC of `secrets:get` only — an uncached, per-request read. The operator holds no `list` or `watch` on Secrets.
+- **Credential-reference authorization** (opt-in, `credentialRefPolicy.enable`): a `ValidatingAdmissionPolicy` requiring the principal who writes an `NTNCellConfig` to hold `get` on the Secret its `spec.provider.remoteControl.tls.secretName` references. The operator reads that Secret with its own privilege and presents it to a CR-author-chosen endpoint, so without this a principal who can write the CR but not read the Secret can still cause it to be used — a confused deputy (#251, ADR-0009). Enforced inside kube-apiserver, so it needs no webhook and grants the operator no extra RBAC. **Off by default**: enabling it is a real tightening, so run it with `validationActions: [Warn, Audit]` first. Complements the admin endpoint allow-list (`--remote-control-allowed-endpoint-hosts`), which constrains the destination rather than the reference.
 - **Read-only filesystem**: Container runs with `readOnlyRootFilesystem: true`
 - **Non-root execution**: Container runs as UID 65532 (distroless nonroot)
 - **Minimal capabilities**: All Linux capabilities are dropped

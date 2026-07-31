@@ -116,6 +116,36 @@ metrics:
   # Metrics server port
   port: 8443
 
+## Admission policy closing the remoteControl.tls confused deputy (#251, ADR-0009).
+## Requires the principal writing an NTNCellConfig to hold `get` on the Secret its
+## spec.provider.remoteControl.tls.secretName references — the operator reads that Secret
+## with its own cluster-wide privilege and presents it to a CR-author-chosen endpoint, so
+## without this a principal who can write the CR but not read the Secret can still use it.
+##
+## Runs inside kube-apiserver as a ValidatingAdmissionPolicy: no webhook, no serving
+## certificate, and the operator gains no extra RBAC. Needs Kubernetes >= 1.30 (this chart
+## already requires >= 1.31).
+##
+## Default OFF because it is a real tightening: any existing NTNCellConfig whose author
+## cannot read the referenced Secret will fail its NEXT write (the policy gates admission,
+## so objects already stored are untouched until updated). Turn it on once you have checked
+## who writes these CRs. Start with validationActions [Warn, Audit] to find violators
+## without breaking them, then move to [Deny].
+##
+credentialRefPolicy:
+  enable: false
+  # Deny | Warn | Audit — combine as needed, e.g. [Warn, Audit] for a dry run.
+  validationActions:
+    - Deny
+  # Fail is correct here: a policy that cannot evaluate must not silently permit a
+  # privilege-borrowing reference.
+  failurePolicy: Fail
+  # Optional: limit the policy to selected namespaces, e.g.
+  #   namespaceSelector:
+  #     matchLabels:
+  #       ntn.operators.dev/multi-tenant: "true"
+  namespaceSelector: {}
+
 ## Cert-manager integration for TLS certificates.
 ## Required for the metrics endpoint certificates.
 ##

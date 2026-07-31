@@ -1,6 +1,6 @@
 # ADR 0009 — Confused-deputy boundary for remoteControl.tls credential reads
 
-- Status: **Accepted** (interim endpoint allow-list shipped here); full per-CR authorization **deferred**
+- Status: **Accepted**, **amended 2026-07-31** — see [Amendment](#amendment-2026-07-31--the-deferral-rationale-was-wrong). The interim endpoint allow-list stands; the deferral of the full per-CR authorization does **not**.
 - Date: 2026-07-31
 - Deciders: @thc1006
 - Relates to: #219 (label/type opt-in gate), #251 (this confused-deputy follow-up), the N-12 runtime TLS/bearer/mTLS push. Builds on the existing SSRF allow-list (`--prometheus-allowed-endpoint-hosts`, `--ephemeris-allowed-private-hosts`) and `pkg/netutil.EndpointAllowlist`.
@@ -46,3 +46,45 @@ Two-part, matching the actual (same-namespace, low-adoption) shape of the proble
 ## Testing
 
 `TestPushEphemerisUpdateIfNeeded_RemoteControlEndpointAllowlist` pins all four arms: a credentialed push to a non-allowlisted endpoint is refused (`RemoteControlConfigInvalid`, `errRemoteControlEndpointNotAllowed`) **and the provider is never called** (the credential does not leave the operator) — the refused case provisions **no** Secret, so getting the endpoint error (rather than credential-unavailable) proves the endpoint is checked before the Secret read (no oracle); an allowlisted credentialed push proceeds; an empty allow-list permits any endpoint (opt-in); and a plaintext push is never gated. Mutation-verified by neutering the `rc.TLS != nil` check (the attacker-endpoint case then pushes).
+
+---
+
+## Amendment 2026-07-31 — the deferral rationale was wrong
+
+The Rationale bullet **"SAR needs infrastructure we do not have yet"** is incorrect, and with it the decision to defer the full boundary. It reads:
+
+> There is no admission webhook in the operator today; a SAR check requires the requester identity (`req.UserInfo`), which a reconcile does not carry — only a validating webhook does. That is real infrastructure (serving cert, `failurePolicy`, envtest wiring) and should be a deliberate, separately-reviewed step, not bundled here.
+
+**A validating webhook is not the only thing that carries the requester identity.** `ValidatingAdmissionPolicy` — GA since Kubernetes 1.30, and this chart already requires `>=1.31` — evaluates CEL *inside kube-apiserver*, and its CEL environment exposes the Kubernetes **authorizer library**. The exact check this ADR wanted can be written declaratively:
+
+```cel
+authorizer.group('').resource('secrets')
+  .namespace(request.namespace)
+  .name(object.spec.provider.remoteControl.tls.secretName)
+  .check('get').allowed()
+```
+
+None of the deferred cost is real for this route: no webhook deployment, **no serving certificate**, no `failurePolicy` plumbing beyond a field, and — importantly — **the operator gains no new RBAC**, because the API server performs the authorization check rather than the controller. A reconcile-time SAR would have needed `create subjectaccessreviews`; this needs nothing.
+
+### Verified, not assumed
+
+Checked end-to-end against a live Kubernetes **1.36.3** cluster using the artifact this chart now ships (not a hand-written approximation), with a ServiceAccount holding `ntncellconfigs` write and **no** `secrets get`:
+
+| Case | Result |
+|---|---|
+| tenant without `secrets get`, CR references a labelled credential | **Forbidden** by the policy |
+| same tenant after being granted `get` on that Secret | created |
+| same tenant, **plaintext** CR (no `remoteControl.tls`) | created — correctly ungated |
+| tenant without `secrets get`, **UPDATE** of an existing credentialed CR | **Forbidden** |
+
+### Revised decision
+
+1. The interim endpoint allow-list **stands** and is still worth having: it constrains the *destination*, which is orthogonal to who may *reference* the credential, and it protects the CRs that already exist.
+2. The per-CR authorization boundary ships as an **opt-in chart artifact** (`credentialRefPolicy.enable`, default `false`), because turning it on is a real tightening: the policy gates admission, so stored objects are untouched until their next write, and an operator should first run it with `validationActions: [Warn, Audit]` to find violators.
+3. What remains deferred is only the **default**: flipping `credentialRefPolicy.enable` to `true`, once adoption is understood. That is a much smaller open question than "build webhook infrastructure".
+
+### What this does NOT solve
+
+- **Objects already stored** are not re-validated; the policy applies on their next write.
+- **A privileged writer acting for someone else** — a GitOps controller or CI identity with broad rights — passes the check, because the authorized principal is whoever submits the object. This is inherent to authorization-at-admission and would be equally true of a webhook; where tenants submit through such a pipeline, the pipeline is the trust boundary.
+- The `patch`-without-`get` labelling vector from #219 is unchanged: this gates *who may reference* a labelled Secret, not who may label one.

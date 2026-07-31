@@ -139,6 +139,25 @@ jobs:
           { [ -n "$lease" ] && [ "$lease" -le 15 ]; } || { echo "FAIL: leaderLeaseDuration='$lease's exceeds the pinned 15s HA failover budget"; exit 1; }
           echo "leaderLeaseDuration=${lease}s (<= 15s HA budget) OK"
 
+      # #251 / ADR-0009: the credential-reference admission policy must be OFF by default (turning
+      # it on is a real tightening) and, when on, must carry the authorizer check that IS the
+      # boundary. A render that silently dropped the authorizer expression would look installed
+      # while authorizing nothing, so assert the expression itself, not just the object count.
+      - name: Verify credential-ref admission policy (default off, authorizer present when on)
+        run: |
+          set -euo pipefail
+          H=./bin/helm
+          off=$($H template t ./dist/chart | grep -c '^kind: ValidatingAdmissionPolicy' || true)
+          [ "$off" = "0" ] || { echo "FAIL: credentialRefPolicy must be opt-in; default render produced $off policies"; exit 1; }
+          on=$($H template t ./dist/chart --set credentialRefPolicy.enable=true \
+                 -s templates/admission/credential-ref-policy.yaml)
+          echo "$on" | grep -q 'kind: ValidatingAdmissionPolicy$' || { echo "FAIL: policy not rendered when enabled"; exit 1; }
+          echo "$on" | grep -q 'kind: ValidatingAdmissionPolicyBinding$' || { echo "FAIL: binding not rendered when enabled"; exit 1; }
+          echo "$on" | grep -q "authorizer.group('').resource('secrets')" || { echo "FAIL: the authorizer check is missing — the policy would authorize nothing"; exit 1; }
+          echo "$on" | grep -q "check('get').allowed()" || { echo "FAIL: the authorizer check does not assert 'get' is allowed"; exit 1; }
+          echo "$on" | grep -q 'failurePolicy: Fail' || { echo "FAIL: failurePolicy must default to Fail"; exit 1; }
+          echo "credential-ref policy OK (off by default; authorizer check present when enabled)"
+
       # #230 item 1: the active-passive HA topology the design relies on was never asserted structurally.
       # A drift that dropped the soft anti-affinity, changed the default replica count, misaligned the PDB
       # selector (so it stops selecting the manager pods → minAvailable silently protects nothing), or picked
