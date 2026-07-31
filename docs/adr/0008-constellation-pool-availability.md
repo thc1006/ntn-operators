@@ -9,7 +9,8 @@ supersedes: []
 superseded_by: []
 implementation:
   - "https://github.com/thc1006/ntn-operators/pull/346"
-tracking: []
+tracking:
+  - "https://github.com/thc1006/ntn-operators/issues/348"
 ---
 
 # ADR 0008 — Model satellite-path contact opportunity at constellation-pool level
