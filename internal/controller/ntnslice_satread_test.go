@@ -182,7 +182,7 @@ func TestReconcile_UnknownSatellite_ResetsStreakKeepsDwell(t *testing.T) {
 	key := client.ObjectKeyFromObject(nsObj)
 	// Seed a confirmation + recovery streak AND a dwell clock from an earlier reliable window.
 	dwell := fixedNow.Add(-30 * time.Second)
-	r.storeFlapState(key, nsObj.UID, slice.AntiFlapState{
+	r.storeFlapState(key, nsObj.UID, nsObj.Generation, slice.AntiFlapState{
 		RecoveryObservedAt:  fixedNow.Add(-200 * time.Second),
 		ConsecutiveDegraded: 2,
 		LastSwitchback:      dwell,
@@ -192,7 +192,7 @@ func TestReconcile_UnknownSatellite_ResetsStreakKeepsDwell(t *testing.T) {
 		t.Fatalf("reconcile: %v", err)
 	}
 
-	st := r.loadFlapState(key, nsObj.UID)
+	st := r.loadFlapState(key, nsObj.UID, nsObj.Generation)
 	if !st.RecoveryObservedAt.IsZero() {
 		t.Errorf("recovery clock must reset when satellite availability is unknown (H2), got %v", st.RecoveryObservedAt)
 	}
@@ -265,7 +265,7 @@ func TestReconcile_MetricsUnreliableSatelliteKnown_ResetsStreakKeepsDwell(t *tes
 
 	key := client.ObjectKeyFromObject(nsObj)
 	dwell := fixedNow.Add(-30 * time.Second)
-	r.storeFlapState(key, nsObj.UID, slice.AntiFlapState{
+	r.storeFlapState(key, nsObj.UID, nsObj.Generation, slice.AntiFlapState{
 		RecoveryObservedAt:  fixedNow.Add(-200 * time.Second),
 		ConsecutiveDegraded: 2,
 		LastSwitchback:      dwell,
@@ -275,7 +275,7 @@ func TestReconcile_MetricsUnreliableSatelliteKnown_ResetsStreakKeepsDwell(t *tes
 		t.Fatalf("reconcile: %v", err)
 	}
 
-	st := r.loadFlapState(key, nsObj.UID)
+	st := r.loadFlapState(key, nsObj.UID, nsObj.Generation)
 	if !st.RecoveryObservedAt.IsZero() {
 		t.Errorf("recovery clock must reset on unreliable metrics with a known satellite (H2), got %v", st.RecoveryObservedAt)
 	}
