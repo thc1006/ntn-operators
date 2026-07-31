@@ -180,9 +180,16 @@ var _ = Describe("GroundStationLifecycle Controller", func() {
 			Expect(k8sCond).NotTo(BeNil())
 			Expect(k8sCond.Status).To(Equal(metav1.ConditionTrue))
 
+			// AntennaReady must NOT claim True: nothing probes the antenna, and a present
+			// Node says nothing about antenna lock, tracking or motor faults (#68). Unknown
+			// is what the API conventions reserve for "cannot determine".
 			antCond := meta.FindStatusCondition(gs.Status.Conditions, ntnv1alpha1.ConditionAntennaReady)
 			Expect(antCond).NotTo(BeNil())
-			Expect(antCond.Status).To(Equal(metav1.ConditionTrue))
+			Expect(antCond.Status).To(Equal(metav1.ConditionUnknown),
+				"a healthy Node must not be reported as a healthy antenna")
+			Expect(antCond.Reason).To(Equal("NoAntennaProbe"))
+			Expect(antCond.Message).To(ContainSubstring("#68"),
+				"the condition should point the reader at the tracked work, not just say Unknown")
 		})
 	})
 

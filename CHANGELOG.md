@@ -233,6 +233,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`AntennaReady` no longer claims `True` for an antenna nobody measured.** The condition was set
+  unconditionally to `True` / `AntennaOperational` / "Antenna system operational" whenever the backing
+  Node existed — the code comment said `// AntennaReady: simulated as True when node exists.` Nothing
+  probes antenna lock, tracking state, motor faults or misalignment (#68), so that asserted a hardware
+  fact that was never observed, and alerting built on it was permanently green for the wrong reason.
+  It now reports `Unknown` with reason `NoAntennaProbe` and a message naming #68 — which is exactly
+  what the Kubernetes API conventions reserve `Unknown` for: *the controller is unable to determine
+  the status*. This also makes the condition consistent with its sibling in the same function:
+  `RFLinkHealthy` is already set only when `spec.monitoringEndpoint` gives it something real to check,
+  and removed otherwise. The condition constants are now documented so `Unknown` is discoverable from
+  the API rather than only from the README.
+
 - **Kubernetes libraries bumped to v0.36.3 (K8s 1.36.3).** `k8s.io/api`, `k8s.io/client-go`, and the
   transitive `k8s.io/apiextensions-apiserver` / `k8s.io/apiserver` / `k8s.io/component-base` /
   `k8s.io/kms` are now v0.36.3 (`k8s.io/apimachinery` was already there), aligning the whole k8s.io
@@ -632,6 +644,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (#220 C4).
 
 ### Upgrade notes
+
+- **`AntennaReady` flips from `True` to `Unknown`** (reason `NoAntennaProbe`). Nothing inside the
+  operator consumes this condition — `Phase` is derived from Node readiness and resource pressure, not
+  from `AntennaReady` — so behaviour is unchanged. What changes is what you see: the
+  `ntn_operators_ground_station_health{condition="AntennaReady"}` gauge goes from `1` to `-1`
+  (the existing Unknown encoding), and any dashboard or alert that treated `AntennaReady=True` as an
+  antenna health signal will stop showing green. That signal never meant what it appeared to mean;
+  it only ever meant the Node object existed. Alerts keyed on `== 0` (False) are unaffected.
 
 - **The ConfigMap name of an NTNCellConfig whose name exceeds ~243 characters changes.** The
   disambiguating hash suffix appended to an over-long name widened from 32 bits (8 hex chars) to

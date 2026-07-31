@@ -176,10 +176,24 @@ type GroundStationLifecycleStatus struct {
 }
 
 // Condition types for GroundStationLifecycle.
+//
+// Only the conditions backed by an actual measurement ever report True or False. Where the
+// operator has no way to observe the thing, it reports Unknown (or omits the condition)
+// rather than guessing — per the API conventions, Unknown means "the controller is unable
+// to determine the status", and an absent condition reads the same way.
 const (
-	ConditionAntennaReady     = "AntennaReady"
-	ConditionRFLinkHealthy    = "RFLinkHealthy"
-	ConditionK8sNodeReady     = "K8sNodeReady"
+	// ConditionAntennaReady reports antenna readiness. It is currently ALWAYS Unknown
+	// (reason NoAntennaProbe): nothing measures antenna lock, tracking state, motor faults
+	// or misalignment, so a Node being present says nothing about the antenna. A real probe
+	// is tracked in issue #68; until it lands, do NOT build alerting that treats this as a
+	// hardware health signal.
+	ConditionAntennaReady = "AntennaReady"
+	// ConditionRFLinkHealthy reflects the optional spec.monitoringEndpoint HTTP check.
+	// It is REMOVED when no endpoint is configured, because there is then nothing to report.
+	ConditionRFLinkHealthy = "RFLinkHealthy"
+	// ConditionK8sNodeReady mirrors the backing Node's Ready condition.
+	ConditionK8sNodeReady = "K8sNodeReady"
+	// ConditionFirmwareUpToDate tracks the firmware lifecycle.
 	ConditionFirmwareUpToDate = "FirmwareUpToDate"
 )
 
