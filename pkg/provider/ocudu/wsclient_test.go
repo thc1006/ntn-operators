@@ -380,17 +380,91 @@ func TestPushNTNConfigUpdate_WSS_RefusesRedirectDowngrade(t *testing.T) {
 	if err == nil {
 		t.Fatal("a handshake that 302-redirects must fail, not be followed")
 	}
-	// And it must be classified PERMANENT (a refused redirect is a config/attack, not a
-	// transient blip) so the reconciler does not tight-requeue it every minute.
+	// And it must be classified as a slow self-heal (a refused redirect is a proxy/config
+	// problem, not a transient blip) so the reconciler polls for the fix instead of either
+	// tight-requeuing every minute or giving up on the cell forever.
 	var we *wsError
-	if !errors.As(err, &we) || we.retryable() {
-		t.Fatalf("a refused-redirect handshake must be non-retryable (permanent), got %v", err)
+	if !errors.As(err, &we) || we.retryPolicy() != wsRetrySlow {
+		t.Fatalf("a refused-redirect handshake must poll slowly (wsRetrySlow), got %v", err)
 	}
 	mu.Lock()
 	leaked := plaintextSawAuth
 	mu.Unlock()
 	if leaked {
 		t.Fatal("SECURITY: the bearer Authorization header was sent to the plaintext redirect target")
+	}
+}
+
+// A non-101 handshake response must be classified by what actually fixes it, not by the
+// 3xx/4xx band alone. 408/425 ask for the same request again (RFC 9110 §15.5.9, RFC 8470
+// §5.2) and stay on the tight cadence; every other refusal — a redirect, 401/403 after a
+// credential rotation, 429 from a proxy, a plain 4xx — is fixed by external state that no
+// controller watch observes, so it polls. NOTHING in this range may be "never retry":
+// that is reserved for failures whose fix bumps the generation and re-triggers reconcile.
+func TestPushNTNConfigUpdate_HandshakeStatusRetryPolicy(t *testing.T) {
+	for _, tc := range []struct {
+		status int
+		want   wsRetryPolicy
+		why    string
+	}{
+		{http.StatusMovedPermanently, wsRetrySlow, "301: never followed, but the proxy rule behind it can be fixed"},
+		{http.StatusFound, wsRetrySlow, "302: same as 301"},
+		{http.StatusTemporaryRedirect, wsRetrySlow, "307: same as 301"},
+		{http.StatusPermanentRedirect, wsRetrySlow, "308: same as 301"},
+		{http.StatusBadRequest, wsRetrySlow, "400: the gNB/proxy is external state, not a watched spec field"},
+		{http.StatusUnauthorized, wsRetrySlow, "401: a rotated credential must be picked up without a spec edit"},
+		{http.StatusForbidden, wsRetrySlow, "403: an auth policy change must be picked up without a spec edit"},
+		{http.StatusNotFound, wsRetrySlow, "404: the remote_control route can come back when the gNB restarts"},
+		{http.StatusMethodNotAllowed, wsRetrySlow, "405: a proxy that strips Upgrade can be reconfigured"},
+		{http.StatusRequestTimeout, wsRetryTight, "408: RFC 9110 §15.5.9 — the client MAY repeat the request"},
+		{http.StatusTooEarly, wsRetryTight, "425: RFC 8470 §5.2 — retry once the early-data replay risk is gone"},
+		{http.StatusTooManyRequests, wsRetrySlow, "429: transient, but hammering at 1/min is exactly what it forbids"},
+		{http.StatusInternalServerError, wsRetryTight, "500: a server-side blip is the transient case"},
+		{http.StatusServiceUnavailable, wsRetryTight, "503: same as 500"},
+	} {
+		t.Run(http.StatusText(tc.status), func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(tc.status)
+			}))
+			t.Cleanup(srv.Close)
+
+			target := provider.ResolvedRemoteControl{Endpoint: strings.TrimPrefix(srv.URL, "http://")}
+			env, _ := buildNTNConfigUpdate(ecefRuntimeUpdate())
+			err := pushNTNConfigUpdate(context.Background(), target, env)
+			if err == nil {
+				t.Fatalf("HTTP %d is not a WebSocket upgrade; the dial must fail", tc.status)
+			}
+			var we *wsError
+			if !errors.As(err, &we) {
+				t.Fatalf("want a *wsError, got %T: %v", err, err)
+			}
+			if got := we.retryPolicy(); got != tc.want {
+				t.Errorf("HTTP %d retryPolicy = %d, want %d — %s", tc.status, got, tc.want, tc.why)
+			}
+			if we.retryPolicy() == wsRetryNever {
+				t.Errorf("HTTP %d must never be classified wsRetryNever: no spec edit can fix external state", tc.status)
+			}
+		})
+	}
+}
+
+// The policy must survive the provider boundary: PushRuntimeUpdate collapses a *wsError into
+// a sentinel, and a refused handshake has to arrive as ErrRuntimePushRetryLater — NOT as
+// ErrRuntimePushRejected, which the reconciler treats as "no requeue, ever".
+func TestPushRuntimeUpdate_RefusedHandshakeIsRetryLater(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	t.Cleanup(srv.Close)
+
+	p := &Provider{}
+	target := provider.ResolvedRemoteControl{Endpoint: strings.TrimPrefix(srv.URL, "http://")}
+	err := p.PushRuntimeUpdate(context.Background(), target, ecefRuntimeUpdate())
+	if !errors.Is(err, provider.ErrRuntimePushRetryLater) {
+		t.Fatalf("a 401 handshake must surface ErrRuntimePushRetryLater, got %v", err)
+	}
+	if errors.Is(err, provider.ErrRuntimePushRejected) {
+		t.Fatal("a 401 handshake must NOT be permanent: no spec edit rotates the credential, so the cell would never retry")
 	}
 }
 
@@ -402,8 +476,11 @@ func TestPushNTNConfigUpdate_Rejected(t *testing.T) {
 	if !errors.As(err, &we) || we.kind != wsRejected {
 		t.Fatalf("expected wsRejected, got %v", err)
 	}
-	if we.retryable() {
-		t.Error("a gNB rejection must not be retryable")
+	// A post-handshake {"error":...} is the one rejection that IS permanent: the gNB read the
+	// payload and refused its content, and the fix is a spec edit whose generation bump
+	// re-triggers reconcile on its own.
+	if we.retryPolicy() != wsRetryNever {
+		t.Error("a gNB payload rejection must not requeue: its fix is a watched spec change")
 	}
 }
 
@@ -417,8 +494,8 @@ func TestPushNTNConfigUpdate_UnparseableReply(t *testing.T) {
 	if !errors.As(err, &we) {
 		t.Fatalf("expected a *wsError for an unparseable reply, got %v", err)
 	}
-	if !we.retryable() {
-		t.Error("an unparseable reply should be retryable, not a silent success")
+	if we.retryPolicy() != wsRetryTight {
+		t.Error("an unparseable reply should retry tightly, not be a silent success")
 	}
 }
 
@@ -430,8 +507,8 @@ func TestPushNTNConfigUpdate_Unreachable(t *testing.T) {
 	if !errors.As(err, &we) || we.kind != wsUnreachable {
 		t.Fatalf("expected wsUnreachable, got %v", err)
 	}
-	if !we.retryable() {
-		t.Error("an unreachable gNB should be retryable")
+	if we.retryPolicy() != wsRetryTight {
+		t.Error("an unreachable gNB should retry tightly")
 	}
 }
 
@@ -448,8 +525,8 @@ func TestPushNTNConfigUpdate_PayloadTooLarge(t *testing.T) {
 	if !errors.As(err, &we) || we.kind != wsPayloadTooLarge {
 		t.Fatalf("expected wsPayloadTooLarge, got %v", err)
 	}
-	if we.retryable() {
-		t.Error("an oversized frame is a permanent error, not retryable")
+	if we.retryPolicy() != wsRetryNever {
+		t.Error("an oversized frame is permanent: only a spec edit shrinks it, and that is watched")
 	}
 }
 
@@ -523,8 +600,11 @@ func TestProviderPushRuntimeUpdate_UnreachableIsRetryable(t *testing.T) {
 	if errors.Is(err, provider.ErrRuntimePushRejected) {
 		t.Fatalf("an unreachable endpoint must be retryable, not permanent: %v", err)
 	}
+	if errors.Is(err, provider.ErrRuntimePushRetryLater) {
+		t.Fatalf("an unreachable endpoint is transient, not a refused handshake: %v", err)
+	}
 	var we *wsError
-	if !errors.As(err, &we) || !we.retryable() {
-		t.Fatalf("expected a retryable wsError (wsUnreachable), got %v", err)
+	if !errors.As(err, &we) || we.retryPolicy() != wsRetryTight {
+		t.Fatalf("expected a tight-retry wsError (wsUnreachable), got %v", err)
 	}
 }

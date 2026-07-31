@@ -338,6 +338,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   references and its `EnsureOwnership` back-fill used `SetControllerReference` in a single `Update`,
   so a genuine leftover has either our controller reference or none. A ConfigMap owned by a different controller, an unlabeled foreign object, and a
   labeled-but-empty impostor are still left untouched, and the skip is now logged. Mutation-tested.
+- **A refused runtime-push handshake no longer strands the cell until an unrelated heartbeat.** Every
+  non-101 HTTP response to the gNB `remote_control` WebSocket handshake in the 3xx/4xx band was
+  classified `ProviderPushRejected`, which is in the never-requeue set — a set whose contract is "the
+  fix is a WATCHED change" (a spec edit bumps the generation; an ephemeris refresh brings a new
+  marker). Nothing about a refused handshake meets that contract: a 401/403 after a credential
+  rotation, a 429 from a proxy, a redirect from a misconfigured ingress and a 404 from a restarting
+  gNB are all fixed by state the operator does not watch, so such a cell only ever recovered if the
+  referenced SatelliteEphemeris happened to fan out its ~3-minute heartbeat — and never once that
+  producer stalled. These now report a new `RemoteEndpointRejected` reason and self-heal on the same
+  bounded 5-minute poll the local-credential path already uses (`RemoteControlCredentialUnavailable`, #282).
+  `408 Request Timeout` and `425 Too Early` are additionally re-classified as transient, since both
+  explicitly invite the client to repeat the same request (RFC 9110 §15.5.9, RFC 8470 §5.2). Redirects
+  are still never followed — the bearer-downgrade guard is unchanged — they are merely retried later
+  instead of being written off. A post-handshake gNB `{"error":...}` stays permanent: there the fix
+  really is a spec edit.
 
 - **SGP4 propagation failures are now surfaced, not silently dropped.** A tracked element set that
   passed the epoch checks but failed `PropagateToECEF` (OMM→TLE conversion, propagation, or ECEF range

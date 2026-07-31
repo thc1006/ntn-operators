@@ -94,6 +94,14 @@ var ErrRuntimeUnsupported = errors.New("runtime NTN config push is not supported
 // (unlike a transient unreachable-endpoint error). Test with errors.Is.
 var ErrRuntimePushRejected = errors.New("runtime NTN config push permanently rejected")
 
+// ErrRuntimePushRetryLater wraps a runtime-push failure that a tight retry cannot fix
+// but that is NOT permanent: the remote endpoint refused the handshake (a refused
+// redirect, 401/403, 429, a 4xx from the gNB or a proxy in front of it). The fix is
+// external state — a rotated credential, a corrected proxy rule, a restarted gNB —
+// which no controller watch observes, so the caller must poll at a low rate instead of
+// waiting for an event that will never arrive. Test with errors.Is.
+var ErrRuntimePushRetryLater = errors.New("runtime NTN config push refused by the remote endpoint")
+
 // ErrConfigMapNotOwned is returned by ApplyCellConfig when a ConfigMap with the
 // provider's deterministic name already exists but is NOT controller-owned by the
 // applying CR (a name collision with a foreign/user-created object, or a leftover

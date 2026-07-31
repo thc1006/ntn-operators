@@ -602,10 +602,45 @@ func TestEphemerisPushShouldRequeue(t *testing.T) {
 	}
 	for _, reason := range []string{
 		ephemerisReasonGetFailed, ephemerisReasonProviderPushFailed, ephemerisReasonPushFailed,
+		ephemerisReasonRemoteControlCredential, ephemerisReasonRemoteControlEndpointNotAllowed,
+		ephemerisReasonRemoteEndpointRejected,
 	} {
 		if !ephemerisPushShouldRequeue(reason) {
-			t.Errorf("%s SHOULD requeue (transient)", reason)
+			t.Errorf("%s SHOULD requeue (its fix is either transient or unwatched)", reason)
 		}
+	}
+}
+
+// A refused handshake (401/403/429/redirect/4xx) must self-heal on the slow poll, not join the
+// never-requeue set. The endpoint said no, so a per-minute retry is wrong — but the fix is a
+// credential, a proxy rule or the gNB itself, none of which this controller watches, so "never
+// retry" would leave the cell dependent on an unrelated SatelliteEphemeris heartbeat fan-out and
+// permanently stranded if the producer stalls. Mirrors RemoteControlCredentialUnavailable (#282).
+func TestPushEphemerisUpdateIfNeeded_RefusedHandshakeSelfHeals(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := ntnv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme: %v", err)
+	}
+	eph := ephWithPropagatedState(time.Now().Add(time.Hour).UnixMilli())
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(eph).Build()
+	r := &NTNCellConfigReconciler{Client: c}
+	mock := &provider.MockProvider{
+		RuntimeErr: fmt.Errorf("%w: handshake rejected: HTTP 401", provider.ErrRuntimePushRetryLater),
+	}
+	cc := ccWithRemoteControl()
+
+	pushed, _, err := r.pushEphemerisUpdateIfNeeded(context.Background(), cc, &cc.Spec, mock)
+	if pushed {
+		t.Fatal("expected pushed=false on a refused handshake")
+	}
+	if got := ephemerisPushConditionReason(err); got != ephemerisReasonRemoteEndpointRejected {
+		t.Fatalf("expected RemoteEndpointRejected reason, got %q", got)
+	}
+	if !ephemerisPushShouldRequeue(ephemerisReasonRemoteEndpointRejected) {
+		t.Error("a refused handshake must self-requeue: its fix is unwatched, so no requeue strands the cell")
+	}
+	if got := ephemerisPushRequeueInterval(ephemerisReasonRemoteEndpointRejected); got != remoteControlConfigRequeue {
+		t.Errorf("refused-handshake requeue = %v, want %v (a slow self-heal poll, not a tight retry)", got, remoteControlConfigRequeue)
 	}
 }
 

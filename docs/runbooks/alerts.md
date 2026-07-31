@@ -111,6 +111,7 @@ sum by (namespace, config, reason) (increase(ntn_operators_ephemeris_push_errors
 |---|---|---|
 | `ProviderPushFailed` | dial/write/read to the gNB failed | transient (operator requeues) |
 | `ProviderPushRejected` | gNB replied `{"error":...}` — bad config | permanent, clears on spec/ephemeris change |
+| `RemoteEndpointRejected` | the WebSocket handshake was refused (redirect, 401/403, 429, 4xx) | self-heals on a 5m poll — the fix is outside the cluster |
 | `EphemerisRefNotFound` / `EphemerisGetFailed` | the referenced SatelliteEphemeris is missing/unreadable | fix the ref, not the gNB |
 | `EphemerisPayloadMissing` | no propagated state to push yet | upstream ephemeris problem |
 | `EphemerisStale` | the propagated state is stale/expired | see **NTNEphemerisEpochStale** |
@@ -193,6 +194,12 @@ kubectl debug -n "$OPERATOR_NS" -it "$POD" --profile=restricted \
   is the exact failure the I-27 egress config prevents).
 - `ProviderPushRejected` — read the gNB log for the rejection; correct the
   NTNCellConfig spec (commonly `siWindowPosition`, or an ephemeris field).
+- `RemoteEndpointRejected` — the endpoint answered the handshake with a non-101.
+  Read the HTTP status in the condition message: 401/403 means the
+  `remoteControl.tls` credential no longer matches the gNB (rotate the Secret —
+  the operator picks it up on the next poll, no CR edit needed); 429 means a
+  proxy is rate-limiting; a redirect or 404/405 means a proxy in front of the gNB
+  is not passing `Upgrade` through. The cell retries every 5m on its own.
 - `EphemerisRefNotFound` / `PayloadMissing` — fix `spec.cellID` and the
   referenced SatelliteEphemeris; then wait for a refresh to re-trigger.
 

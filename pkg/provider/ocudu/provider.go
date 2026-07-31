@@ -429,11 +429,18 @@ func (p *Provider) PushRuntimeUpdate(
 		return fmt.Errorf("%w: %v", provider.ErrRuntimePushRejected, err)
 	}
 	err = pushNTNConfigUpdate(ctx, target, env)
-	// Classify: gNB rejection / oversized / marshal are permanent (no tight
-	// requeue); an unreachable endpoint is transient and returned as-is.
+	// Classify: gNB rejection / oversized / marshal are permanent (their fix is a
+	// watched spec change); a refused handshake needs a slow poll (its fix is
+	// unwatched external state); an unreachable endpoint is transient, returned as-is.
 	var we *wsError
-	if errors.As(err, &we) && !we.retryable() {
-		return fmt.Errorf("%w: %v", provider.ErrRuntimePushRejected, we)
+	if errors.As(err, &we) {
+		switch we.retryPolicy() {
+		case wsRetrySlow:
+			return fmt.Errorf("%w: %v", provider.ErrRuntimePushRetryLater, we)
+		case wsRetryNever:
+			return fmt.Errorf("%w: %v", provider.ErrRuntimePushRejected, we)
+		case wsRetryTight:
+		}
 	}
 	return err
 }
