@@ -153,14 +153,18 @@ spec:
           annotations:
             summary: "Durable OMM cache is not being written for {{`{{ $labels.namespace }}`}}/{{`{{ $labels.ephemeris }}`}}"
             description: "Durable OMM cache writes have been failing for 30m (result={{`{{ $labels.result }}`}}). Live propagation is unaffected, but a restart or leader failover will have no last-good element set to fall back on. skipped_oversize means the tracked set exceeds the ConfigMap bound; failed means the write itself is erroring."
-        # A restore that is refused is worse than one that never happens: the object is there, and
-        # something about it does not check out. refused_identity on the legacy name is how a
-        # pre-ADR-0007 truncation collision surfaces; refused_digest means corruption or a hand edit.
+        # A restore that is refused is worse than one that never happens: the object is there and
+        # does not check out. Scoped to the CORRUPTION reasons on purpose — restore runs on every
+        # reconcile while the in-memory cache is cold, so a legitimate delete/recreate whose old
+        # cache object still exists increments refused_identity once per reconcile until the first
+        # successful fetch, and during the upstream outage this feature exists for that is a lot of
+        # reconciles. Alerting on it would fire hardest exactly when the operator is behaving
+        # correctly. refused_identity stays a diagnostic signal; the runbook has the query.
         - alert: NTNOMMCacheRestoreRefused
-          expr: increase(ntn_operators_omm_cache_restore_total{result=~"refused_.*"}[1h]) > 0
+          expr: increase(ntn_operators_omm_cache_restore_total{result=~"refused_digest|refused_parse"}[1h]) > 0
           labels:
             severity: warning
           annotations:
-            summary: "Durable OMM cache restore refused for {{`{{ $labels.namespace }}`}}/{{`{{ $labels.ephemeris }}`}}"
-            description: "A persisted OMM cache was found but refused ({{`{{ $labels.result }}`}}). The cold start had to proceed without it. refused_identity: the object belongs to a different CR generation or source (under the legacy name, a truncation collision); refused_digest: corrupt or hand-edited payload; refused_parse: the stored element set no longer validates."
+            summary: "Durable OMM cache payload is unusable for {{`{{ $labels.namespace }}`}}/{{`{{ $labels.ephemeris }}`}}"
+            description: "A persisted OMM cache was found but its payload does not check out ({{`{{ $labels.result }}`}}), so the cold start proceeded without it. refused_digest: the stored payload does not match its recorded SHA-256 (corrupt, truncated or hand-edited); refused_parse: it no longer validates as an OMM set. Delete the object and let the next fetch repersist. Identity refusals are excluded from this alert on purpose — see the runbook."
 {{- end }}

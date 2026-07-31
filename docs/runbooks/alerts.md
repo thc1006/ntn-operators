@@ -484,22 +484,29 @@ sum by (namespace, ephemeris, result) (increase(ntn_operators_omm_cache_persist_
 
 ## NTNOMMCacheRestoreRefused
 
-**Fires when** `increase(ntn_operators_omm_cache_restore_total{result=~"refused_.*"}[1h]) > 0`.
+**Fires when** `increase(ntn_operators_omm_cache_restore_total{result=~"refused_digest|refused_parse"}[1h]) > 0`.
 Labels: `namespace`, `ephemeris`, `result`.
 
-**Impact.** A persisted cache **was found and rejected**, so the cold start proceeded
-without it. That is strictly worse than having no cache: something wrote an object
-that does not check out. A plain miss is deliberately not counted — every first-ever
-reconcile misses — so every sample here is a real refusal.
+**`refused_identity` is deliberately excluded.** Restore runs on *every* reconcile while
+the in-memory cache is cold, so a legitimate delete/recreate whose old cache object
+still exists increments that counter once per reconcile until the first successful
+fetch — and during the upstream outage this feature exists for, that is a lot of
+reconciles. An alert on it would fire hardest precisely when the operator is behaving
+correctly. Query it instead:
+
+```promql
+# Sustained across many cold reconciles, under the LEGACY name, is the pre-ADR-0007
+# truncation collision. A burst right after a delete/recreate is expected.
+sum by (namespace, ephemeris) (increase(ntn_operators_omm_cache_restore_total{result="refused_identity"}[6h]))
+```
+
+**Impact.** A persisted cache **was found and its payload rejected**, so the cold start
+proceeded without it. Something wrote an object that does not check out. A plain miss
+is deliberately not counted — every first-ever reconcile misses — so every sample here
+is a real refusal.
 
 **Diagnose by `result`.**
 
-- `refused_identity` — the object's owner UID or fetch identity does not match the
-  live CR. Expected exactly once after a delete/recreate or a `spec.source` edit, and
-  then never again. **Sustained, under the legacy name, this is a pre-ADR-0007
-  truncation collision**: two SatelliteEphemeris objects sharing a 243-character name
-  prefix mapped onto one ConfigMap, and the loser could never persist. The hashed name
-  fixes new writes; confirm with the object list below.
 - `refused_digest` — the stored payload does not match its recorded SHA-256. Corrupt,
   truncated, or hand-edited. Never restored, by design.
 - `refused_parse` — the payload no longer validates as an OMM set (upstream schema
@@ -511,12 +518,11 @@ kubectl get cm -n <ns> -l ntn.operators.dev/omm-cache=true \
   -o custom-columns=NAME:.metadata.name,OWNER-UID:.metadata.annotations.ntn\.operators\.dev/omm-owner-uid
 ```
 
-**Mitigate.** No action is needed for a one-off after a delete/recreate — the next
-successful fetch rewrites the cache under the hashed name. For `refused_digest` or
-`refused_parse`, delete the offending ConfigMap and let the next fetch repersist. For
-sustained `refused_identity`, check for two CRs with a shared long name prefix; after
-this release each gets a distinct hashed name, so the collision clears on the next
-persist.
+**Mitigate.** Delete the offending ConfigMap and let the next fetch repersist — the
+payload is unusable either way, and nothing else reads it. For sustained
+`refused_identity` (not alerted, see above), check for two CRs sharing a long name
+prefix; after this release each gets a distinct hashed name, so the collision clears on
+the next persist.
 
 ---
 

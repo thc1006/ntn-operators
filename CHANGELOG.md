@@ -74,8 +74,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ntn_operators_omm_cache_restore_total{result}` and `ntn_operators_omm_cache_restored_age_seconds`,
   plus alerts `NTNOMMCachePersistFailing` and `NTNOMMCacheRestoreRefused` with runbook entries. A
   plain restore *miss* is deliberately not counted — every first-ever reconcile misses, so it would
-  drown the refusals, which are the signal. Sustained `refused_identity` under the legacy cache name
-  is how the truncation collision above surfaces on a cluster that has not yet repersisted.
+  drown the refusals, which are the signal. `refused_identity` is counted but deliberately **not**
+  alerted: restore runs on every reconcile while the in-memory cache is cold, so a legitimate
+  delete/recreate whose old cache object still exists increments it once per reconcile until the
+  first successful fetch — an alert would fire hardest exactly when the operator is behaving
+  correctly. Sustained `refused_identity` under the legacy cache name is how the truncation
+  collision above surfaces on a cluster that has not yet repersisted; the runbook carries the query.
 
 - **End-to-end coverage for the credentialed runtime push (`wss://` + bearer + mTLS), closing #329.**
   Everything under #206, #295, #297, #313, #318 and #322 was unit-tested against `httptest`, which
