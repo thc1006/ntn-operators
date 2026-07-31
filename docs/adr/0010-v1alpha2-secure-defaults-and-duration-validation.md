@@ -42,9 +42,12 @@ deliberate plaintext from a forgotten block.
 ### `refreshInterval`
 
 The Go field is `metav1.Duration` and the generated schema already declares
-`format: duration`. Kubernetes maps an OpenAPI string with `format: duration` to the CEL
-`duration` type. A field-scoped rule therefore compares `self` directly with a
-duration literal; it must not parse `self` a second time.
+`format: duration`. Kubernetes exposes a `format: duration` field to CEL as a
+`duration`, so a field-scoped rule compares it against a duration literal.
+Verified on the K8s 1.36.3 baseline: **both** `self >= duration('2h')` and the
+wrapped `duration(self) >= duration('2h')` compile and enforce the bound. The
+existing duration rules in `ntnslice_types.go` use the explicit `duration(self)`
+form, so v1alpha2 matches that for one consistent style across the API.
 
 The current comment that CEL cannot represent or compare this duration is no
 longer a valid design premise for the chart’s supported Kubernetes baseline.
@@ -107,7 +110,7 @@ v1alpha2 adds:
 
 ```go
 // +kubebuilder:validation:Format=duration
-// +kubebuilder:validation:XValidation:rule="self >= duration('2h') && self <= duration('24h')",message="refreshInterval must be between 2h and 24h"
+// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('2h') && duration(self) <= duration('24h')",message="refreshInterval must be between 2h and 24h"
 RefreshInterval metav1.Duration `json:"refreshInterval"`
 ```
 
