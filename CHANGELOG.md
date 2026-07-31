@@ -56,6 +56,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   **`NTNConfigApplyNotReady`** (`== 0` for 15m) and a runbook section keyed by the `ConfigApplied`
   reason ship with it. Keyed `namespace`+`config` like `ephemeris_push_ready`, deliberately without
   the counter's `provider` label so a provider-type edit cannot strand a stale series at 0.
+- **Opt-in `ValidatingAdmissionPolicy` closing the `remoteControl.tls` confused deputy (#251).** The
+  operator reads the Secret named by `spec.provider.remoteControl.tls.secretName` with its own
+  cluster-wide `secrets get` and presents it to a CR-author-controlled endpoint, so a principal
+  holding only `ntncellconfig-editor-role` — which grants NTNCellConfig write but **no** `secrets
+  get` — could cause a credential it cannot read to be used. #300 shipped an admin endpoint
+  allow-list as the interim control, constraining the *destination*; this adds the actual
+  authorization boundary on the *reference*: the principal writing the CR must hold `get` on the
+  Secret. ADR-0009 deferred this on the grounds that a SAR needs admission-webhook infrastructure;
+  that rationale was wrong and the ADR is amended — `ValidatingAdmissionPolicy` (GA in Kubernetes
+  1.30; this chart already requires >= 1.31) evaluates CEL inside kube-apiserver and exposes the
+  authorizer library, so there is no webhook, no serving certificate, and **no new operator RBAC**
+  (the API server performs the check). Verified end-to-end on a live 1.36.3 cluster with the shipped
+  artifact: an unprivileged tenant is refused on CREATE and on UPDATE, is allowed once granted `get`,
+  and a plaintext push is never gated. **Off by default** (`credentialRefPolicy.enable=false`) —
+  enabling it is a real tightening, and stored objects are only re-checked on their next write, so
+  start with `validationActions: [Warn, Audit]`.
 
 - **Durable conditional-GET validators for the OMM cache (polite restart/failover refetch).** The
   CelesTrak fetcher already used an in-memory `If-None-Match` conditional GET, but the ETag was lost on
