@@ -100,7 +100,8 @@ func TestCheckSatelliteAvailability_PassesPredictedGate(t *testing.T) {
 			}
 			cli := fake.NewClientBuilder().WithScheme(sch).WithObjects(eph, slice).Build()
 			r := &NTNSliceReconciler{Client: cli, Scheme: sch}
-			available, known, _ := r.checkSatelliteAvailability(context.Background(), slice, now)
+			ev := r.checkSatelliteAvailability(context.Background(), slice, now)
+			available, known := ev.available, ev.known
 			if available != tc.wantAvailable || known != tc.wantKnown {
 				t.Fatalf("checkSatelliteAvailability = (available=%v, known=%v), want (available=%v, known=%v)",
 					available, known, tc.wantAvailable, tc.wantKnown)

@@ -322,40 +322,25 @@ func (r *NTNSliceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	var pending []deferredEvent
 	metrics, observedAt, qualityReliable := r.readPathQuality(ctx, ns, now, &pending)
 
-	// Step 3: Check satellite availability via SatelliteEphemeris. satelliteKnown is
-	// false on a transient ephemeris read error — availability is unknown and the
-	// current path is held rather than switched off satellite (I-13).
-	satelliteAvailable, satelliteKnown, satelliteDetail := r.checkSatelliteAvailability(ctx, ns, now)
+	// Step 3: Check satellite availability via SatelliteEphemeris. known is false when
+	// availability cannot be determined (transient read error, or predictions not current) —
+	// the current path is held rather than switched off satellite (I-13).
+	contact := r.checkSatelliteAvailability(ctx, ns, now)
+	satelliteAvailable, satelliteKnown, satelliteDetail := contact.available, contact.known, contact.detail
 	log.V(1).Info("satellite availability", "available", satelliteAvailable, "known", satelliteKnown,
-		"ephemerisRef", ns.Spec.SatellitePath.EphemerisRef, "detail", satelliteDetail)
+		"reason", contact.reason, "ephemerisRef", ns.Spec.SatellitePath.EphemerisRef, "detail", satelliteDetail)
 
 	// FailoverReady tracks whether quality-driven failover can operate. When metrics
 	// are reliable it reflects satellite availability; when they are not,
 	// setMetricsDegraded already set it Unknown (with the metrics-failure reason), so
 	// we must not overwrite it here.
 	if qualityReliable {
-		var c metav1.Condition
-		switch {
-		case !satelliteKnown:
-			// Transient ephemeris read failure: cannot determine the failover target.
-			c = metav1.Condition{Status: metav1.ConditionUnknown, Reason: "SatelliteReadFailed",
-				Message: "Satellite availability unknown: transient SatelliteEphemeris read error; holding current path"}
-		case satelliteAvailable:
-			// Contact OPPORTUNITY, not delivered slice service: a fresh deliverable member is
-			// overhead (see checkSatelliteAvailability), but service still needs the absent
-			// slice-to-cell binding. "SatelliteAvailable" overstated that (ADR-0008).
-			c = metav1.Condition{Status: metav1.ConditionTrue, Reason: "ConstellationMemberAvailable",
-				Message: "A fresh deliverable constellation member has an active pass window (contact opportunity, not slice service)"}
-		default:
-			msg := satelliteDetail
-			if msg == "" {
-				msg = "No satellite pass window active or SatelliteEphemeris not found"
-			}
-			c = metav1.Condition{Status: metav1.ConditionFalse, Reason: "SatelliteUnavailable", Message: msg}
-		}
-		c.Type = ntnv1alpha1.ConditionFailoverReady
+		c := failoverReadyCondition(contact)
 		c.ObservedGeneration = ns.Generation
 		meta.SetStatusCondition(&ns.Status.Conditions, c)
+		// Written and cleared with the condition it explains, never independently: a candidate
+		// outliving its condition is worse than none, because it reads as current evidence.
+		ns.Status.ContactCandidate = contact.candidate
 
 		// I-10: surface any trigger whose metric has no configured source — it is
 		// armed-but-dead (never fires against the healthy placeholder). Only
@@ -823,29 +808,92 @@ func (r *NTNSliceReconciler) reportInertTriggers(ns *ntnv1alpha1.NTNSlice, inert
 // pass are genuine orbital signals (known=true): the former has no ephemeris to
 // serve the satellite path, the latter is a real end-of-pass, and both may switch
 // back off satellite.
+// failoverReadyCondition maps one contact evaluation to the condition. Extracted from Reconcile
+// rather than nolint-ed past the complexity gate: the reason set is the part of this controller most
+// likely to grow again, and it is easier to review as a table than as another arm inside a 200-line
+// reconcile.
+func failoverReadyCondition(contact contactEval) metav1.Condition {
+	c := metav1.Condition{Type: ntnv1alpha1.ConditionFailoverReady, Reason: contact.reason}
+	switch {
+	case !contact.known:
+		// Availability cannot be determined: either the ephemeris read failed transiently or its
+		// predictions are not current. Distinct reasons — one is an apiserver problem, the other a
+		// producer that has not finished recomputing, and an operator chasing the wrong one wastes
+		// the outage (ADR-0008).
+		c.Status = metav1.ConditionUnknown
+		c.Message = "Satellite availability unknown: transient SatelliteEphemeris read error; holding current path"
+		if contact.reason == reasonPredictionUnavailable {
+			c.Message = "Satellite availability unknown: the referenced SatelliteEphemeris has no current pass " +
+				"prediction (PassesPredicted is not True); holding current path"
+		}
+	case contact.available:
+		// Contact OPPORTUNITY, not delivered slice service: a fresh deliverable member is overhead
+		// (see checkSatelliteAvailability), but service still needs the absent slice-to-cell
+		// binding. "SatelliteAvailable" overstated that (ADR-0008).
+		c.Status = metav1.ConditionTrue
+		c.Message = "A fresh deliverable constellation member has an active pass window " +
+			"(contact opportunity, not slice service)"
+	default:
+		// One reason per cause. "SatelliteUnavailable" covered a dangling ephemerisRef, an empty
+		// sky and a stale-but-overhead member alike; those need different actions, and only the
+		// last one self-heals on the next successful fetch (ADR-0008).
+		c.Status = metav1.ConditionFalse
+		c.Message = contact.detail
+		if c.Message == "" {
+			c.Message = "No satellite pass window active or SatelliteEphemeris not found"
+		}
+	}
+	return c
+}
+
+// FailoverReady reasons. These are API-visible strings: dashboards and alerts key on them, so a
+// change here belongs in the CHANGELOG (ADR-0008).
+const (
+	reasonConstellationMemberAvailable = "ConstellationMemberAvailable"
+	reasonNoActiveContact              = "NoActiveContact"
+	reasonAllCandidatesStale           = "AllCandidatesStale"
+	reasonEphemerisRefNotFound         = "EphemerisRefNotFound"
+	reasonPredictionUnavailable        = "PredictionUnavailable"
+	reasonSatelliteReadFailed          = "SatelliteReadFailed"
+)
+
+// contactEval is one evaluation of constellation contact opportunity: the verdict, the reason
+// behind it, and — when there is one — the member it was decided on. Returned as a struct rather
+// than three bare values because the candidate must travel with the verdict that produced it.
+type contactEval struct {
+	available bool   // a deliverable member is overhead
+	known     bool   // the verdict is determinable at all; false means hold the current path
+	reason    string // one of the constants above
+	detail    string // human-facing message, empty when the caller has a better one
+	candidate *ntnv1alpha1.ContactCandidate
+}
+
 func (r *NTNSliceReconciler) checkSatelliteAvailability(
 	ctx context.Context,
 	ns *ntnv1alpha1.NTNSlice,
 	now time.Time,
-) (available, known bool, detail string) {
+) contactEval {
 	eph := &ntnv1alpha1.SatelliteEphemeris{}
 	key := client.ObjectKey{Namespace: ns.Namespace, Name: ns.Spec.SatellitePath.EphemerisRef}
 	if err := r.Get(ctx, key, eph); err != nil {
 		if apierrors.IsNotFound(err) {
 			// Dangling ephemerisRef: no ephemeris to drive the satellite path. This
 			// is a genuine (persistent) signal, not a transient blip — allow switchback.
-			return false, true, "referenced SatelliteEphemeris not found"
+			return contactEval{known: true, reason: reasonEphemerisRefNotFound,
+				detail: "referenced SatelliteEphemeris not found"}
 		}
 		// Transient read error: availability is UNKNOWN. Do NOT force a switch off
 		// satellite; the caller holds the current path (I-13).
 		logf.FromContext(ctx).Error(err, "failed to get SatelliteEphemeris; holding current path",
 			"ref", ns.Spec.SatellitePath.EphemerisRef)
-		return false, false, ""
+		return contactEval{reason: reasonSatelliteReadFailed}
 	}
 
-	// Availability is CONSTELLATION-POOL-level: the path is available if ANY tracked member is overhead
-	// and deliverable. NTNSlice is not pinned to a NORAD (satellitePath has none), because LEO members
-	// hand over; which member a cell broadcasts is NTNCellConfig.ephemerisNoradID's concern. See ADR-0008.
+	// Availability is CONSTELLATION-POOL-level: the path has a contact opportunity if ANY tracked
+	// member is overhead and deliverable. NTNSlice is not pinned to a NORAD (satellitePath has none),
+	// because LEO members hand over; which member a cell broadcasts is NTNCellConfig.ephemerisNoradID's
+	// concern. This is an opportunity, NOT delivered service — nothing here proves the slice's serving
+	// cell is configured for the chosen member, which is why the reason says so (ADR-0008).
 	//
 	// The pass windows are trustworthy ONLY when the producer's most recent prediction SUCCEEDED. If
 	// PassesPredicted is not True — absent (never predicted), Unknown (recomputing after an input change
@@ -854,7 +902,7 @@ func (r *NTNSliceReconciler) checkSatelliteAvailability(
 	// completes the SatelliteEphemeris(producer) -> NTNSlice(consumer) pass-status contract (ADR 0006 /
 	// #234): the producer leaves PassesPredicted=True only while NextPassWindows reflects the live inputs.
 	if !meta.IsStatusConditionTrue(eph.Status.Conditions, ntnv1alpha1.ConditionPassesPredicted) {
-		return false, false, ""
+		return contactEval{reason: reasonPredictionUnavailable}
 	}
 
 	// An active pass makes the satellite AVAILABLE unless its backing element set is present but too
@@ -870,13 +918,16 @@ func (r *NTNSliceReconciler) checkSatelliteAvailability(
 	// noradID field stays available: a window and its propagatedState are produced together from one
 	// reconcile's OMMs, so "window but no state" is not the stale-outage case this closes.
 	stale := make(map[int]bool)
+	states := make(map[int]*ntnv1alpha1.PropagatedState, len(eph.Status.PropagatedStates))
 	for i := range eph.Status.PropagatedStates {
 		ps := &eph.Status.PropagatedStates[i]
+		states[ps.NoradID] = ps
 		if sourceEpochFresh(now, time.UnixMilli(ps.SourceEpochUnixMs)) != nil {
 			stale[ps.NoradID] = true
 		}
 	}
-	activeDeliverable, activeStale := false, false
+	var best *ntnv1alpha1.PassWindow
+	activeStale := false
 	for i := range eph.Status.NextPassWindows {
 		pw := &eph.Status.NextPassWindows[i]
 		if pw.AOS.After(now) || !pw.LOS.After(now) {
@@ -884,19 +935,61 @@ func (r *NTNSliceReconciler) checkSatelliteAvailability(
 		}
 		if pw.NoradID != 0 && stale[pw.NoradID] {
 			activeStale = true // overhead but its element set is too stale to deliver
-		} else {
-			activeDeliverable = true
+			continue
+		}
+		if best == nil || earlierLOSCandidate(pw, best) {
+			best = pw
 		}
 	}
 	switch {
-	case activeDeliverable:
-		return true, true, "" // a deliverable satellite is overhead (fresh wins over any stale sibling)
+	case best != nil:
+		// A deliverable member is overhead; a stale sibling does not block it (ADR-0008 invariant).
+		return contactEval{available: true, known: true, reason: reasonConstellationMemberAvailable,
+			candidate: buildContactCandidate(best, states[best.NoradID])}
 	case activeStale:
-		return false, true, fmt.Sprintf(
-			"satellite overhead but its element set is stale beyond the %s freshness bound — not deliverable to the gNB", maxEpochAge)
+		return contactEval{known: true, reason: reasonAllCandidatesStale, detail: fmt.Sprintf(
+			"satellite overhead but its element set is stale beyond the %s freshness bound — not deliverable to the gNB", maxEpochAge)}
 	default:
-		return false, true, "no active satellite pass window"
+		return contactEval{known: true, reason: reasonNoActiveContact, detail: "no active satellite pass window"}
 	}
+}
+
+// earlierLOSCandidate is the deterministic tie-break: soonest LOS first, so the reported member is
+// the one about to hand over rather than an arbitrary map-order pick. Equal LOS falls back to
+// stable identifiers (NORAD, then ground station), because a candidate that flips between two
+// equally valid members on every reconcile is status churn pretending to be information.
+func earlierLOSCandidate(a, b *ntnv1alpha1.PassWindow) bool {
+	if !a.LOS.Time.Equal(b.LOS.Time) {
+		return a.LOS.Time.Before(b.LOS.Time)
+	}
+	if a.NoradID != b.NoradID {
+		return a.NoradID < b.NoradID
+	}
+	return a.GroundStation < b.GroundStation
+}
+
+// buildContactCandidate records what the decision was made on. validUntil is the EARLIER of LOS and
+// the element set aging out: reporting LOS alone would promise a window the runtime push refuses to
+// use before it closes.
+func buildContactCandidate(pw *ntnv1alpha1.PassWindow, ps *ntnv1alpha1.PropagatedState) *ntnv1alpha1.ContactCandidate {
+	c := &ntnv1alpha1.ContactCandidate{
+		NoradID:         pw.NoradID,
+		Satellite:       pw.Satellite,
+		GroundStation:   pw.GroundStation,
+		AOS:             pw.AOS.DeepCopy(),
+		LOS:             pw.LOS.DeepCopy(),
+		SelectionReason: "EarliestLOS",
+	}
+	validUntil := pw.LOS.Time
+	if ps != nil {
+		c.SourceEpochUnixMs = ps.SourceEpochUnixMs
+		c.PropagatedEpochUnixMs = ps.EpochUnixMs
+		if expiry := time.UnixMilli(ps.SourceEpochUnixMs).Add(maxEpochAge); expiry.Before(validUntil) {
+			validUntil = expiry
+		}
+	}
+	c.ValidUntil = &metav1.Time{Time: validUntil.UTC()}
+	return c
 }
 
 // now returns the current time (injectable for testing).

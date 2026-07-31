@@ -367,7 +367,6 @@ spec:
             - message: satellitePath.priority must be 'failover'
               rule: self.satellitePath.priority == 'failover'
           status:
-            description: NTNSliceStatus defines the observed state of NTNSlice.
             properties:
               activePathType:
                 description: activePathType is the currently active network path.
@@ -448,6 +447,68 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              contactCandidate:
+                description: |-
+                  contactCandidate is the constellation member behind the current FailoverReady
+                  evaluation: which satellite, seen from which ground station, over which window, and
+                  on element data of what age. FailoverReady alone says a contact opportunity exists
+                  but not which one, so an operator cannot tell a healthy handover between members
+                  from the same member re-evaluated, and cannot audit the decision after the fact.
+
+                  It is a CONTACT OPPORTUNITY, not delivered service: nothing here says the slice's
+                  serving cell is configured for this member. Cleared when no candidate can be proven,
+                  so a stale entry can never outlive the condition it explains (ADR-0008).
+                properties:
+                  aos:
+                    description: aos and los bound the pass window this candidate
+                      is currently inside.
+                    format: date-time
+                    type: string
+                  groundStation:
+                    description: |-
+                      groundStation is the GroundStationLifecycle this window was predicted for. A pass is
+                      only meaningful relative to an observer, so a candidate without one is not auditable.
+                    type: string
+                  los:
+                    format: date-time
+                    type: string
+                  noradID:
+                    description: noradID is the canonical satellite identity. satellite
+                      is a display label only.
+                    type: integer
+                  propagatedEpochUnixMs:
+                    description: propagatedEpochUnixMs is the future epoch the state
+                      was propagated TO.
+                    format: int64
+                    type: integer
+                  satellite:
+                    description: |-
+                      satellite is the externally sourced display name, bounded and rune-safe. Not unique:
+                      correlate on noradID.
+                    maxLength: 64
+                    type: string
+                  selectionReason:
+                    description: |-
+                      selectionReason names the rule that chose this candidate over its siblings, so the
+                      choice is reproducible from the status alone.
+                    type: string
+                  sourceEpochUnixMs:
+                    description: |-
+                      sourceEpochUnixMs is the epoch of the element set the window was propagated FROM —
+                      the age that decides deliverability, not the propagation target below. Absent when no
+                      propagatedStates entry matches noradID.
+                    format: int64
+                    type: integer
+                  validUntil:
+                    description: |-
+                      validUntil is when this candidate stops being usable: the EARLIER of the pass ending
+                      and its element set aging past the delivery freshness bound. Reporting only LOS would
+                      promise a window the runtime push would refuse to use before it closes.
+                    format: date-time
+                    type: string
+                required:
+                - noradID
+                type: object
               failoverCount:
                 description: failoverCount is the total number of failover events
                   since creation.

@@ -83,7 +83,8 @@ func TestCheckSatelliteAvailability_SourceEpochFreshnessGate(t *testing.T) {
 			cli := fake.NewClientBuilder().WithScheme(sch).WithObjects(eph, slice).Build()
 			r := &NTNSliceReconciler{Client: cli, Scheme: sch}
 
-			available, known, detail := r.checkSatelliteAvailability(context.Background(), slice, now)
+			ev := r.checkSatelliteAvailability(context.Background(), slice, now)
+			available, known, detail := ev.available, ev.known, ev.detail
 			if available != tc.wantAvailable || known != tc.wantKnown {
 				t.Fatalf("got (available=%v, known=%v), want (available=%v, known=%v); detail=%q",
 					available, known, tc.wantAvailable, tc.wantKnown, detail)
@@ -169,8 +170,11 @@ func TestReconcile_NoFailoverToStaleSatellite(t *testing.T) {
 		t.Fatalf("must NOT fail over to a stale satellite: ActivePathType=%q, want terrestrial", got)
 	}
 	cond := meta.FindStatusCondition(updated.Status.Conditions, ntnv1alpha1.ConditionFailoverReady)
-	if cond == nil || cond.Reason != "SatelliteUnavailable" || !strings.Contains(cond.Message, "stale") {
-		t.Fatalf("FailoverReady must be SatelliteUnavailable citing staleness, got %+v", cond)
+	// AllCandidatesStale, not the old catch-all SatelliteUnavailable: overhead-but-stale is the
+	// one False case that self-heals on the next successful fetch, so it must be distinguishable
+	// from an empty sky and from a dangling ephemerisRef (ADR-0008).
+	if cond == nil || cond.Reason != "AllCandidatesStale" || !strings.Contains(cond.Message, "stale") {
+		t.Fatalf("FailoverReady must be AllCandidatesStale citing staleness, got %+v", cond)
 	}
 }
 
@@ -219,7 +223,10 @@ func TestReconcile_SwitchesBackFromStaleSatellite(t *testing.T) {
 		t.Fatalf("a slice on a now-stale satellite must switch back to terrestrial: ActivePathType=%q", got)
 	}
 	cond := meta.FindStatusCondition(updated.Status.Conditions, ntnv1alpha1.ConditionFailoverReady)
-	if cond == nil || cond.Reason != "SatelliteUnavailable" || !strings.Contains(cond.Message, "stale") {
-		t.Fatalf("FailoverReady must be SatelliteUnavailable citing staleness, got %+v", cond)
+	// AllCandidatesStale, not the old catch-all SatelliteUnavailable: overhead-but-stale is the
+	// one False case that self-heals on the next successful fetch, so it must be distinguishable
+	// from an empty sky and from a dangling ephemerisRef (ADR-0008).
+	if cond == nil || cond.Reason != "AllCandidatesStale" || !strings.Contains(cond.Message, "stale") {
+		t.Fatalf("FailoverReady must be AllCandidatesStale citing staleness, got %+v", cond)
 	}
 }

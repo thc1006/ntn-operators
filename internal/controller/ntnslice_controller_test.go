@@ -1231,7 +1231,11 @@ var _ = Describe("NTNSlice Controller", func() {
 			cond := meta.FindStatusCondition(updated.Status.Conditions, ntnv1alpha1.ConditionFailoverReady)
 			Expect(cond).NotTo(BeNil())
 			Expect(cond.Status).To(Equal(metav1.ConditionFalse))
-			Expect(cond.Reason).To(Equal("SatelliteUnavailable"))
+			// An empty sky is NoActiveContact — distinct from a stale member overhead and from a
+			// dangling ephemerisRef, which the old single SatelliteUnavailable reason conflated.
+			Expect(cond.Reason).To(Equal("NoActiveContact"))
+			Expect(updated.Status.ContactCandidate).To(BeNil(),
+				"no candidate may be reported when no member is overhead")
 		})
 	})
 

@@ -290,6 +290,53 @@ type BillingSpec struct {
 }
 
 // NTNSliceStatus defines the observed state of NTNSlice.
+// ContactCandidate is the deterministically selected constellation member behind a
+// FailoverReady evaluation. Deterministic matters: the same inputs must yield the same
+// candidate, or two controllers (or one across a restart) would report different members for
+// an unchanged constellation and the field would be worse than absent.
+type ContactCandidate struct {
+	// noradID is the canonical satellite identity. satellite is a display label only.
+	NoradID int `json:"noradID"`
+
+	// satellite is the externally sourced display name, bounded and rune-safe. Not unique:
+	// correlate on noradID.
+	// +kubebuilder:validation:MaxLength=64
+	// +optional
+	Satellite string `json:"satellite,omitempty"`
+
+	// groundStation is the GroundStationLifecycle this window was predicted for. A pass is
+	// only meaningful relative to an observer, so a candidate without one is not auditable.
+	// +optional
+	GroundStation string `json:"groundStation,omitempty"`
+
+	// aos and los bound the pass window this candidate is currently inside.
+	// +optional
+	AOS *metav1.Time `json:"aos,omitempty"`
+	// +optional
+	LOS *metav1.Time `json:"los,omitempty"`
+
+	// sourceEpochUnixMs is the epoch of the element set the window was propagated FROM —
+	// the age that decides deliverability, not the propagation target below. Absent when no
+	// propagatedStates entry matches noradID.
+	// +optional
+	SourceEpochUnixMs int64 `json:"sourceEpochUnixMs,omitempty"`
+
+	// propagatedEpochUnixMs is the future epoch the state was propagated TO.
+	// +optional
+	PropagatedEpochUnixMs int64 `json:"propagatedEpochUnixMs,omitempty"`
+
+	// validUntil is when this candidate stops being usable: the EARLIER of the pass ending
+	// and its element set aging past the delivery freshness bound. Reporting only LOS would
+	// promise a window the runtime push would refuse to use before it closes.
+	// +optional
+	ValidUntil *metav1.Time `json:"validUntil,omitempty"`
+
+	// selectionReason names the rule that chose this candidate over its siblings, so the
+	// choice is reproducible from the status alone.
+	// +optional
+	SelectionReason string `json:"selectionReason,omitempty"`
+}
+
 type NTNSliceStatus struct {
 	// activePathType is the currently active network path.
 	// +kubebuilder:validation:Enum=terrestrial;satellite;unavailable
@@ -320,6 +367,18 @@ type NTNSliceStatus struct {
 	// appliedQoS summarizes the QoS mapping in effect for the current path.
 	// +optional
 	AppliedQoS string `json:"appliedQoS,omitempty"`
+
+	// contactCandidate is the constellation member behind the current FailoverReady
+	// evaluation: which satellite, seen from which ground station, over which window, and
+	// on element data of what age. FailoverReady alone says a contact opportunity exists
+	// but not which one, so an operator cannot tell a healthy handover between members
+	// from the same member re-evaluated, and cannot audit the decision after the fact.
+	//
+	// It is a CONTACT OPPORTUNITY, not delivered service: nothing here says the slice's
+	// serving cell is configured for this member. Cleared when no candidate can be proven,
+	// so a stale entry can never outlive the condition it explains (ADR-0008).
+	// +optional
+	ContactCandidate *ContactCandidate `json:"contactCandidate,omitempty"`
 
 	// appliedEncryption is the encryption level in effect for the current path.
 	// +optional

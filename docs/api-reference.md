@@ -1914,7 +1914,13 @@ valid IPv4 (so "999.999.999.999:1" is rejected, not treated as a hostname), and
 that a DNS host obeys the RFC 1035 length limits (whole name <= 253, each label
 1-63) — a permanent admission error beats a silent tight-requeue on a mistyped
 value. The pattern alone cannot bound the label/host length (a regex quantifier
-would, but the DNS-1123 label form makes that unreadable), so CEL carries it.<br/>
+would, but the DNS-1123 label form makes that unreadable), so CEL carries it.
+
+Shape validation does NOT restrict WHICH host the operator will dial; the endpoint is
+CR-author-controlled, so confining it is an admin egress control (SSRF), not a CRD rule.
+Set the operator flag --remote-control-allowed-endpoint-hosts to permit only sanctioned
+gNB hosts for the runtime push (empty = any, backward compatible), and pair it with the
+operator egress NetworkPolicy (config/network-policy/allow-egress-traffic.yaml). See #299.<br/>
           <br/>
             <i>Validations</i>:<li>int(self.substring(self.lastIndexOf(':') + 1)) >= 1 && int(self.substring(self.lastIndexOf(':') + 1)) <= 65535: endpoint port must be between 1 and 65535</li><li>!self.startsWith('[') || isIP(self.substring(1, self.lastIndexOf(']'))): a bracketed endpoint host must be a valid IP address</li><li>!self.substring(0, self.lastIndexOf(':')).matches('^[0-9.]+$') || isIP(self.substring(0, self.lastIndexOf(':'))): an all-numeric endpoint host must be a valid IPv4 address</li><li>self.startsWith('[') || (self.substring(0, self.lastIndexOf(':')).size() <= 253 && self.substring(0, self.lastIndexOf(':')).split('.').all(l, l.size() >= 1 && l.size() <= 63)): endpoint host must be a DNS name of at most 253 characters with each dot-separated label 1-63 characters</li>
         </td>
@@ -2338,7 +2344,7 @@ with terrestrial-satellite failover policy.<br/>
         <td><b><a href="#ntnslicestatus">status</a></b></td>
         <td>object</td>
         <td>
-          NTNSliceStatus defines the observed state of NTNSlice.<br/>
+          <br/>
         </td>
         <td>false</td>
       </tr></tbody>
@@ -2896,7 +2902,7 @@ security defines handover security requirements.
 
 
 
-NTNSliceStatus defines the observed state of NTNSlice.
+
 
 <table>
     <thead>
@@ -2942,6 +2948,21 @@ NTNSliceStatus defines the observed state of NTNSlice.
         <td>[]object</td>
         <td>
           conditions represent the current state of the slice.<br/>
+        </td>
+        <td>false</td>
+      </tr><tr>
+        <td><b><a href="#ntnslicestatuscontactcandidate">contactCandidate</a></b></td>
+        <td>object</td>
+        <td>
+          contactCandidate is the constellation member behind the current FailoverReady
+evaluation: which satellite, seen from which ground station, over which window, and
+on element data of what age. FailoverReady alone says a contact opportunity exists
+but not which one, so an operator cannot tell a healthy handover between members
+from the same member re-evaluated, and cannot audit the decision after the fact.
+
+It is a CONTACT OPPORTUNITY, not delivered service: nothing here says the slice's
+serving cell is configured for this member. Cleared when no candidate can be proven,
+so a stale entry can never outlive the condition it explains (ADR-0008).<br/>
         </td>
         <td>false</td>
       </tr><tr>
@@ -3056,6 +3077,114 @@ with respect to the current state of the instance.<br/>
           <br/>
             <i>Format</i>: int64<br/>
             <i>Minimum</i>: 0<br/>
+        </td>
+        <td>false</td>
+      </tr></tbody>
+</table>
+
+
+### NTNSlice.status.contactCandidate
+<sup><sup>[↩ Parent](#ntnslicestatus)</sup></sup>
+
+
+
+contactCandidate is the constellation member behind the current FailoverReady
+evaluation: which satellite, seen from which ground station, over which window, and
+on element data of what age. FailoverReady alone says a contact opportunity exists
+but not which one, so an operator cannot tell a healthy handover between members
+from the same member re-evaluated, and cannot audit the decision after the fact.
+
+It is a CONTACT OPPORTUNITY, not delivered service: nothing here says the slice's
+serving cell is configured for this member. Cleared when no candidate can be proven,
+so a stale entry can never outlive the condition it explains (ADR-0008).
+
+<table>
+    <thead>
+        <tr>
+            <th>Name</th>
+            <th>Type</th>
+            <th>Description</th>
+            <th>Required</th>
+        </tr>
+    </thead>
+    <tbody><tr>
+        <td><b>noradID</b></td>
+        <td>integer</td>
+        <td>
+          noradID is the canonical satellite identity. satellite is a display label only.<br/>
+        </td>
+        <td>true</td>
+      </tr><tr>
+        <td><b>aos</b></td>
+        <td>string</td>
+        <td>
+          aos and los bound the pass window this candidate is currently inside.<br/>
+          <br/>
+            <i>Format</i>: date-time<br/>
+        </td>
+        <td>false</td>
+      </tr><tr>
+        <td><b>groundStation</b></td>
+        <td>string</td>
+        <td>
+          groundStation is the GroundStationLifecycle this window was predicted for. A pass is
+only meaningful relative to an observer, so a candidate without one is not auditable.<br/>
+        </td>
+        <td>false</td>
+      </tr><tr>
+        <td><b>los</b></td>
+        <td>string</td>
+        <td>
+          <br/>
+          <br/>
+            <i>Format</i>: date-time<br/>
+        </td>
+        <td>false</td>
+      </tr><tr>
+        <td><b>propagatedEpochUnixMs</b></td>
+        <td>integer</td>
+        <td>
+          propagatedEpochUnixMs is the future epoch the state was propagated TO.<br/>
+          <br/>
+            <i>Format</i>: int64<br/>
+        </td>
+        <td>false</td>
+      </tr><tr>
+        <td><b>satellite</b></td>
+        <td>string</td>
+        <td>
+          satellite is the externally sourced display name, bounded and rune-safe. Not unique:
+correlate on noradID.<br/>
+        </td>
+        <td>false</td>
+      </tr><tr>
+        <td><b>selectionReason</b></td>
+        <td>string</td>
+        <td>
+          selectionReason names the rule that chose this candidate over its siblings, so the
+choice is reproducible from the status alone.<br/>
+        </td>
+        <td>false</td>
+      </tr><tr>
+        <td><b>sourceEpochUnixMs</b></td>
+        <td>integer</td>
+        <td>
+          sourceEpochUnixMs is the epoch of the element set the window was propagated FROM —
+the age that decides deliverability, not the propagation target below. Absent when no
+propagatedStates entry matches noradID.<br/>
+          <br/>
+            <i>Format</i>: int64<br/>
+        </td>
+        <td>false</td>
+      </tr><tr>
+        <td><b>validUntil</b></td>
+        <td>string</td>
+        <td>
+          validUntil is when this candidate stops being usable: the EARLIER of the pass ending
+and its element set aging past the delivery freshness bound. Reporting only LOS would
+promise a window the runtime push would refuse to use before it closes.<br/>
+          <br/>
+            <i>Format</i>: date-time<br/>
         </td>
         <td>false</td>
       </tr></tbody>
