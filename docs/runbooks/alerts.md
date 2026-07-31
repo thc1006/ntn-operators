@@ -35,6 +35,7 @@ Metric → alert map:
 | `NTNEphemerisPushNotReady` | `ntn_operators_ephemeris_push_ready == 0` | 15m |
 | `NTNSliceFailoverFlapping` | `increase(ntn_operators_failover_total[15m]) > 4` | 5m |
 | `NTNConfigApplyErrors` | `increase(ntn_operators_config_apply_errors_total[15m]) > 0` | 15m |
+| `NTNConfigApplyNotReady` | `ntn_operators_config_apply_ready == 0` | 15m |
 | `NTNNoSatellitesTracked` | `ntn_operators_gp_satellite_count == 0` | 30m |
 | `NTNGPFetchNotReady` | `ntn_operators_gp_fetch_ready == 0` | 30m |
 | `NTNDeepSpaceElementsRejected` | `ntn_operators_gp_deep_space_rejected_count > 0` | 15m |
@@ -281,6 +282,45 @@ change (koffset, SIB schedule, ephemeris) never reaches the gNB's next boot.
 `ApplyFailed` / `StatusCheckFailed` Events. **Mitigate** by correcting the spec
 (a `ConfigValid=False` message names the field) or the provider target.
 **Escalate** to whoever owns the NTNCellConfig spec.
+
+---
+
+## NTNConfigApplyNotReady
+
+**Fires when** `ntn_operators_config_apply_ready == 0` for 15m. Labels:
+`namespace`, `config`. This is the durable companion to **NTNConfigApplyErrors**,
+and it covers strictly more: `ntn_operators_config_apply_errors_total` is
+incremented **only** by an `ApplyCellConfig` failure, so three other ways the
+apply can be broken increment it **zero** times and return a nil error — meaning
+neither the rate alert nor `controller_runtime_reconcile_errors_total` sees them:
+
+| `ConfigApplied` reason | What it means | Requeues? |
+|---|---|---|
+| `InternalError` | the provider registry is not configured (operator wiring bug) | 1m |
+| `UnsupportedProvider` | `spec.provider.type` is not registered — **no requeue at all**, so a rate alert could never sustain on it | no |
+| `StatusCheckFailed` | the write may have landed but the post-apply read could not verify it | 1m |
+
+**Impact.** The gNB's bootstrap ConfigMap is not known to reflect the CR. Under
+`UnsupportedProvider` nothing will retry until the spec is edited or the operator
+restarts.
+
+**Diagnose.** Read the reason off the condition — that is what distinguishes the
+three cases:
+
+```bash
+kubectl get ntncellconfig "$CONFIG" -n "$NS" \
+  -o jsonpath='{range .status.conditions[?(@.type=="ConfigApplied")]}{.status}{" "}{.reason}{" "}{.message}{"\n"}{end}'
+```
+
+**Mitigate.** `InternalError` — an operator-side wiring fault; check the
+controller logs and restart. `UnsupportedProvider` — set `spec.provider.type` to a
+registered provider (`ocudu`); the spec edit bumps the generation and re-triggers
+the reconcile immediately. `StatusCheckFailed` — check the ConfigMap named by
+`status.configMapRef` still exists and carries `geo_ntn.yml`; the next reconcile
+re-applies it, so a persistent one points at an API-access problem.
+
+**Escalate** to the operator owner for `InternalError`, to whoever owns the
+NTNCellConfig spec for `UnsupportedProvider`.
 
 ---
 

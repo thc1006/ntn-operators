@@ -262,6 +262,11 @@ func (r *NTNCellConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	if r.Providers == nil {
 		// Clear stale koffset but preserve ConfigMapRef for best-effort finalizer cleanup.
 		cc.Status.AppliedKoffset = 0
+		// Not ready: this branch increments no counter and returns a nil error, so the gauge
+		// is the only signal an operator can alert on (issue #216).
+		ntnmetrics.ConfigApplyReady.With(prometheus.Labels{
+			"namespace": cc.Namespace, "config": cc.Name,
+		}).Set(0)
 		meta.SetStatusCondition(&cc.Status.Conditions, metav1.Condition{
 			Type:               ntnv1alpha1.ConditionConfigApplied,
 			Status:             metav1.ConditionFalse,
@@ -277,6 +282,11 @@ func (r *NTNCellConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	if prov == nil {
 		// Clear stale koffset but preserve ConfigMapRef for best-effort finalizer cleanup.
 		cc.Status.AppliedKoffset = 0
+		// Not ready, and this branch does NOT requeue — the permanent case a rate alert can
+		// never sustain on, which is precisely why the gauge exists (issue #216).
+		ntnmetrics.ConfigApplyReady.With(prometheus.Labels{
+			"namespace": cc.Namespace, "config": cc.Name,
+		}).Set(0)
 		meta.SetStatusCondition(&cc.Status.Conditions, metav1.Condition{
 			Type:               ntnv1alpha1.ConditionConfigApplied,
 			Status:             metav1.ConditionFalse,
@@ -308,6 +318,9 @@ func (r *NTNCellConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		ntnmetrics.ConfigApplyErrorsTotal.With(prometheus.Labels{
 			"namespace": cc.Namespace, "config": cc.Name, "provider": spec.Provider.Type,
 		}).Inc()
+		ntnmetrics.ConfigApplyReady.With(prometheus.Labels{
+			"namespace": cc.Namespace, "config": cc.Name,
+		}).Set(0)
 		cc.Status.AppliedKoffset = 0
 		// A ConfigMap-ownership collision is distinct from a generic apply failure:
 		// the operator refuses to overwrite a ConfigMap it does not own.
@@ -344,6 +357,12 @@ func (r *NTNCellConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	status, err := prov.GetCellStatus(ctx, cc)
 	if err != nil {
 		log.Error(err, "failed to get cell status after apply")
+		// The write may well have landed, but we could not VERIFY it — report not-ready
+		// rather than ready, matching the Unknown condition this branch sets. Like the two
+		// branches above it increments no counter and returns a nil error.
+		ntnmetrics.ConfigApplyReady.With(prometheus.Labels{
+			"namespace": cc.Namespace, "config": cc.Name,
+		}).Set(0)
 		meta.SetStatusCondition(&cc.Status.Conditions, metav1.Condition{
 			Type:               ntnv1alpha1.ConditionConfigApplied,
 			Status:             metav1.ConditionUnknown,
@@ -358,6 +377,11 @@ func (r *NTNCellConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	}
 	cc.Status.AppliedKoffset = status.AppliedKoffset
 	cc.Status.ConfigMapRef = status.ConfigMapRef
+	// Applied AND verified — the only path that earns ready=1. This also clears a 0 left by
+	// any of the failure branches above once the cause is fixed.
+	ntnmetrics.ConfigApplyReady.With(prometheus.Labels{
+		"namespace": cc.Namespace, "config": cc.Name,
+	}).Set(1)
 
 	// Step 7: Set success condition. Capture whether it actually changed (status/
 	// reason/generation, or a new object) so the ConfigApplied event fires once per
@@ -511,6 +535,7 @@ func (r *NTNCellConfigReconciler) handleFinalizer(
 		// Release the CR's per-CR metric series on deletion so /metrics does not
 		// accumulate dead series across create/delete churn (idempotent).
 		ntnmetrics.ConfigApplyErrorsTotal.DeletePartialMatch(prometheus.Labels{"namespace": cc.Namespace, "config": cc.Name})
+		ntnmetrics.ConfigApplyReady.DeletePartialMatch(prometheus.Labels{"namespace": cc.Namespace, "config": cc.Name})
 		ntnmetrics.EphemerisPushErrorsTotal.DeletePartialMatch(prometheus.Labels{"namespace": cc.Namespace, "config": cc.Name})
 		ntnmetrics.EphemerisPushReady.DeletePartialMatch(prometheus.Labels{"namespace": cc.Namespace, "config": cc.Name})
 		if controllerutil.ContainsFinalizer(cc, finalizerName) {

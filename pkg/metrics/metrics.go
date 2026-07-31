@@ -183,6 +183,25 @@ var (
 		[]string{"namespace", "config"},
 	)
 
+	// ConfigApplyReady is 1 when the CR's NTN config is verifiably applied and 0 when any
+	// step of getting it there failed. It is the config-apply half of issue #216, whose
+	// argument applies here even more strongly than to the push path: ConfigApplyErrorsTotal
+	// is incremented ONLY by an ApplyCellConfig failure, so an unconfigured provider registry
+	// (InternalError), an unregistered provider type (UnsupportedProvider) and a failed
+	// post-apply verification (StatusCheckFailed) increment it ZERO times — and they return a
+	// nil error, so controller_runtime_reconcile_errors_total does not see them either. Those
+	// failures were invisible to every shipped alert. UnsupportedProvider additionally does
+	// not requeue, so it is exactly the permanent case a rate alert can never catch. Keyed
+	// namespace+config like EphemerisPushReady — deliberately WITHOUT the counter's provider
+	// label, so a provider-type edit cannot strand a stale series at 0 under the old value.
+	ConfigApplyReady = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "ntn_operators_config_apply_ready",
+			Help: "1 if the CR's NTN config is verifiably applied, 0 if applying or verifying it failed.",
+		},
+		[]string{"namespace", "config"},
+	)
+
 	// ReaderQueryDuration measures how long a single PromQL fetch made
 	// through a pkg/slice/metrics Reader takes, split by source
 	// ("prometheus") and outcome ("success" or "error"). A higher-level
@@ -260,6 +279,7 @@ func init() {
 		SatellitePassAvailable,
 		GroundStationHealth,
 		ConfigApplyErrorsTotal,
+		ConfigApplyReady,
 		GPFetchDuration,
 		GPSatelliteCount,
 		GPDeepSpaceRejectedCount,
