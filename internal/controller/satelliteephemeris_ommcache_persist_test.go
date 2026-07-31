@@ -12,16 +12,20 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/akhenakh/sgp4"
+	"github.com/prometheus/client_golang/prometheus"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -29,6 +33,7 @@ import (
 
 	ntnv1alpha1 "github.com/thc1006/ntn-operators/api/v1alpha1"
 	"github.com/thc1006/ntn-operators/pkg/ephemeris"
+	"github.com/thc1006/ntn-operators/pkg/metrics"
 )
 
 // ommCacheScheme is makeScheme + corev1 (the cache lives in a ConfigMap).
@@ -76,7 +81,7 @@ func TestOMMCache_PersistRestoreRoundTrip(t *testing.T) {
 
 	// The ConfigMap must exist and carry the identity/integrity metadata.
 	cm := &corev1.ConfigMap{}
-	if err := cli.Get(ctx, types.NamespacedName{Namespace: eph.Namespace, Name: ommCacheConfigMapName(eph.Name)}, cm); err != nil {
+	if err := cli.Get(ctx, types.NamespacedName{Namespace: eph.Namespace, Name: ommCacheConfigMapName(eph)}, cm); err != nil {
 		t.Fatalf("persist did not create the cache ConfigMap: %v", err)
 	}
 	if cm.Labels[ommCacheLabelKey] != ommCacheLabelValue {
@@ -158,7 +163,7 @@ func TestOMMCache_RestoreRejectsInvalid(t *testing.T) {
 
 			r.persistOMMCache(ctx, base, ommResultAt(fetchedAt), fetchKey)
 			cm := &corev1.ConfigMap{}
-			cmKey := types.NamespacedName{Namespace: base.Namespace, Name: ommCacheConfigMapName(base.Name)}
+			cmKey := types.NamespacedName{Namespace: base.Namespace, Name: ommCacheConfigMapName(base)}
 			if err := cli.Get(ctx, cmKey, cm); err != nil {
 				t.Fatalf("get cache cm: %v", err)
 			}
@@ -210,7 +215,7 @@ func TestOMMCache_PersistNoopOnIdenticalDigest(t *testing.T) {
 	cli := fake.NewClientBuilder().WithScheme(sch).WithObjects(eph).Build()
 	r := &SatelliteEphemerisReconciler{Client: cli, Scheme: sch, Recorder: events.NewFakeRecorder(50)}
 	ctx := context.Background()
-	cmKey := types.NamespacedName{Namespace: eph.Namespace, Name: ommCacheConfigMapName(eph.Name)}
+	cmKey := types.NamespacedName{Namespace: eph.Namespace, Name: ommCacheConfigMapName(eph)}
 	fetchKey := fetchInputKey(eph.Spec)
 
 	fetchedAt := time.Date(2026, 7, 30, 12, 0, 0, 0, time.UTC)
@@ -242,7 +247,7 @@ func TestOMMCache_PersistSetsOwnerRefForGC(t *testing.T) {
 
 	r.persistOMMCache(ctx, eph, ommResultAt(time.Now().UTC()), fetchInputKey(eph.Spec))
 	cm := &corev1.ConfigMap{}
-	if err := cli.Get(ctx, types.NamespacedName{Namespace: eph.Namespace, Name: ommCacheConfigMapName(eph.Name)}, cm); err != nil {
+	if err := cli.Get(ctx, types.NamespacedName{Namespace: eph.Namespace, Name: ommCacheConfigMapName(eph)}, cm); err != nil {
 		t.Fatalf("get cm: %v", err)
 	}
 	if len(cm.OwnerReferences) != 1 {
@@ -271,21 +276,60 @@ func TestOMMCache_PersistSkipsOversizePayload(t *testing.T) {
 	r.persistOMMCache(ctx, eph, result, fetchInputKey(eph.Spec))
 
 	cm := &corev1.ConfigMap{}
-	err := cli.Get(ctx, types.NamespacedName{Namespace: eph.Namespace, Name: ommCacheConfigMapName(eph.Name)}, cm)
+	err := cli.Get(ctx, types.NamespacedName{Namespace: eph.Namespace, Name: ommCacheConfigMapName(eph)}, cm)
 	if !apierrors.IsNotFound(err) {
 		t.Fatalf("oversize payload must not create a ConfigMap; got err=%v", err)
 	}
 }
 
-// TestOMMCache_ConfigMapNameTruncation proves the derived name always fits the k8s name limit.
-func TestOMMCache_ConfigMapNameTruncation(t *testing.T) {
-	short := ommCacheConfigMapName("eph-a")
-	if short != "eph-a"+ommCacheConfigMapSuffix {
-		t.Fatalf("short name = %q", short)
+// TestOMMCache_ConfigMapNameIsCollisionResistant is the ADR-0007 name invariant. The previous
+// scheme truncated to fit 253 chars, so every SatelliteEphemeris sharing a 243-character prefix
+// landed on ONE ConfigMap: the UID annotation stopped a wrong restore, but the losers kept
+// overwriting an object their own restore then refused, silently losing restart continuity.
+func TestOMMCache_ConfigMapNameIsCollisionResistant(t *testing.T) {
+	// 250 chars: a name the apiserver ACCEPTS (DNS-1123 subdomain caps at 253) that is still long
+	// enough to truncate, since the legacy scheme cut at 253-len("-omm-cache") = 243. Using a
+	// 266-char name here would prove the property for an object that can never exist, and would
+	// make the bug read as theoretical when it is reachable with a perfectly valid CR.
+	stem := strings.Repeat("x", 244)
+	a := newOMMCacheEph(stem+"-alpha", "uid-a")
+	b := newOMMCacheEph(stem+"-bravo", "uid-b")
+	for _, eph := range []*ntnv1alpha1.SatelliteEphemeris{a, b} {
+		if errs := validation.IsDNS1123Subdomain(eph.Name); len(errs) > 0 {
+			t.Fatalf("this test's own CR name %d chars is not a legal object name (%v) — the collision "+
+				"it demonstrates would be unreachable in production", len(eph.Name), errs)
+		}
 	}
-	long := ommCacheConfigMapName(strings.Repeat("x", 300))
-	if len(long) > maxConfigMapNameLen {
-		t.Fatalf("truncated name len = %d, exceeds %d", len(long), maxConfigMapNameLen)
+
+	if legacyOMMCacheConfigMapName(a.Name) != legacyOMMCacheConfigMapName(b.Name) {
+		t.Fatal("the legacy scheme no longer collides on these inputs, so this test proves nothing " +
+			"about the bug it exists for — pick names that share a 243-character prefix")
+	}
+	if ommCacheConfigMapName(a) == ommCacheConfigMapName(b) {
+		t.Errorf("two long names still map to one ConfigMap %q: one of them can never persist",
+			ommCacheConfigMapName(a))
+	}
+
+	// Same name, different object: a delete/recreate must not inherit its predecessor's cache.
+	recreated := newOMMCacheEph(a.Name, "uid-a-recreated")
+	if ommCacheConfigMapName(a) == ommCacheConfigMapName(recreated) {
+		t.Error("a recreated CR reuses the old object's name; the UID gate is then the only guard")
+	}
+
+	// Same object, twice: the name has to be stable or restore can never find what persist wrote.
+	if ommCacheConfigMapName(a) != ommCacheConfigMapName(newOMMCacheEph(a.Name, a.UID)) {
+		t.Error("name is not deterministic")
+	}
+
+	for _, eph := range []*ntnv1alpha1.SatelliteEphemeris{a, b, newOMMCacheEph("eph-a", "uid-s"),
+		newOMMCacheEph(strings.Repeat("y", 242)+".z", "uid-dot")} {
+		name := ommCacheConfigMapName(eph)
+		if len(name) > maxConfigMapNameLen {
+			t.Errorf("name for %q is %d chars, over the %d limit", eph.Name, len(name), maxConfigMapNameLen)
+		}
+		if errs := validation.IsDNS1123Subdomain(name); len(errs) > 0 {
+			t.Errorf("name %q is not a valid object name: %v", name, errs)
+		}
 	}
 }
 
@@ -344,7 +388,7 @@ func TestReconcile_ColdStartRestoresAndPropagatesDuringOutage(t *testing.T) {
 		t.Fatalf("warm phase never contacted upstream")
 	}
 	cm := &corev1.ConfigMap{}
-	if err := cli.Get(ctx, types.NamespacedName{Namespace: eph.Namespace, Name: ommCacheConfigMapName(eph.Name)}, cm); err != nil {
+	if err := cli.Get(ctx, types.NamespacedName{Namespace: eph.Namespace, Name: ommCacheConfigMapName(eph)}, cm); err != nil {
 		t.Fatalf("warm phase did not persist the cache ConfigMap: %v", err)
 	}
 
@@ -401,4 +445,179 @@ func getResourceVersion(t *testing.T, cli client.Client, key types.NamespacedNam
 		t.Fatalf("get cm %s: %v", key, err)
 	}
 	return cm.ResourceVersion
+}
+
+// seedLegacyCache writes a pre-ADR-0007 (truncated-name) cache object for eph.
+func seedLegacyCache(t *testing.T, ctx context.Context, cli client.Client,
+	eph *ntnv1alpha1.SatelliteEphemeris, fetchKey string, uid types.UID) *corev1.ConfigMap {
+	t.Helper()
+	omms := ommCachePayload(ommResultAt(time.Now().Add(-90*time.Minute)), eph)
+	data, err := json.Marshal(omms)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: eph.Namespace,
+			Name:      legacyOMMCacheConfigMapName(eph.Name),
+			Labels:    map[string]string{ommCacheLabelKey: ommCacheLabelValue},
+			Annotations: map[string]string{
+				ommCacheAnnFetchKey:  fetchKey,
+				ommCacheAnnFetchedAt: time.Now().Add(-90 * time.Minute).UTC().Format(time.RFC3339Nano),
+				ommCacheAnnDigest:    ommDigest(data),
+				ommCacheAnnUID:       string(uid),
+				ommCacheAnnCount:     strconv.Itoa(len(omms)),
+			},
+		},
+		Data: map[string]string{ommCacheDataKey: string(data)},
+	}
+	if err := cli.Create(ctx, cm); err != nil {
+		t.Fatalf("seed legacy cache: %v", err)
+	}
+	return cm
+}
+
+// TestOMMCache_MigratesFromLegacyName proves an upgrade keeps its cache. Renaming the object
+// without reading the old one would discard exactly the outage continuity this feature exists
+// for — and would do it silently, at the worst possible moment (a cold start).
+func TestOMMCache_MigratesFromLegacyName(t *testing.T) {
+	sch := ommCacheScheme(t)
+	eph := newOMMCacheEph("eph-mig", "uid-mig")
+	cli := fake.NewClientBuilder().WithScheme(sch).WithObjects(eph).Build()
+	r := &SatelliteEphemerisReconciler{Client: cli, Scheme: sch, Recorder: events.NewFakeRecorder(50)}
+	ctx := context.Background()
+	key := types.NamespacedName{Namespace: eph.Namespace, Name: eph.Name}
+	fetchKey := fetchInputKey(eph.Spec)
+	legacy := seedLegacyCache(t, ctx, cli, eph, fetchKey, eph.UID)
+
+	before, _ := counterValue(t, metrics.OMMCacheRestoreTotal,
+		prometheus.Labels{"namespace": eph.Namespace, "ephemeris": eph.Name, "result": "migrated"})
+
+	if !r.restoreOMMCache(ctx, ctrl.Request{NamespacedName: key}, eph, fetchKey) {
+		t.Fatal("a valid legacy-named cache was not restored; an upgrade loses restart continuity")
+	}
+	if _, ok := r.cachedOMMResult(key); !ok {
+		t.Fatal("restore reported success but the in-memory cache is still cold")
+	}
+
+	// The migration must complete now, not at the next fetch (~2 h away): a second restart in
+	// between would otherwise be back to a cold start.
+	got := &corev1.ConfigMap{}
+	if err := cli.Get(ctx, types.NamespacedName{Namespace: eph.Namespace, Name: ommCacheConfigMapName(eph)}, got); err != nil {
+		t.Fatalf("legacy cache was read but never copied to the hashed name: %v", err)
+	}
+	if got.Data[ommCacheDataKey] != legacy.Data[ommCacheDataKey] {
+		t.Error("migrated payload differs from the legacy one")
+	}
+	if got.Annotations[ommCacheAnnUID] != string(eph.UID) || got.Annotations[ommCacheAnnFetchKey] != fetchKey {
+		t.Error("migrated object lost its identity annotations, so its own restore would refuse it")
+	}
+	if len(got.OwnerReferences) == 0 {
+		t.Error("migrated object has no owner reference; nothing garbage-collects it")
+	}
+	if after, ok := counterValue(t, metrics.OMMCacheRestoreTotal,
+		prometheus.Labels{"namespace": eph.Namespace, "ephemeris": eph.Name, "result": "migrated"}); !ok || after != before+1 {
+		t.Errorf("migrated counter %v -> %v (found=%v); a silent migration is one nobody can audit",
+			before, after, ok)
+	}
+
+	// The migrated object must stand on its own. Copying the payload without every annotation the
+	// restore gates read would produce an object that looks migrated and is then refused on the
+	// NEXT cold start — the migration would have moved the data and lost the ability to use it,
+	// and the legacy object it superseded is the only reason that would not be fatal.
+	r.ommCache.Delete(key)
+	if !r.restoreOMMCache(ctx, ctrl.Request{NamespacedName: key}, eph, fetchKey) {
+		t.Fatal("the migrated object is not restorable on its own")
+	}
+	if now, _ := counterValue(t, metrics.OMMCacheRestoreTotal,
+		prometheus.Labels{"namespace": eph.Namespace, "ephemeris": eph.Name, "result": "migrated"}); now != before+1 {
+		t.Error("the second restore migrated again; it should have hydrated from the object just written")
+	}
+}
+
+// TestOMMCache_LegacyNameStillIdentityGated proves the legacy name gets no easier ride. Under the
+// old scheme a truncation collision surfaces exactly here: the object exists, but it belongs to a
+// different CR.
+func TestOMMCache_LegacyNameStillIdentityGated(t *testing.T) {
+	sch := ommCacheScheme(t)
+	eph := newOMMCacheEph("eph-gate", "uid-gate")
+	cli := fake.NewClientBuilder().WithScheme(sch).WithObjects(eph).Build()
+	r := &SatelliteEphemerisReconciler{Client: cli, Scheme: sch, Recorder: events.NewFakeRecorder(50)}
+	ctx := context.Background()
+	key := types.NamespacedName{Namespace: eph.Namespace, Name: eph.Name}
+	fetchKey := fetchInputKey(eph.Spec)
+	seedLegacyCache(t, ctx, cli, eph, fetchKey, "somebody-elses-uid")
+
+	before, _ := counterValue(t, metrics.OMMCacheRestoreTotal,
+		prometheus.Labels{"namespace": eph.Namespace, "ephemeris": eph.Name, "result": "refused_identity"})
+
+	if r.restoreOMMCache(ctx, ctrl.Request{NamespacedName: key}, eph, fetchKey) {
+		t.Fatal("restored a legacy object owned by a different CR")
+	}
+	if err := cli.Get(ctx, types.NamespacedName{Namespace: eph.Namespace, Name: ommCacheConfigMapName(eph)}, &corev1.ConfigMap{}); !apierrors.IsNotFound(err) {
+		t.Errorf("a refused legacy object was still copied forward (err=%v)", err)
+	}
+	if after, ok := counterValue(t, metrics.OMMCacheRestoreTotal,
+		prometheus.Labels{"namespace": eph.Namespace, "ephemeris": eph.Name, "result": "refused_identity"}); !ok || after != before+1 {
+		t.Errorf("refused_identity counter %v -> %v (found=%v)", before, after, ok)
+	}
+}
+
+// TestOMMCache_MigrationLeavesLegacyObject locks the claim made in the changelog and the runbook:
+// the controller never deletes the legacy object. It holds no `delete` verb on configmaps, so
+// code that tried would fail at runtime in a path whose errors are deliberately swallowed —
+// silently, on the exact upgrade this migration exists to make safe. The owner reference is what
+// removes it, together with the CR.
+func TestOMMCache_MigrationLeavesLegacyObject(t *testing.T) {
+	sch := ommCacheScheme(t)
+	eph := newOMMCacheEph("eph-keep", "uid-keep")
+	cli := fake.NewClientBuilder().WithScheme(sch).WithObjects(eph).Build()
+	r := &SatelliteEphemerisReconciler{Client: cli, Scheme: sch, Recorder: events.NewFakeRecorder(50)}
+	ctx := context.Background()
+	fetchKey := fetchInputKey(eph.Spec)
+	seedLegacyCache(t, ctx, cli, eph, fetchKey, eph.UID)
+
+	if !r.restoreOMMCache(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: eph.Namespace, Name: eph.Name}}, eph, fetchKey) {
+		t.Fatal("legacy cache was not restored")
+	}
+	if err := cli.Get(ctx, types.NamespacedName{Namespace: eph.Namespace,
+		Name: legacyOMMCacheConfigMapName(eph.Name)}, &corev1.ConfigMap{}); err != nil {
+		t.Fatalf("the legacy object was removed; the controller has no delete verb for that: %v", err)
+	}
+}
+
+// TestOMMCache_HashedNameWinsOverLegacy proves precedence. Both objects can exist for one
+// reconcile after an upgrade, and they can disagree: the hashed one is what persist keeps current,
+// so reading the legacy one instead would serve a stale element set and keep serving it.
+func TestOMMCache_HashedNameWinsOverLegacy(t *testing.T) {
+	sch := ommCacheScheme(t)
+	eph := newOMMCacheEph("eph-prec", "uid-prec")
+	cli := fake.NewClientBuilder().WithScheme(sch).WithObjects(eph).Build()
+	r := &SatelliteEphemerisReconciler{Client: cli, Scheme: sch, Recorder: events.NewFakeRecorder(50)}
+	ctx := context.Background()
+	key := types.NamespacedName{Namespace: eph.Namespace, Name: eph.Name}
+	fetchKey := fetchInputKey(eph.Spec)
+
+	// Legacy holds an old fetch; the hashed name holds a newer one.
+	seedLegacyCache(t, ctx, cli, eph, fetchKey, eph.UID) // fetchedAt = now-90m
+	fresh := time.Now().Add(-5 * time.Minute).UTC().Truncate(time.Millisecond)
+	r.persistOMMCache(ctx, eph, ommResultAt(fresh), fetchKey)
+
+	before, _ := counterValue(t, metrics.OMMCacheRestoreTotal,
+		prometheus.Labels{"namespace": eph.Namespace, "ephemeris": eph.Name, "result": "migrated"})
+	if !r.restoreOMMCache(ctx, ctrl.Request{NamespacedName: key}, eph, fetchKey) {
+		t.Fatal("restore returned false with a valid hashed-name cache present")
+	}
+	got, ok := r.cachedOMMResult(key)
+	if !ok {
+		t.Fatal("cache still cold")
+	}
+	if !got.result.FetchedAt.Equal(fresh) {
+		t.Errorf("restored FetchedAt = %s, want the hashed-name object's %s — the legacy object won",
+			got.result.FetchedAt, fresh)
+	}
+	if after, _ := counterValue(t, metrics.OMMCacheRestoreTotal,
+		prometheus.Labels{"namespace": eph.Namespace, "ephemeris": eph.Name, "result": "migrated"}); after != before {
+		t.Errorf("counted a migration (%v -> %v) when the hashed name already had the data", before, after)
+	}
 }

@@ -441,6 +441,107 @@ if the rate persists across a restart.
 
 ---
 
+## NTNOMMCachePersistFailing
+
+**Fires when** there has been **no successful** durable-cache write in 24h *and* at
+least one failure in the same window. Labels: `namespace`, `ephemeris`, `result`.
+
+```promql
+sum by (namespace, ephemeris, result) (increase(ntn_operators_omm_cache_persist_total{result!="success"}[24h])) > 0
+unless on (namespace, ephemeris)
+sum by (namespace, ephemeris) (increase(ntn_operators_omm_cache_persist_total{result="success"}[24h])) > 0
+```
+
+**Why 24h, and why `unless`.** Persist runs once per successful *fetch*, and
+`refreshInterval` defaults to **4h** with a **2h** floor — so any window measured in
+minutes usually contains no persist attempt at all and would report "no failures" from
+having observed nothing. The `unless` clause is what makes this a statement about the
+*cache* rather than about one write: a transient conflict the next fetch fixes stays
+silent; a cache that is genuinely not being written does not. A `refreshInterval` above
+24h makes this alert silent rather than wrong — nothing was attempted, so nothing is
+claimed.
+
+**Impact.** None right now — and that is the point. Persisting the last-good OMM set
+is best-effort by design (ADR-0007): a write failure must never fail live
+reconciliation, so nothing degrades while the process stays up. The cost is
+deferred: on the next restart or leader failover the controller has **no last-good
+element set to fall back on**, so a concurrent upstream outage means propagation
+stops as soon as the last pushed epoch expires. This alert exists because that
+failure mode is otherwise invisible until the moment it hurts.
+
+**Diagnose.**
+
+```bash
+kubectl logs -l control-plane=controller-manager -n ntn-operators-system --tail=-1 --since=40m \
+  | grep 'omm-cache:'
+```
+
+```promql
+# Which outcome?  failed | skipped_oversize | skipped_marshal
+sum by (namespace, ephemeris, result) (increase(ntn_operators_omm_cache_persist_total{result!="success"}[30m]))
+```
+
+**Mitigate by `result`.**
+
+- `failed` — the ConfigMap write itself is erroring. Check RBAC (`get;create;update`
+  on configmaps), the namespace's ResourceQuota for ConfigMap count, and apiserver
+  health. The controller holds no `delete` verb by design; a leftover object is
+  garbage-collected with its owner CR.
+- `skipped_oversize` — the tracked OMM set exceeds the ~900 KiB bound under the 1 MiB
+  ConfigMap limit. Narrow `spec.satellites.noradIDs` so the persisted set is the one
+  actually propagated. The in-memory cache is unaffected; only restart continuity is.
+- `skipped_marshal` — a payload that will not serialize. Treat as a bug and capture
+  the log line.
+
+**Escalate** to the platform owner if `failed` persists across a controller restart.
+
+---
+
+## NTNOMMCacheRestoreRefused
+
+**Fires when** `increase(ntn_operators_omm_cache_restore_total{result=~"refused_digest|refused_parse"}[1h]) > 0`.
+Labels: `namespace`, `ephemeris`, `result`.
+
+**`refused_identity` is deliberately excluded.** Restore runs on *every* reconcile while
+the in-memory cache is cold, so two ordinary operations increment it once per reconcile
+until the first successful fetch: a delete/recreate whose old cache object still exists,
+and **any `spec.source` edit** — the persisted object still carries the previous source's
+fetch identity, and is correctly refused until the next fetch overwrites it. During the
+upstream outage this feature exists for, that is a lot of reconciles. An alert on it
+would fire hardest precisely when the operator is behaving correctly. Query it instead:
+
+```promql
+# Sustained across many cold reconciles, under the LEGACY name, is the pre-ADR-0007
+# truncation collision. A burst right after a delete/recreate is expected.
+sum by (namespace, ephemeris) (increase(ntn_operators_omm_cache_restore_total{result="refused_identity"}[6h]))
+```
+
+**Impact.** A persisted cache **was found and its payload rejected**, so the cold start
+proceeded without it. Something wrote an object that does not check out. A plain miss
+is deliberately not counted — every first-ever reconcile misses — so every sample here
+is a real refusal.
+
+**Diagnose by `result`.**
+
+- `refused_digest` — the stored payload does not match its recorded SHA-256. Corrupt,
+  truncated, or hand-edited. Never restored, by design.
+- `refused_parse` — the payload no longer validates as an OMM set (upstream schema
+  change, or a partially written object).
+
+```bash
+# Which cache objects exist for this CR, and who owns them?
+kubectl get cm -n <ns> -l ntn.operators.dev/omm-cache=true \
+  -o custom-columns=NAME:.metadata.name,OWNER-UID:.metadata.annotations.ntn\.operators\.dev/omm-owner-uid
+```
+
+**Mitigate.** Delete the offending ConfigMap and let the next fetch repersist — the
+payload is unusable either way, and nothing else reads it. For sustained
+`refused_identity` (not alerted, see above), check for two CRs sharing a long name
+prefix; after this release each gets a distinct hashed name, so the collision clears on
+the next persist.
+
+---
+
 ## See also
 
 - [`e2e-prometheus-metrics.md`](e2e-prometheus-metrics.md) — wiring an NTNSlice

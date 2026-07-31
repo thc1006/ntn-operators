@@ -66,6 +66,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The durable OMM cache is now observable, and its silent failure modes alert.** Persisting the
+  last-good element set is best-effort by design (a write failure must not fail live reconciliation),
+  which is exactly why it needed signals: without them the cache can fail to write for weeks and the
+  first symptom is a restart with nothing to propagate, during the upstream outage the cache exists
+  for. New metrics `ntn_operators_omm_cache_persist_total{result}`,
+  `ntn_operators_omm_cache_restore_total{result}` and `ntn_operators_omm_cache_restored_age_seconds`,
+  plus alerts `NTNOMMCachePersistFailing` and `NTNOMMCacheRestoreRefused` with runbook entries. The
+  persist alert is windowed at 24h and gated with `unless` on a successful write in the same window,
+  because persist runs once per successful *fetch* and `refreshInterval` defaults to 4h with a 2h
+  floor — a shorter window would usually contain no attempt at all and report "no failures" from
+  having observed nothing. Per-CR series are released on CR deletion, matching the existing
+  `DeletePartialMatch` cleanup for the other ephemeris metrics. A
+  plain restore *miss* is deliberately not counted — every first-ever reconcile misses, so it would
+  drown the refusals, which are the signal. `refused_identity` is counted but deliberately **not**
+  alerted: restore runs on every reconcile while the in-memory cache is cold, so a legitimate
+  delete/recreate whose old cache object still exists increments it once per reconcile until the
+  first successful fetch — an alert would fire hardest exactly when the operator is behaving
+  correctly. Sustained `refused_identity` under the legacy cache name is how the truncation
+  collision above surfaces on a cluster that has not yet repersisted; the runbook carries the query.
+
 - **End-to-end coverage for the credentialed runtime push (`wss://` + bearer + mTLS), closing #329.**
   Everything under #206, #295, #297, #313, #318 and #322 was unit-tested against `httptest`, which
   cannot show that the *deployment shape* works — and `test/e2e/` contained zero tests touching
@@ -372,6 +392,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the controller nodes have synchronised clocks (#220 H1).
 
 ### Fixed
+
+- **Two `SatelliteEphemeris` objects with long names no longer contend for one durable OMM cache
+  ConfigMap.** The cache name was `<cr-name>-omm-cache` with the name truncated to fit the 253-char
+  limit, so every CR sharing a 243-character prefix mapped onto the *same* object. The owner-UID
+  annotation stopped a wrong *restore*, but not the contention: the losers kept overwriting an
+  object their own restore then refused, so their restart/leader-failover continuity was gone with
+  nothing in the status, events or logs to say so — an availability bug, not a cosmetic one. The
+  name is now `<readable prefix>-<128-bit hash of namespace/name/UID>-omm-cache` (ADR-0007), which
+  also means a delete/recreate lands on a different object instead of inheriting its predecessor's.
+  **Upgrades keep their cache**: a cold restore reads the pre-existing legacy name once, applies the
+  identical digest/UID/fetch-identity gates, and copies it forward to the hashed name immediately
+  rather than waiting for the next fetch (~2 h). The legacy object is never deleted — the controller
+  holds no `delete` verb — and is garbage-collected with its owner CR.
 
 - **Losing the ConfigMap create race is now classified instead of surfacing as a generic apply
   failure.** `ApplyCellConfig` reads the ConfigMap with the uncached reader and creates it when the

@@ -24,7 +24,7 @@ Governance is machine-checked:
 | [0003](0003-nephio-integration.md) | Distribute CRDs and examples as Nephio kpt packages | accepted | — | #164 |
 | [0005](0005-cluster-orchestration.md) | Place `ntn-operators` above provider-native per-cell control | accepted | — | #162 · impl #177/#189 |
 | [0006](0006-decouple-propagation-from-pass-prediction.md) | Decouple propagation heartbeat from pass prediction | accepted | — | #234 · impl #256 |
-| [0007](0007-durable-omm-cache.md) | Durable last-good OMM cache for restart and leader failover | accepted | — | hash-name migration follow-up |
+| [0007](0007-durable-omm-cache.md) | Durable last-good OMM cache for restart and leader failover | accepted | — | impl #345 (hashed name, legacy adoption, metrics) · storage-mode follow-up |
 | [0008](0008-constellation-pool-availability.md) | Model satellite-path contact opportunity at constellation-pool level | accepted | — | slice-to-cell binding follow-up |
 | [0009](0009-remote-control-credential-boundary.md) | Layered authorization boundary for remote-control credentials | accepted | superseded-in-part by **0011** | #251, #299 |
 | [0010](0010-v1alpha2-secure-defaults-and-duration-validation.md) | v1alpha2 secure-by-default transport and duration admission validation | proposed | — | #214, #315, #311, #299 |

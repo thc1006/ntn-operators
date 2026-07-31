@@ -16,6 +16,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/akhenakh/sgp4"
@@ -29,6 +30,7 @@ import (
 
 	ntnv1alpha1 "github.com/thc1006/ntn-operators/api/v1alpha1"
 	"github.com/thc1006/ntn-operators/pkg/ephemeris"
+	"github.com/thc1006/ntn-operators/pkg/metrics"
 )
 
 // Durable last-good OMM cache: persists tracked OMMs to a controller-owned ConfigMap so a cold
@@ -54,6 +56,9 @@ const (
 	ommCacheConfigMapSuffix = "-omm-cache"
 	maxOMMCacheBytes        = 900 * 1024 // under the 1 MiB ConfigMap limit; larger sets skip persist
 	maxConfigMapNameLen     = 253
+	// 128 bits, per ADR-0007. Two SatelliteEphemeris objects colliding here is not a scenario
+	// anyone reaches by naming things badly.
+	ommCacheNameHashBytes = 16
 )
 
 // The per-CR cache ConfigMap is owner-ref'd to its SatelliteEphemeris, so k8s garbage-collects it
@@ -69,10 +74,32 @@ func (r *SatelliteEphemerisReconciler) readerOrClient() client.Reader {
 	return r.Client
 }
 
-// ommCacheConfigMapName derives the per-CR cache ConfigMap name, bounded to the k8s name limit.
-// Names over the limit are truncated; the restore path UID-gates, so a (pathological) truncation
-// collision between two >243-char names never restores wrong data — see ADR-0007.
-func ommCacheConfigMapName(ephName string) string {
+// ommCacheConfigMapName derives a collision-resistant name — <readable prefix>-<128-bit
+// hash>-omm-cache, keyed on namespace/name/UID (ADR-0007).
+//
+// The previous scheme truncated the CR name to fit 253 chars, which maps every
+// SatelliteEphemeris sharing a 243-character prefix onto ONE ConfigMap. The UID annotation stops
+// a wrong RESTORE, but it does not stop the contention: the losers keep overwriting an object
+// whose UID then refuses their own restore, so their restart continuity is gone with nothing in
+// the status or logs to say so. Availability bug, not cosmetic.
+//
+// Hashing the UID in also means a delete/recreate lands on a different object rather than
+// inheriting the predecessor's — the annotation gate stays as defense in depth.
+func ommCacheConfigMapName(eph *ntnv1alpha1.SatelliteEphemeris) string {
+	sum := sha256.Sum256([]byte(eph.Namespace + "/" + eph.Name + "/" + string(eph.UID)))
+	h := hex.EncodeToString(sum[:ommCacheNameHashBytes])
+	prefix := eph.Name
+	if room := maxConfigMapNameLen - len(ommCacheConfigMapSuffix) - len(h) - 1; len(prefix) > room {
+		// Trim separators the cut may have exposed: a label may not start with "-" or ".".
+		prefix = strings.TrimRight(prefix[:room], "-.")
+	}
+	return prefix + "-" + h + ommCacheConfigMapSuffix
+}
+
+// legacyOMMCacheConfigMapName is the pre-ADR-0007 name: read on restore so an upgrade does not
+// throw away a cache that is still valid, never written. Nothing creates these any more, so the
+// only ones in existence predate the upgrade.
+func legacyOMMCacheConfigMapName(ephName string) string {
 	if len(ephName)+len(ommCacheConfigMapSuffix) > maxConfigMapNameLen {
 		ephName = ephName[:maxConfigMapNameLen-len(ommCacheConfigMapSuffix)]
 	}
@@ -112,15 +139,17 @@ func (r *SatelliteEphemerisReconciler) persistOMMCache(
 	data, err := json.Marshal(omms)
 	if err != nil {
 		log.V(1).Info("omm-cache: marshal failed; skipping persist", "err", err.Error())
+		metrics.OMMCachePersistTotal.WithLabelValues(eph.Namespace, eph.Name, "skipped_marshal").Inc()
 		return
 	}
 	if len(data) > maxOMMCacheBytes {
 		log.Info("omm-cache: payload over bound; skipping restart-continuity persist (warm cache unaffected)",
 			"bytes", len(data), "satellites", len(omms))
+		metrics.OMMCachePersistTotal.WithLabelValues(eph.Namespace, eph.Name, "skipped_oversize").Inc()
 		return
 	}
 	digest := ommDigest(data)
-	key := client.ObjectKey{Namespace: eph.Namespace, Name: ommCacheConfigMapName(eph.Name)}
+	key := client.ObjectKey{Namespace: eph.Namespace, Name: ommCacheConfigMapName(eph)}
 
 	// Read uncached (APIReader) so configmaps get suffices and we do not start an informer that
 	// caches every ConfigMap in the cluster; writes still go through the cached client. Mirrors
@@ -138,9 +167,13 @@ func (r *SatelliteEphemerisReconciler) persistOMMCache(
 		}
 		if err := r.Create(ctx, cm); err != nil && !apierrors.IsAlreadyExists(err) {
 			log.V(1).Info("omm-cache: create failed; skipping persist", "err", err.Error())
+			metrics.OMMCachePersistTotal.WithLabelValues(eph.Namespace, eph.Name, "failed").Inc()
+			return
 		}
+		metrics.OMMCachePersistTotal.WithLabelValues(eph.Namespace, eph.Name, "success").Inc()
 	case getErr != nil:
 		log.V(1).Info("omm-cache: get failed; skipping persist", "err", getErr.Error())
+		metrics.OMMCachePersistTotal.WithLabelValues(eph.Namespace, eph.Name, "failed").Inc()
 	default:
 		if cm.Annotations[ommCacheAnnDigest] == digest && cm.Data[ommCacheDataKey] != "" {
 			return // unchanged
@@ -149,7 +182,10 @@ func (r *SatelliteEphemerisReconciler) persistOMMCache(
 		_ = controllerutil.SetControllerReference(eph, cm, r.Scheme) // adopt for GC if pre-existing
 		if err := r.Update(ctx, cm); err != nil {
 			log.V(1).Info("omm-cache: update failed; skipping persist", "err", err.Error())
+			metrics.OMMCachePersistTotal.WithLabelValues(eph.Namespace, eph.Name, "failed").Inc()
+			return
 		}
+		metrics.OMMCachePersistTotal.WithLabelValues(eph.Namespace, eph.Name, "success").Inc()
 	}
 }
 
@@ -186,31 +222,58 @@ func setOrClearAnn(ann map[string]string, key, val string) {
 // identity (fetchKey) and owner UID match the live object, so a source edit or delete-recreate
 // never restores wrong/orphaned data. The entry keeps its ORIGINAL FetchedAt, so the normal
 // window/backoff/freshness gates still apply — restore removes the cold-start cliff, nothing more.
+// The ADR-0007 name is tried first, then the pre-ADR one, so an upgrade keeps its cache.
 func (r *SatelliteEphemerisReconciler) restoreOMMCache(
 	ctx context.Context, req ctrl.Request, eph *ntnv1alpha1.SatelliteEphemeris, fetchKey string,
 ) bool {
-	log := logf.FromContext(ctx)
 	if _, ok := r.cachedOMMResult(req.NamespacedName); ok {
 		return false // already warm
 	}
+	if r.hydrateFromCacheObject(ctx, req, eph, fetchKey, ommCacheConfigMapName(eph), false) {
+		return true
+	}
+	// Nothing usable under the ADR-0007 name. An upgraded operator still has a perfectly good
+	// cache under the old one, and discarding it would cost exactly the outage continuity this
+	// feature exists for.
+	//
+	// This costs a second uncached GET per reconcile that runs cold, which is deliberate: the
+	// window is process-start to the first successful fetch, and the only way to hold it open is
+	// for fetches to keep failing — by which point one ConfigMap GET is noise next to the failing
+	// HTTP fetch beside it. Caching "no legacy object here" would trade that for state to get
+	// wrong.
+	return r.hydrateFromCacheObject(ctx, req, eph, fetchKey, legacyOMMCacheConfigMapName(eph.Name), true)
+}
+
+// hydrateFromCacheObject validates one candidate ConfigMap and, if it passes every gate, loads it
+// into the in-memory cache. Same gates for both names — a legacy object gets no easier ride.
+func (r *SatelliteEphemerisReconciler) hydrateFromCacheObject(
+	ctx context.Context, req ctrl.Request, eph *ntnv1alpha1.SatelliteEphemeris, fetchKey, name string, legacy bool,
+) bool {
+	log := logf.FromContext(ctx)
+	ns, ephName := eph.Namespace, eph.Name
 	cm := &corev1.ConfigMap{}
-	if err := r.readerOrClient().Get(ctx, client.ObjectKey{Namespace: eph.Namespace, Name: ommCacheConfigMapName(eph.Name)}, cm); err != nil {
-		return false
+	if err := r.readerOrClient().Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, cm); err != nil {
+		return false // absent is the normal cold-start case, not a refusal
 	}
 	data := cm.Data[ommCacheDataKey]
 	if cm.Labels[ommCacheLabelKey] != ommCacheLabelValue || data == "" {
 		return false
 	}
 	if cm.Annotations[ommCacheAnnDigest] != ommDigest([]byte(data)) {
-		log.Info("omm-cache: digest mismatch; ignoring (corrupt or hand-edited)")
+		log.Info("omm-cache: digest mismatch; ignoring (corrupt or hand-edited)", "configmap", name)
+		metrics.OMMCacheRestoreTotal.WithLabelValues(ns, ephName, "refused_digest").Inc()
 		return false
 	}
 	if cm.Annotations[ommCacheAnnUID] != string(eph.UID) || cm.Annotations[ommCacheAnnFetchKey] != fetchKey {
-		return false // orphaned by delete-recreate, or a different source — do not restore
+		// Orphaned by delete-recreate, or a different source. Under the legacy name this is also
+		// how a truncation collision surfaces, so it is worth counting rather than dropping.
+		metrics.OMMCacheRestoreTotal.WithLabelValues(ns, ephName, "refused_identity").Inc()
+		return false
 	}
 	omms, err := ephemeris.ParseValidOMMs(log, []byte(data))
 	if err != nil || len(omms) == 0 {
 		log.V(1).Info("omm-cache: payload unparseable or fully invalid; ignoring", "err", err)
+		metrics.OMMCacheRestoreTotal.WithLabelValues(ns, ephName, "refused_parse").Inc()
 		return false
 	}
 	// Unknown fetch time → zero, i.e. very old, so the next reconcile fetches and only serves
@@ -231,8 +294,61 @@ func (r *SatelliteEphemerisReconciler) restoreOMMCache(
 				cm.Annotations[ommCacheAnnETag], cm.Annotations[ommCacheAnnLastModified])
 		}
 	}
-	log.Info("omm-cache: hydrated last-good OMMs after cold start", "satellites", len(omms))
+	if !fetchedAt.IsZero() {
+		metrics.OMMCacheRestoredAgeSeconds.WithLabelValues(ns, ephName).Set(time.Since(fetchedAt).Seconds())
+	}
+	result := "hydrated"
+	if legacy {
+		result = "migrated"
+		// Copy it forward now rather than waiting for the next fetch (~2 h), so a second restart
+		// in between is not back to a cold start. The legacy object is left alone: the controller
+		// holds no delete verb, and its owner reference garbage-collects it with the CR.
+		r.copyCacheForward(ctx, eph, cm)
+	}
+	metrics.OMMCacheRestoreTotal.WithLabelValues(ns, ephName, result).Inc()
+	log.Info("omm-cache: hydrated last-good OMMs after cold start",
+		"satellites", len(omms), "configmap", name, "migrated", legacy)
 	return true
+}
+
+// copyCacheForward writes a legacy-named cache object's contents under the ADR-0007 name.
+// Best-effort: failing here costs one fetch cycle, not correctness.
+func (r *SatelliteEphemerisReconciler) copyCacheForward(
+	ctx context.Context, eph *ntnv1alpha1.SatelliteEphemeris, legacy *corev1.ConfigMap,
+) {
+	log := logf.FromContext(ctx)
+	// Copy the annotations this cache defines, not everything the old object happened to carry.
+	// The payload is already bounded at 900 KiB under a 1 MiB object limit, so cloning an
+	// arbitrarily large foreign annotation could push the create over the limit — and the failure
+	// would land in this swallowed best-effort path. Nothing else on a legacy object is meaningful
+	// here anyway.
+	ann := map[string]string{}
+	for _, k := range []string{ommCacheAnnFetchKey, ommCacheAnnFetchedAt, ommCacheAnnDigest,
+		ommCacheAnnUID, ommCacheAnnCount, ommCacheAnnETag, ommCacheAnnLastModified} {
+		if v, ok := legacy.Annotations[k]; ok {
+			ann[k] = v
+		}
+	}
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace:   eph.Namespace,
+			Name:        ommCacheConfigMapName(eph),
+			Labels:      map[string]string{ommCacheLabelKey: ommCacheLabelValue},
+			Annotations: ann,
+		},
+		Data: map[string]string{ommCacheDataKey: legacy.Data[ommCacheDataKey]},
+	}
+	if err := controllerutil.SetControllerReference(eph, cm, r.Scheme); err != nil {
+		log.V(1).Info("omm-cache: owner ref failed; leaving the legacy object in place", "err", err.Error())
+		return
+	}
+	if err := r.Create(ctx, cm); err != nil && !apierrors.IsAlreadyExists(err) {
+		log.V(1).Info("omm-cache: migrating to the hashed name failed; retrying on the next persist",
+			"err", err.Error())
+		return
+	}
+	log.Info("omm-cache: migrated to the collision-resistant name (ADR-0007)",
+		"from", legacy.Name, "to", cm.Name)
 }
 
 // conditionalCacheSeeder is implemented by a GPFetcher that can restore cache validators
