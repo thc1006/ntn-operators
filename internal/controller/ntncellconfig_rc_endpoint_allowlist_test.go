@@ -27,12 +27,12 @@ import (
 	"github.com/thc1006/ntn-operators/pkg/provider"
 )
 
-// TestPushEphemerisUpdateIfNeeded_RemoteControlEndpointAllowlist pins the #251 confused-deputy interim
-// boundary (ADR-0009): a CREDENTIALED remoteControl.tls push is refused BEFORE the credential is sent
-// when its endpoint host is outside --remote-control-allowed-endpoint-hosts. An empty allow-list permits
-// any endpoint (opt-in), and a plaintext push (no credential to exfiltrate) is never gated. Mutation:
-// drop the `tlsConfig != nil` allow-list check and the "attacker endpoint" case pushes (the mock is
-// called), failing the "must NOT be sent" assertion.
+// TestPushEphemerisUpdateIfNeeded_RemoteControlEndpointAllowlist pins the #251 / ADR-0009 endpoint
+// egress boundary: EVERY push — credentialed remoteControl.tls or plaintext — is refused BEFORE the
+// Secret is read when its endpoint host is outside --remote-control-allowed-endpoint-hosts (a
+// credentialed one would exfiltrate a labelled credential; a plaintext one would relay through the
+// operator to an internal host). An empty allow-list permits any endpoint (opt-in). Mutation: drop the
+// allow-list Check and the "attacker endpoint" cases push (the mock is called), failing the assertions.
 func TestPushEphemerisUpdateIfNeeded_RemoteControlEndpointAllowlist(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := ntnv1alpha1.AddToScheme(scheme); err != nil {
@@ -110,13 +110,23 @@ func TestPushEphemerisUpdateIfNeeded_RemoteControlEndpointAllowlist(t *testing.T
 		}
 	})
 
-	t.Run("plaintext push is never gated by the allow-list", func(t *testing.T) {
+	t.Run("plaintext push to a non-allowlisted endpoint is ALSO refused (SSRF relay)", func(t *testing.T) {
 		err, pushed := run(t, "gnb.allowed.svc", "attacker.evil.example:8001", false, false)
+		if err == nil || !errors.Is(err, errRemoteControlEndpointNotAllowed) {
+			t.Fatalf("a plaintext push to a non-allowlisted host must be refused, got %v", err)
+		}
+		if pushed {
+			t.Fatal("the operator must NOT relay a plaintext push to a non-allowlisted endpoint")
+		}
+	})
+
+	t.Run("plaintext push to an allowlisted endpoint proceeds", func(t *testing.T) {
+		err, pushed := run(t, "gnb.allowed.svc", "gnb.allowed.svc:8001", false, false)
 		if err != nil {
-			t.Fatalf("a plaintext push must not be gated, got %v", err)
+			t.Fatalf("an allowlisted plaintext push must proceed, got %v", err)
 		}
 		if !pushed {
-			t.Fatal("a plaintext push must proceed regardless of the allow-list")
+			t.Fatal("an allowlisted plaintext push must reach the provider")
 		}
 	})
 }
