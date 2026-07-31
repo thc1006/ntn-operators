@@ -97,8 +97,9 @@ func ommCacheConfigMapName(eph *ntnv1alpha1.SatelliteEphemeris) string {
 	return prefix + "-" + h + ommCacheConfigMapSuffix
 }
 
-// legacyOMMCacheConfigMapName is the pre-ADR-0007 name. Read once on restore so an upgrade does
-// not throw away a cache that is still valid; never written.
+// legacyOMMCacheConfigMapName is the pre-ADR-0007 name: read on restore so an upgrade does not
+// throw away a cache that is still valid, never written. Nothing creates these any more, so the
+// only ones in existence predate the upgrade.
 func legacyOMMCacheConfigMapName(ephName string) string {
 	if len(ephName)+len(ommCacheConfigMapSuffix) > maxConfigMapNameLen {
 		ephName = ephName[:maxConfigMapNameLen-len(ommCacheConfigMapSuffix)]
@@ -232,9 +233,15 @@ func (r *SatelliteEphemerisReconciler) restoreOMMCache(
 	if r.hydrateFromCacheObject(ctx, req, eph, fetchKey, ommCacheConfigMapName(eph), false) {
 		return true
 	}
-	// Nothing under the ADR-0007 name. An upgraded operator still has a perfectly good cache
-	// under the old one, and discarding it would cost exactly the outage continuity this feature
-	// exists for. Read it once; the next persist writes the new name.
+	// Nothing usable under the ADR-0007 name. An upgraded operator still has a perfectly good
+	// cache under the old one, and discarding it would cost exactly the outage continuity this
+	// feature exists for.
+	//
+	// This costs a second uncached GET per reconcile that runs cold, which is deliberate: the
+	// window is process-start to the first successful fetch, and the only way to hold it open is
+	// for fetches to keep failing — by which point one ConfigMap GET is noise next to the failing
+	// HTTP fetch beside it. Caching "no legacy object here" would trade that for state to get
+	// wrong.
 	return r.hydrateFromCacheObject(ctx, req, eph, fetchKey, legacyOMMCacheConfigMapName(eph.Name), true)
 }
 
