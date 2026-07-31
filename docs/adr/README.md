@@ -39,7 +39,8 @@ For every `docs/adr/NNNN-*.md`:
 2. the `# ADR NNNN` title number matches the filename;
 3. a `- Status:` line is present;
 4. the ADR is listed in this index;
-5. every relative link to another ADR file resolves.
+5. every relative link to another ADR file resolves;
+6. every internal `#anchor` link resolves to a heading in the target file (repo-internal only — external URLs are never fetched, so a site being down cannot make this lint flaky).
 
 ## Adding an ADR
 
