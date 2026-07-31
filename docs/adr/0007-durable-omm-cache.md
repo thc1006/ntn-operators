@@ -1,69 +1,171 @@
-# ADR 0007 — Durable last-good OMM cache for restart / leader-failover outage continuity
+---
+adr: 7
+title: Durable last-good OMM cache for restart and leader failover
+status: accepted
+date: 2026-07-30
+last_verified: 2026-07-31
+deciders: [thc1006]
+supersedes: []
+superseded_by: []
+implementation:
+  - "internal/controller/satelliteephemeris_ommcache_persist.go"
+tracking: []
+---
 
-- Status: **Accepted** (implemented on `feat/omm-persist-restart-continuity`)
-- Date: 2026-07-30
-- Deciders: @thc1006
-- Builds on: ADR 0006 (decouple propagation from pass prediction — the propagation heartbeat this cache feeds), ADR 0005 (cluster-scope orchestration — the SatelliteEphemeris → NTNCellConfig runtime push that consumes the propagated states)
+# ADR 0007 — Durable last-good OMM cache for restart and leader failover
+
+## Decision summary
+
+Persist the tracked last-good OMM subset in a per-`SatelliteEphemeris`,
+owner-referenced Kubernetes object so a cold leader can continue propagation
+during an upstream outage.
+
+Use a **hash-suffixed collision-resistant name**, not prefix truncation alone.
+Default storage is ConfigMap for public catalogs; operators must be able to
+choose Secret or Disabled for private/licensed element sets.
 
 ## Context
 
-`SatelliteEphemerisReconciler` fetches GP/OMM element sets from CelesTrak/Space-Track, parses them to `sgp4.OMM`, and re-propagates to fresh ECEF on the ~3-minute propagation heartbeat so `status.propagatedStates` (and the downstream `ntn_config_update` runtime push) always carry an epoch in the near future. To stay polite to the upstream it fetches at most every `minRefreshInterval` (2 h) and, on a fetch failure, **serves the last-good OMMs from an in-memory cache** (`ommCache sync.Map`) so a source outage does not stall SIB19 — this is the I-18 continuity behaviour.
+The in-memory cache preserves continuity during a fetch outage only while the
+same process remains active. Status contains propagated ECEF output, not the
+orbital elements needed to propagate a later epoch.
 
-The gap: **that cache is in-memory only.** A process restart or a leader-election failover starts the new active reconciler with an empty cache. `status.propagatedStates` holds the ECEF *output* of a past propagation but **not** the orbital *elements* (the SGP4 input), so status alone cannot re-propagate to a new epoch. Concretely: during a sustained upstream outage, if the current leader dies, the standby (which never reconciled, so has an empty cache) takes over with nothing to propagate. Once the last-pushed epoch expires (~`propagationEpochLead`, 5 min), SIB19 goes stale for the rest of the outage even though the operator is healthy — a single-process-memory dependency in an otherwise HA design.
+The current implementation uses a ConfigMap and validates digest, fetch
+identity and owner UID. Its name truncation can map two long resource names to
+the same ConfigMap. The UID check prevents wrong restore, but one resource can
+lose persistence. That is an availability bug, not merely cosmetic.
 
-## Decision Drivers
+Element sets are often public, but “OMM” does not mean “public”. Space-Track
+access and private catalogs can carry contractual or operational restrictions.
 
-- **D1. HA correctness.** Active-passive HA (ADR/#230) promises continuity across a leader loss. An in-memory-only cache silently breaks that promise precisely when it matters (leader loss *during* an outage).
-- **D2. Do not weaken the freshness contract.** Restart continuity must not become a way to resurrect arbitrarily stale data; the existing window / backoff / `maxEpochAge` gates must still apply.
-- **D3. Minimal blast radius.** The live fetch/propagate path must not regress; persistence is an enhancement, best-effort, and off the hot path.
-- **D4. No new RBAC surface or cluster-wide caching.** Match the codebase's existing "uncached one-off read" discipline (the Space-Track Secret is read via `APIReader` to avoid a cluster-wide Secret informer).
+## Decision drivers
 
-## Options considered
-
-- **A — Status subresource (store elements in `status`).** Rejected: bloats status with raw OMM fields for every tracked NORAD, couples a large data blob to the frequently-written status object, and status is the wrong home for controller-private recovery state.
-- **B — Per-CR owner-ref'd ConfigMap (CHOSEN).** One `<name>-omm-cache` ConfigMap per SatelliteEphemeris holding the tracked OMMs as JSON, owner-ref'd for garbage collection.
-- **C — Secret instead of ConfigMap.** Rejected as the default (see visibility rationale); kept as a documented follow-up if an operator classifies element sets as sensitive.
-- **D — Dedicated CRD for the cache.** Rejected: a CRD is desired-state API; this is internal recovery state, not user-facing spec.
-- **E — External store (etcd lease / object store).** Rejected: new infra dependency for a problem the API server already solves.
+- Cold failover continuity.
+- Existing freshness rules remain authoritative.
+- No cluster-wide ConfigMap/Secret informer.
+- Collision-resistant ownership.
+- Configurable data classification.
+- Best-effort persistence must be observable.
 
 ## Decision
 
-Adopt **Option B**. On every successful fetch the reconciler writes the tracked, capped OMM set to a per-CR ConfigMap; on a cold reconcile (empty in-memory cache) it hydrates the cache from that ConfigMap before deciding fetch-vs-serve.
+### Name
 
-### Design
+Use:
 
-- **Minimal payload.** Persist only `FilterOMMs(result.OMMs, spec.satellites.noradIDs)` capped at `maxPropagatedStates` (128) — the same set `propagateStates` would use, never the full upstream response. `sgp4.OMM`'s CelesTrak JSON tags let it round-trip losslessly through `sgp4.ParseOMMs` (its `EPOCH` is a string, so no time-precision loss).
-- **Identity + integrity metadata** (annotations): source identity (`fetchInputKey` = source type+URL), original fetch time (RFC3339Nano), payload sha256 digest, and owner UID. Restore refuses unless the digest is intact **and** the fetchKey and UID match the live object — so a hand-edit, a source change, or a delete-recreate never restores wrong or orphaned data.
-- **Conditional-GET validators** (annotations, CelesTrak only): the origin's `ETag` and `Last-Modified`. On cold-start restore they are re-seeded into the fetcher (`SeedConditionalCache`) so the first fetch this process makes is a conditional GET (`If-None-Match` / `If-Modified-Since`) — a `304 Not Modified` instead of a full re-download, which is politer to CelesTrak's usage policy after a restart/failover. Only the **validators** are re-seeded, never the body: the fetcher's OMM cache is keyed by URL and shared across every CR fetching that URL, whereas a durable entry holds only that CR's filtered subset. A resulting cold-start `304` thus carries no body, and `obtainOMMs` re-serves the restoring CR's own cache — so continuity holds with `NotModified` semantics rather than collapsing to zero states. The validators are kept in lockstep with the body (cleared when the origin stops sending them), so a restore never seeds a stale validator.
-- **Freshness preserved.** The restored entry keeps its ORIGINAL fetch time, so the normal window / backoff / `maxEpochAge` gates apply exactly as for a warm cache. Restore removes the cold-start cliff and nothing more; it cannot resurrect data the freshness gates would reject.
-- **GC via owner reference.** The ConfigMap is `SetControllerReference`'d to its SatelliteEphemeris, so k8s garbage-collects it on CR deletion. The controller therefore needs `configmaps` `get;create;update` — **no delete** verb.
-- **No resourceVersion churn.** Persist no-ops when the payload digest is unchanged, so the ~2 h fetch cadence does not rewrite the ConfigMap every cycle (consistent with the #204-G3 no-op-write discipline).
-- **Uncached reads.** Both the persist Get-before-write and the restore Get go through `APIReader` (falling back to the cached client only when unwired, e.g. tests), so no cluster-wide ConfigMap informer is started and `configmaps list;watch` is not required. On a cold leader this also reads the ConfigMap the previous leader wrote even before the informer cache would have synced.
-- **Size bound.** Payloads over `maxOMMCacheBytes` (900 KiB, under the 1 MiB ConfigMap limit) skip persistence (logged); the live warm cache is unaffected. Unreachable at the 128-state cap today, kept as a defensive guard.
+```text
+<readable-prefix>-<hash>-omm-cache
+```
 
-### Visibility: ConfigMap, not Secret
+The hash is at least 128 bits derived from namespace, name and UID. The result
+must fit the DNS/subdomain limit.
 
-Orbital element sets for tracked satellites are **public** data (they come from public CelesTrak/Space-Track catalogs), so a ConfigMap exposes nothing sensitive — and `NTNCellConfig` already persists derived ephemeris to a ConfigMap, so this adds no new exposure class. Space-Track *credentials* remain in their Secret and are never written here (only the resulting elements are). If a specific deployment classifies its element sets as sensitive (e.g. a private/supplemental catalog), migrating the cache to a Secret is a mechanical follow-up: same keys, same validation, `Secret` in place of `ConfigMap`.
+A migration path checks the old truncated name once, validates UID/fetch key,
+then adopts or rewrites to the new name.
 
-## Consequences
+### Payload
 
-**Positive**
-- Restart / leader-failover continuity through a sustained upstream outage: a cold process re-propagates from the last-good elements instead of falling off the "nothing to propagate" cliff.
-- No new infra, no new cluster-wide caching, minimal RBAC (`configmaps get;create;update`).
-- Best-effort and off the hot path: a persist/restore failure degrades to today's behaviour, never fails a reconcile.
+Persist only the selected and capped OMM set used by propagation. Store:
 
-**Negative / limitations**
-- One extra ConfigMap per SatelliteEphemeris (small; GC'd with the CR).
-- **Name truncation edge:** CR names are bounded to the 253-char k8s limit by truncation. Two CR names longer than 243 chars sharing a 243-char prefix in the same namespace would map to the same cache ConfigMap; the restore UID gate prevents wrong-data restore, so the only effect is that the losing CR forgoes restart-continuity. Acceptable given k8s names are ≤253 and such collisions are pathological.
-- Persistence lags the in-memory cache by one successful fetch (the cache is written after a fetch, not on every propagation) — restart continuity is bounded by `maxEpochAge` from the last *fetch*, which is the intended freshness bound anyway.
+- serialized OMMs;
+- SHA-256 digest;
+- source/fetch identity;
+- owner UID;
+- original fetch time;
+- count;
+- ETag and Last-Modified where applicable;
+- schema version.
 
-## Testing
+### Storage mode
 
-- **Unit** (`satelliteephemeris_ommcache_persist_test.go`): persist/restore round-trip incl. nanosecond fetch-time and digest integrity; restore refuses digest-corrupt / missing-label / empty / UID-mismatch / fetchKey-mismatch inputs; no-op on identical digest; owner-ref for GC; oversize skip; name truncation; payload filter+cap; and a cold-start integration test that reconciles a fresh reconciler (empty cache) against a simulated outage and asserts the epoch keeps advancing — it fails if the restore hook is removed.
-- **E2E acceptance** (`TestHAOutageContinuityAcrossFailover`, tag `e2e_ha`): warm from the in-cluster mock, scale the mock to zero (total outage), verify the epoch advances, kill the current leader, and verify the cold new leader keeps advancing the epoch beyond `propagationEpochLead` and stays in the future (runtime-push ready). This is the acceptance gate for "outage continuity solved".
+Operator configuration:
+
+```yaml
+ommCache:
+  mode: ConfigMap # ConfigMap | Secret | Disabled
+```
+
+- `ConfigMap`: suitable only when the operator classifies element sets as
+  non-sensitive.
+- `Secret`: same validation and lifecycle, encrypted-at-rest subject to cluster
+  configuration.
+- `Disabled`: no durable outage continuity.
+
+Credentials are never copied.
+
+### Restore
+
+Restore only when:
+
+- owner UID matches;
+- fetch identity matches;
+- digest matches;
+- schema version is understood;
+- payload parses and validates;
+- freshness rules allow its use.
+
+The original fetch time is preserved. Restore cannot make old data fresh.
+
+### API access
+
+Use an uncached reader for one-off gets. Writes use normal client methods.
+Required verbs are minimal and mode-dependent. Owner reference provides GC.
+
+### Observability
+
+Metrics and conditions/logs cover:
+
+- persist success/failure;
+- restore success/refusal reason;
+- payload age;
+- digest mismatch;
+- oversize skip;
+- legacy-name migration;
+- cache mode.
+
+A persist failure does not fail live reconciliation, but repeated failure must
+be visible.
+
+## Invariants
+
+- Cache restore never bypasses source-epoch freshness.
+- Two resources cannot intentionally share a cache object.
+- A delete/recreate cannot adopt the old object without UID validation.
+- Conditional validators are coupled to the same payload.
+- No credential data is persisted.
+- Best-effort failure is observable.
+
+## Alternatives
+
+**Status payload.** Rejected due to churn and public API pollution.
+
+**Prefix truncation only.** Rejected due to deterministic collisions.
+
+**Always ConfigMap.** Rejected because catalog visibility is deployment
+specific.
+
+**Dedicated cache CRD.** Rejected; recovery state is not user desired state.
+
+## Test plan
+
+- persist/restore round trip;
+- digest/fetchKey/UID/schema mismatch;
+- two 253-character names sharing a prefix produce different objects;
+- legacy-name migration;
+- Secret/ConfigMap/Disabled modes;
+- oversize behavior;
+- original timestamp/freshness preservation;
+- 304 conditional-fetch restore path;
+- HA outage failover E2E;
+- metrics for every refusal/failure category.
 
 ## References
 
-- `internal/controller/satelliteephemeris_ommcache_persist.go` (implementation)
-- `internal/controller/satelliteephemeris_controller.go` — `acquireOMMs` (restore hook), `obtainOMMs` (persist hook + fetch-failure fallback)
-- ADR 0006 (propagation heartbeat), #230 (active-passive HA)
+- Kubernetes object size/ConfigMap behavior:
+  https://kubernetes.io/docs/concepts/configuration/configmap/
+- Kubernetes Secrets:
+  https://kubernetes.io/docs/concepts/configuration/secret/
+- Space-Track:
+  https://www.space-track.org/
+- CelesTrak:
+  https://celestrak.org/

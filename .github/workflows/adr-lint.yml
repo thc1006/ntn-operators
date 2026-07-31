@@ -5,11 +5,13 @@ on:
     branches: [main]
     paths:
       - 'docs/adr/**'
+      - 'checks/check_adr_metadata.py'
       - 'hack/check-adr-index.sh'
       - '.github/workflows/adr-lint.yml'
   pull_request:
     paths:
       - 'docs/adr/**'
+      - 'checks/check_adr_metadata.py'
       - 'hack/check-adr-index.sh'
       - '.github/workflows/adr-lint.yml'
 
@@ -22,7 +24,7 @@ permissions:
 
 jobs:
   adr-lint:
-    name: ADR index + numbering
+    name: ADR metadata + index
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout
@@ -30,5 +32,8 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Validate ADR index and numbering
+      - name: Validate ADR front matter and numbering
+        run: python3 checks/check_adr_metadata.py docs/adr
+
+      - name: Validate ADR index and internal links
         run: ./hack/check-adr-index.sh

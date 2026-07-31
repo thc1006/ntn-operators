@@ -49,7 +49,7 @@ for f in "$adr_dir"/[0-9][0-9][0-9][0-9]-*.md; do
   title_num=$(grep -m1 -oE '^# ADR [0-9]{4}' "$f" | grep -oE '[0-9]{4}' || true)
   [[ "$title_num" == "$num" ]] || err "$base: title number '${title_num:-none}' != filename number '$num'"
 
-  grep -qE '^- Status:' "$f" || err "$base: missing '- Status:' line"
+  grep -qE '^status:|^- Status:' "$f" || err "$base: missing status (front-matter 'status:' or '- Status:' line)"
 
   grep -qE "(^|[^0-9])$num([^0-9]|\$)" "$readme" || err "$base: ADR $num not listed in $readme"
 
