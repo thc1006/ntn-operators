@@ -259,13 +259,15 @@ func TestResolveRemoteControlTLS_TokenValidation(t *testing.T) {
 	}
 	const ns = "ns1"
 	ctx := context.Background()
-	// A labelled Opaque Secret carrying only the token; ca.crt is omitted (system roots), which does
-	// not affect the token check.
+	certPEM, _ := selfSignedPEM(t)
+	// A labelled Opaque Secret carrying the token AND a pinned ca.crt — the latter is required for any
+	// bearer token (a token without ca.crt is refused before this token check), so it must be present
+	// for the token-content validation to be reachable.
 	newRWithToken := func(token []byte) *NTNCellConfigReconciler {
 		sec := &corev1.Secret{
 			ObjectMeta: metav1.ObjectMeta{Name: "s", Namespace: ns,
 				Labels: map[string]string{remoteControlCredentialLabel: "true"}},
-			Data: map[string][]byte{"token": token},
+			Data: map[string][]byte{"token": token, "ca.crt": certPEM},
 		}
 		c := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(sec).Build()
 		return &NTNCellConfigReconciler{Client: c, APIReader: c}
@@ -518,4 +520,102 @@ func TestPushEphemerisUpdateIfNeeded_CredentialFailuresUniform(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestResolveRemoteControlTLS_BearerRequiresPinnedCA covers the transmit-a-secret gate. It lives
+// apart from TestResolveRemoteControlTLS because it needs no shared fixture beyond the helpers
+// below and keeps that (already large) table readable.
+func TestResolveRemoteControlTLS_BearerRequiresPinnedCA(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := ntnv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	certPEM, keyPEM := selfSignedPEM(t)
+	const ns = "ns1"
+	ctx := context.Background()
+
+	newR := func(objs ...runtime.Object) *NTNCellConfigReconciler {
+		b := fake.NewClientBuilder().WithScheme(scheme)
+		for _, o := range objs {
+			b = b.WithRuntimeObjects(o)
+		}
+		c := b.Build()
+		return &NTNCellConfigReconciler{Client: c, APIReader: c}
+	}
+	secret := func(name string, data map[string][]byte) *corev1.Secret {
+		return &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: name, Namespace: ns,
+				Labels: map[string]string{remoteControlCredentialLabel: "true"},
+			},
+			Data: data,
+		}
+	}
+
+	// A bearer token must never be transmitted to a server vouched for only by the public
+	// roots. remoteControl.endpoint is caller-controlled and ServerName is derived from it,
+	// so with system roots anyone who owns a domain can obtain a publicly-trusted
+	// certificate for it and be handed the token verbatim — the #251 confused deputy
+	// completing without the label gate being bypassed at all.
+	t.Run("token without ca.crt → rejected (would trust the system roots)", func(t *testing.T) {
+		r := newR(secret("s", map[string][]byte{"token": []byte("shhh")}))
+		rc := &ntnv1alpha1.RemoteControlRef{Endpoint: "attacker.example.com:443",
+			TLS: &ntnv1alpha1.RemoteControlTLS{Mode: "tls", SecretName: "s"}}
+		cfg, tok, err := r.resolveRemoteControlTLS(ctx, ns, rc)
+		if err == nil {
+			t.Fatal("a bearer token with no pinned CA must be refused: the endpoint is caller-controlled, so the system roots make the destination forgeable")
+		}
+		if tok != "" || cfg != nil {
+			t.Fatalf("nothing may be returned on rejection, got cfg=%v tok=%q", cfg, tok)
+		}
+		// #296 surfaces EVERY resolveRemoteControlTLS failure uniformly
+		// (RemoteControlCredentialUnavailable, 5-minute self-heal), so this rejection is
+		// classified with the rest — see TestPushEphemerisUpdateIfNeeded_CredentialFailuresUniform.
+	})
+
+	// The line is drawn at TRANSMITTING a secret: mode=mtls proves a key rather than
+	// sending it, so a misdirected mTLS dial is identity misuse, not credential theft
+	// (ADR-0009 draws the same line). Pinning it would be a different, larger change.
+	t.Run("mtls without ca.crt and without token → still allowed", func(t *testing.T) {
+		r := newR(secret("s", map[string][]byte{"tls.crt": certPEM, "tls.key": keyPEM}))
+		rc := &ntnv1alpha1.RemoteControlRef{Endpoint: "h:1",
+			TLS: &ntnv1alpha1.RemoteControlTLS{Mode: "mtls", SecretName: "s"}}
+		if _, _, err := r.resolveRemoteControlTLS(ctx, ns, rc); err != nil {
+			t.Fatalf("mtls sends no secret, so the system roots are not a transmit risk: %v", err)
+		}
+	})
+
+	// The invariant behind both cases above, stated once so a future key/mode addition
+	// cannot reopen it case-by-case: ANY successful resolution that hands back a token must
+	// have pinned roots.
+	t.Run("invariant: a returned token always comes with pinned roots", func(t *testing.T) {
+		for name, data := range map[string]map[string][]byte{
+			"token only":          {"token": []byte("shhh")},
+			"token + ca":          {"token": []byte("shhh"), "ca.crt": certPEM},
+			"ca only":             {"ca.crt": certPEM},
+			"token + client cert": {"token": []byte("shhh"), "tls.crt": certPEM, "tls.key": keyPEM},
+			"everything":          {"token": []byte("shhh"), "ca.crt": certPEM, "tls.crt": certPEM, "tls.key": keyPEM},
+		} {
+			t.Run(name, func(t *testing.T) {
+				mode := "tls"
+				if len(data["tls.crt"]) > 0 {
+					mode = "mtls"
+				}
+				r := newR(secret("s", data))
+				rc := &ntnv1alpha1.RemoteControlRef{Endpoint: "h:1",
+					TLS: &ntnv1alpha1.RemoteControlTLS{Mode: mode, SecretName: "s"}}
+				cfg, tok, err := r.resolveRemoteControlTLS(ctx, ns, rc)
+				if err != nil || tok == "" {
+					return // refused, or nothing to transmit — both fine
+				}
+				if cfg == nil || cfg.RootCAs == nil {
+					t.Fatalf("a token was returned for %q with RootCAs=nil: it would be sent to whatever the public roots vouch for", name)
+				}
+			})
+		}
+	})
+
 }

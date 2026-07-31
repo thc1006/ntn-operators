@@ -595,7 +595,10 @@ the cell the gNB booted with. Unset ⇒ ConfigMap bootstrap path only.<br/>
         <td>
           ephemerisNoradID selects which satellite's propagated state vector, from the
 referenced SatelliteEphemeris (ephemerisRef), to push at runtime (#176). When
-unset, the referenced ephemeris's first propagated state is used.<br/>
+unset, the single tracked satellite's state is used; if the referenced ephemeris
+exposes more than one satellite the push fails closed (EphemerisPushed=False,
+reason EphemerisSelectionAmbiguous) until this field selects one — the controller
+never guesses which satellite to serve.<br/>
         </td>
         <td>false</td>
       </tr><tr>
@@ -1971,6 +1974,11 @@ shared secret sent as Authorization: Bearer — optional), and, for mode=mtls,
 "tls.crt" + "tls.key" (the client certificate/key). A bare shared secret is
 replayable, so it is only ever sent over the wss:// (TLS) connection.
 
+"ca.crt" is REQUIRED whenever "token" is set: endpoint is caller-controlled, so a
+token validated only by the public roots could be delivered to any host whose owner
+can obtain a publicly-trusted certificate. Pin the gNB's own CA. mode=mtls without
+ca.crt is still permitted — it proves a key rather than sending one.
+
 SECURITY: the Secret's owner must opt it in for remote-control use with the label
 "ntn.operators.dev/remote-control-credential: true", and a Kubernetes API
 credential (a service-account or bootstrap-token Secret) is refused. This is a
@@ -2187,6 +2195,16 @@ NTNCellConfigStatus defines the observed state of NTNCellConfig.
         <td>string</td>
         <td>
           configMapRef is the name of the ConfigMap containing the generated config.<br/>
+        </td>
+        <td>false</td>
+      </tr><tr>
+        <td><b>lastPushedSatSwitchDigest</b></td>
+        <td>string</td>
+        <td>
+          lastPushedSatSwitchDigest is the content digest of the sat_switch_with_resync last delivered
+to the gNB by the runtime push. The switch is re-attached to a runtime update only when this
+changes, so a (possibly non-idempotent) MAC/RRC-resync command is not re-sent on every
+ephemeris heartbeat (issue #207). Empty when no switch has been sent.<br/>
         </td>
         <td>false</td>
       </tr></tbody>
@@ -2453,6 +2471,7 @@ resets on any healthy reliable sample; losing it on a controller restart or
 leader-election handoff only re-requires confirmation (a DELAY), never causes
 a spurious switch.<br/>
           <br/>
+            <i>Format</i>: int32<br/>
             <i>Minimum</i>: 1<br/>
             <i>Maximum</i>: 10<br/>
         </td>
@@ -2478,8 +2497,11 @@ after a switchback before another failover to satellite may be taken. It
 bounds sub-minute ping-pong after a hand-back. It is a soft, bounded delay
 — a genuinely failing terrestrial still fails over once the dwell elapses,
 so it never indefinitely blocks a real failover. 0 (the default) disables
-it; 30s–120s is a sane range relative to a LEO pass.<br/>
+it; 30s–120s is a sane range relative to a LEO pass. A negative value would
+silently disable the dwell (elapsed < negative is never true), so admission
+bounds it to [0s, 24h].<br/>
           <br/>
+            <i>Validations</i>:<li>duration(self) >= duration('0s') && duration(self) <= duration('24h'): minTerrestrialDwell must be a non-negative duration no greater than 24h</li>
             <i>Format</i>: duration<br/>
         </td>
         <td>false</td>
@@ -2497,8 +2519,11 @@ it; 30s–120s is a sane range relative to a LEO pass.<br/>
         <td>string</td>
         <td>
           switchbackDelay is how long to wait after terrestrial recovers
-before switching back (prevents flapping).<br/>
+before switching back (prevents flapping). A negative value is meaningless
+here, so admission bounds it to [0s, 24h] (24h is a fat-finger ceiling, far
+above any LEO-pass-relative value).<br/>
           <br/>
+            <i>Validations</i>:<li>duration(self) >= duration('0s') && duration(self) <= duration('24h'): switchbackDelay must be a non-negative duration no greater than 24h</li>
             <i>Format</i>: duration<br/>
             <i>Default</i>: 60s<br/>
         </td>
@@ -2527,8 +2552,12 @@ satellitePath defines the failover satellite connectivity.
         <td><b>ephemerisRef</b></td>
         <td>string</td>
         <td>
-          ephemerisRef is the name of the SatelliteEphemeris resource
-used to determine satellite pass availability.<br/>
+          ephemerisRef is the name of the SatelliteEphemeris resource used to determine
+satellite pass availability. The referenced ephemeris is treated as a
+CONSTELLATION POOL: the satellite path is available whenever ANY tracked member
+is overhead and deliverable — the slice is deliberately not pinned to one NORAD,
+because LEO members hand over. Which member a given cell broadcasts is
+NTNCellConfig.ephemerisNoradID's concern, not this path's. See ADR-0008.<br/>
         </td>
         <td>true</td>
       </tr><tr>
@@ -3577,9 +3606,20 @@ PassWindow represents a predicted contact opportunity between a satellite and gr
         <td><b>satellite</b></td>
         <td>string</td>
         <td>
-          satellite is the name or NORAD ID of the satellite.<br/>
+          satellite is the satellite's display name (externally sourced OMM ObjectName), bounded and
+rune-safe. The canonical identity is noradID; treat this as a label only.<br/>
         </td>
         <td>true</td>
+      </tr><tr>
+        <td><b>noradID</b></td>
+        <td>integer</td>
+        <td>
+          noradID is the satellite's NORAD catalog number — the canonical key that maps this window
+to its propagatedStates entry, so a consumer (NTNSlice) can gate pass availability on the
+backing element set's delivery freshness (same contract as the runtime push). 0 only for
+windows written before this field existed (freshness then treated as unverifiable).<br/>
+        </td>
+        <td>false</td>
       </tr></tbody>
 </table>
 

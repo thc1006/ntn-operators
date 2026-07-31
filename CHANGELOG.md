@@ -112,6 +112,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **A `remoteControl.tls` bearer token is no longer sent to a server trusted only by the public
+  roots.** `resolveRemoteControlTLS` pinned `RootCAs` to the Secret's `ca.crt` when present and
+  otherwise fell back to the system trust store — and `remoteControl.endpoint` is CR-author
+  controlled, with `ServerName` derived from it. So a principal holding the shipped
+  `ntncellconfig-editor-role` (NTNCellConfig write, **no** `secrets get`) could reference any
+  opted-in Secret carrying a `token` but no `ca.crt`, point the endpoint at a host they own,
+  present an ordinary publicly-trusted certificate for it, and be handed the token verbatim — the
+  #251 confused deputy completing without the label gate being bypassed at all. A Secret carrying a
+  `token` must now also pin `ca.crt`, or the push is refused as a permanent credential error (the
+  same uniform, non-oracle failure as the other credential gates). `mode: mtls` without `ca.crt` is
+  still permitted: it **proves** a key rather than sending one, so a misdirected mTLS dial is
+  identity misuse rather than credential theft — the line ADR-0009 already draws. This is
+  **default-on** and complements the two opt-in controls that also cover this path but ship off:
+  the endpoint allow-list (#300) and the credential-reference admission policy (#251). Upstream
+  precedent: kubeadm pins a CA public key for token-based discovery rather than trusting the system
+  store before sending its bootstrap token. No test previously covered token-without-`ca.crt`;
+  the new invariant test asserts that **any** successful resolution returning a token has pinned
+  roots, so a future key or mode cannot reopen it case-by-case. Mutation-verified.
+
 - **External OMM `OBJECT_NAME` can no longer amplify the SatelliteEphemeris status past the etcd object
   limit.** `PropagatedState.satellite` was already bounded (MaxLength 64), but `PassWindow.satellite`
   copied the full external name into up to `MaxPassWindows` (500) windows, the pass-prediction
@@ -578,6 +597,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   controller owner reference and is garbage-collected with the CR, but anything mounting it **by
   name** (a gNB Pod spec) must be repointed. Check with
   `kubectl get ntncellconfig -A -o name | awk 'length($0) > 250'` before upgrading.
+- **A `remoteControl.tls` Secret that carries `token` must now also carry `ca.crt`.** Pushes using
+  such a Secret without a pinned CA now fail with a permanent credential error instead of trusting
+  the system roots (see Security above). Find affected Secrets before upgrading:
+
+  ```bash
+  kubectl get secret -A -l ntn.operators.dev/remote-control-credential=true \
+    -o jsonpath='{range .items[*]}{.metadata.namespace}/{.metadata.name}{"\t"}token={.data.token}{"\t"}ca={.data.ca\.crt}{"\n"}{end}' \
+    | awk -F'\t' '$2 != "token=" && $3 == "ca="'
+  ```
+
+  Add the gNB's CA to `ca.crt` in each. If a listed gNB genuinely uses a publicly-trusted
+  certificate, put that CA bundle in `ca.crt` to opt in explicitly.
 
 - **A satellite whose element set is stale beyond `maxEpochAge` now holds NTNSlice on terrestrial**
   instead of failing over to it — previously NTNSlice could steer traffic onto a satellite whose stale
