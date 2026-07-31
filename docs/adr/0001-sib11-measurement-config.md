@@ -1,14 +1,24 @@
-# ADR 0001 — SIB11 / Neighbor Measurement Configuration Scope
+# ADR 0001 — Neighbor mobility & measurement scope: SIB2/3/4 reselection now, SIB11 & MeasConfig deferred
 
-- Status: **Accepted (scope-pivoted)**
+- Status: **Accepted (scope-pivoted)** · taxonomy corrected 2026-07-31 (SIB11 ≠ `MeasConfig` — see Terminology)
 - Date: 2026-04-19
 - Deciders: @thc1006
 - Related issue: [#47](https://github.com/thc1006/ntn-operators/issues/47)
 - Related implementations in-tree: [#19](https://github.com/thc1006/ntn-operators/issues/19), [#45](https://github.com/thc1006/ntn-operators/issues/45), [#46](https://github.com/thc1006/ntn-operators/issues/46)
 
+## Terminology (3GPP TS 38.331) — read this first
+
+Earlier drafts of this ADR and issue #47 used "SIB11" as an umbrella for all neighbor-measurement configuration. That is imprecise: three distinct mechanisms are involved, and only one is what #47 originally named.
+
+- **Idle-mode cell reselection — SIB2 / SIB3 / SIB4** (`cellReselectionInfoCommon`, `intraFreqNeighCellInfo`, `interFreqCarrierFreqInfo`). Broadcast; drives autonomous reselection while the UE is idle. **This is what this ADR exposes** (Option C, `neighborMobility`).
+- **Idle/inactive measurement — SIB11** (`MeasIdleConfigSIB` / `MeasIdleCarrierNR`). Broadcast; configures *measurements* an idle/inactive UE performs and logs or reports at next connection — not reselection, and not the connected-mode set. **Deferred.**
+- **Connected-mode measurement — `MeasConfig`** (`MeasObjectNR`, `ReportConfigNR`, `MeasId`, `QuantityConfig`, `MeasGapConfig`; events A1–A6 / B1–B2). Delivered by **dedicated `RRCReconfiguration`**, not any SIB; drives event-triggered handover reporting. **Deferred.**
+
+So `MeasObjectNR` / `ReportConfigNR` / `MeasIdList` / `QuantityConfig` — which #47 attributed to "SIB11" — belong to **`MeasConfig`** (connected-mode); SIB11 proper carries `MeasIdleConfigSIB`. This correction does **not** change the decision below: OCUDU exposes none of the SIB11 or `MeasConfig` surface, so both remain deferred and only SIB2/3/4 reselection ships now. The sections below are corrected to this taxonomy, not left for the reader to re-map.
+
 ## Context
 
-Issue #47 asked: *"SIB11 NR neighbor measurement configuration is not modelable from `NTNCellConfig`. Design a path for `MeasObjectNR` / `ReportConfigNR` / `MeasIdList` / `QuantityConfig`."*
+Issue #47 asked: *"SIB11 NR neighbor measurement configuration is not modelable from `NTNCellConfig`. Design a path for `MeasObjectNR` / `ReportConfigNR` / `MeasIdList` / `QuantityConfig`."* (Per Terminology above, those four IEs are `MeasConfig` — connected-mode — not SIB11; the gap #47 names is real, the label was imprecise.)
 
 The initial hypothesis was that OCUDU (the srsRAN successor on `gitlab.com/ocudu/ocudu`) already emits some `cell_cfg.meas_config` subset we could wrap in a CRD, mirroring how we mapped SIB19 in #19. An upstream survey (`dev` HEAD, 2026-04-19) falsifies that hypothesis.
 
@@ -25,7 +35,7 @@ Files surveyed (raw URLs):
 
 - No `meas_config`, `meas_obj_to_add_mod`, `report_config`, `meas_gap`, `meas_id`, or `quantity_config` key anywhere in the YAML writer or CLI11 schema.
 - No `sib11_config` / `sib12_config` struct in `du_high_config.h`.
-- No SIB11 ASN.1 encoder wiring in the gNB control-plane path. Confirmed separately by upstream discussion [srsRAN_4G#1255](https://github.com/srsran/srsRAN_4G/discussions/1255): *"SIB10/11/12 are unsupported"*.
+- No SIB11 ASN.1 encoder wiring in the gNB control-plane path. The absence in `du_high_config.h` and the YAML writer is the evidence. (The often-cited [srsRAN_4G#1255](https://github.com/srsran/srsRAN_4G/discussions/1255) *"SIB10/11/12 are unsupported"* is about **LTE** SIB10/11/12 — the ETWS/CMAS *warning-message* SIBs of TS 36.331 — and says nothing about NR SIB11 `MeasIdleConfigSIB`; it is not evidence for this finding.)
 
 What **is** present (idle-mode cell reselection SIBs, not connected-mode measurement):
 
@@ -42,13 +52,13 @@ What **is** present (idle-mode cell reselection SIBs, not connected-mode measure
 ## Decision Drivers
 
 - **D1. Honesty.** A CRD field that claims to influence OTA behavior but silently noops is a correctness and operability trap. Conditions alone do not rescue it — users still write YAML expecting behavior they will not see.
-- **D2. Short-term operator value.** Partners (樺漢 / 零壹 / 台本) need *some* neighbor-mobility knob to exercise handover behavior in NTN pilots. Idle reselection via SIB2/3/4 is not perfect, but it is real and measurable.
-- **D3. Long-term upstream alignment.** When OCUDU lands SIB11 / `MeasConfig` — likely as a community contribution we could seed (see [upstream SIB19 pattern at issue #310](https://github.com/srsran/srsRAN_Project/issues/1066)) — we want a stable CRD schema that extends rather than redesigns.
+- **D2. Short-term operator value.** Partners (樺漢 / 零壹 / 台本) need *some* neighbor-mobility knob for NTN pilots. SIB2/3/4 exercises **idle/inactive cell reselection** — which is *not* handover (network-initiated connected-mode handover needs `MeasConfig`, deferred) — but reselection is real, OTA-verifiable behaviour today.
+- **D3. Long-term upstream alignment.** When OCUDU lands SIB11 (`MeasIdleConfigSIB`) or connected-mode `MeasConfig` — likely as a community contribution we could seed (see [upstream SIB19 pattern at issue #310](https://github.com/srsran/srsRAN_Project/issues/1066)) — we want a stable CRD schema that extends rather than redesigns.
 - **D4. Validation blast radius.** Whatever we add must compose cleanly with existing CEL on `NTNCellConfig` and not bloat the CRD surface area for users who don't care about mobility.
 
 ## Options Considered
 
-### Option A — Wrap SIB11 / `MeasConfig` speculatively, gated by a `Preview` marker
+### Option A — Wrap connected-mode `MeasConfig` (and SIB11 idle-measurement) speculatively, gated by a `Preview` marker
 
 Add `NTNCellConfig.spec.cellOverrides.measConfig` with `MeasObjectNR`, `ReportConfigNR` (events A1-A6), `QuantityConfig`, `MeasGapConfig`, `NTNMeasGap`. Controller emits `Condition{Type=MeasConfigApplied, Status=False, Reason=UpstreamUnsupported}` on set-but-not-reachable fields.
 
@@ -98,14 +108,14 @@ Track SIB11 / `MeasConfig` / `NTNMeasGap` as future work pinned to an "upstream 
 
 **Option C.** Specifically:
 
-1. **This ADR pivots #47.** No SIB11-proper CRD work today. #47 is re-scoped to track the upstream dependency and the new issue filed under #47-follow-up. Add a comment to #47 summarising this ADR and close as *won't-fix-until-upstream*; re-open when OCUDU's `du_high_config.h` gains a `meas_config`-shaped struct.
+1. **This ADR pivots #47, and splits it.** No SIB11-proper CRD work today. The single "SIB11" framing of #47 is replaced by **two** upstream-blocked tracking issues, because they are different 3GPP mechanisms: (a) *idle/inactive measurement* — SIB11 `MeasIdleConfigSIB`; (b) *connected-mode measurement* — `MeasConfig` (`MeasObjectNR`/`ReportConfigNR`/`MeasId`/`QuantityConfig`, delivered by dedicated `RRCReconfiguration`). #47 is closed as superseded by the two; each is worked when OCUDU's `du_high_config.h` gains the matching struct.
 2. **File a new high-priority issue** for the SIB2/3/4 idle reselection CRD fields (proposed title: *"api: `NTNCellConfig.spec.neighborMobility` — expose SIB2 / SIB3 / SIB4 idle-mode reselection"*). Scope:
    - `neighborMobility.reselection` → `cell_cfg.sib.sib2.*`
    - `neighborMobility.intraFreqNeighbors[]` → `cell_cfg.sib.sib3.intra_freq_neigh_cell_list`
    - `neighborMobility.interFreqCarriers[]` → `cell_cfg.sib.sib4.inter_freq_carrier_freq_list`
    - Non-breaking additive change. CEL: `size(intraFreqNeighbors) <= 16`, `size(interFreqCarriers) <= 8` matching 3GPP MAX sizes.
    - Deliverable: types + deepcopy + provider template + config_test golden cases + sample YAML.
-3. **Track SIB11 upstream blocker** in repo notes. Watch OCUDU TSC minutes; when NR MeasConfig lands in `du_high_config.h`, revisit and open an issue: *"api: extend `neighborMobility.measConfig` for SIB11 / connected-mode measurements"*. That issue inherits the partial design sketched in Option A.
+3. **Track both upstream blockers** (the two issues from item 1) in repo notes. Watch OCUDU TSC minutes; when `du_high_config.h` gains an idle `MeasIdleConfigSIB` surface or a connected-mode `MeasConfig` surface, revisit the matching issue. The connected-mode issue inherits the partial design sketched in Option A.
 
 ## Consequences
 
@@ -154,7 +164,7 @@ Entry points (verified 2026-04-19):
    - Effort: 2–4 weeks gNB engineering. Medium L1/L2 depth required; most touch points are C++ config + RRC packing, which are tractable from our background.
 
 2. **NTN `MeasGapConfig` (narrow subset of full MeasConfig)**
-   - Why narrow: UEs doing inter-frequency measurement on an NTN cell need longer gaps to accommodate 5–30 ms propagation delay. This is NTN-specific and does *not* require full `SIB11 / MeasObjectNR` wiring — a single `cell_cfg.meas_gap { gap_offset_ms, gap_length_ms, periodicity_ms, pre_configured_gap: true }` block unblocks real-world scenarios.
+   - Why narrow: UEs doing inter-frequency measurement on an NTN cell need longer gaps to accommodate 5–30 ms propagation delay. This is NTN-specific and does *not* require full connected-mode `MeasConfig` (`MeasObjectNR` …) wiring — a single `cell_cfg.meas_gap { gap_offset_ms, gap_length_ms, periodicity_ms, pre_configured_gap: true }` block unblocks real-world scenarios.
    - Why us: NTN expertise is our differentiator; a terrestrial-focused contributor is less likely to scope the NTN propagation constraints correctly.
    - Effort: 1–2 weeks. YAML writer + CLI11 schema + config struct + dedicated-signaling plumb-through. Pairs naturally with our #47 follow-up.
 
@@ -187,7 +197,7 @@ Entry points (verified 2026-04-19):
 ## References
 
 - OCUDU repo: [gitlab.com/ocudu/ocudu](https://gitlab.com/ocudu/ocudu) (`dev` @ 2026-04-19)
-- srsRAN_4G SIB10/11/12 unsupported: [Discussion #1255](https://github.com/srsran/srsRAN_4G/discussions/1255)
+- srsRAN_4G (**LTE**) SIB10/11/12 = ETWS/CMAS warning-message SIBs (TS 36.331), unsupported: [Discussion #1255](https://github.com/srsran/srsRAN_4G/discussions/1255) — *not* NR SIB11 `MeasIdleConfigSIB`; retained only to retract it as evidence.
 - Upstream SIB19 dynamic-update precedent: [srsRAN_Project #1066](https://github.com/srsran/srsRAN_Project/issues/1066)
 - 3GPP TS 38.331 §5.5 *Measurements*, §6.2.2 *SystemInformationBlockType11*
-- Related ADR (future): `0002-sib11-upstream-unlocked.md` when applicable.
+- Future work (no ADR number reserved yet): a follow-up ADR when OCUDU lands SIB11 `MeasIdleConfigSIB` and/or connected-mode `MeasConfig`.
