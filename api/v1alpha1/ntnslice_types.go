@@ -202,7 +202,12 @@ type FailoverPolicy struct {
 	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('0s') && duration(self) <= duration('24h')",message="switchbackDelay must be a non-negative duration no greater than 24h"
 	SwitchbackDelay metav1.Duration `json:"switchbackDelay,omitempty"`
 
-	// sessionContinuity preserves active sessions during failover.
+	// sessionContinuity is accepted for forward compatibility but is NOT enforced by this
+	// build: no runtime session preservation is performed during a path switch, so active
+	// sessions may drop on failover regardless of this value. It is retained so the intent
+	// stays expressible and a future release can honor it (#69); do not rely on it for
+	// session survival today. The default stays true only to preserve the field's prior
+	// admission behavior — it turns no preservation on.
 	// +kubebuilder:default=true
 	SessionContinuity bool `json:"sessionContinuity,omitempty"`
 

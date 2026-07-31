@@ -2515,7 +2515,12 @@ bounds it to [0s, 24h].<br/>
         <td><b>sessionContinuity</b></td>
         <td>boolean</td>
         <td>
-          sessionContinuity preserves active sessions during failover.<br/>
+          sessionContinuity is accepted for forward compatibility but is NOT enforced by this
+build: no runtime session preservation is performed during a path switch, so active
+sessions may drop on failover regardless of this value. It is retained so the intent
+stays expressible and a future release can honor it (#69); do not rely on it for
+session survival today. The default stays true only to preserve the field's prior
+admission behavior — it turns no preservation on.<br/>
           <br/>
             <i>Default</i>: true<br/>
         </td>
