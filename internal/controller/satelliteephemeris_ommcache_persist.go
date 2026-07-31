@@ -16,9 +16,11 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/akhenakh/sgp4"
+	"github.com/prometheus/client_golang/prometheus"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -29,7 +31,20 @@ import (
 
 	ntnv1alpha1 "github.com/thc1006/ntn-operators/api/v1alpha1"
 	"github.com/thc1006/ntn-operators/pkg/ephemeris"
+	ntnmetrics "github.com/thc1006/ntn-operators/pkg/metrics"
 )
+
+func recordOMMPersist(eph *ntnv1alpha1.SatelliteEphemeris, result string) {
+	ntnmetrics.OMMCachePersistTotal.With(prometheus.Labels{
+		"namespace": eph.Namespace, "ephemeris": eph.Name, "result": result,
+	}).Inc()
+}
+
+func recordOMMRestore(eph *ntnv1alpha1.SatelliteEphemeris, result string) {
+	ntnmetrics.OMMCacheRestoreTotal.With(prometheus.Labels{
+		"namespace": eph.Namespace, "ephemeris": eph.Name, "result": result,
+	}).Inc()
+}
 
 // Durable last-good OMM cache: persists tracked OMMs to a controller-owned ConfigMap so a cold
 // process (restart / leader failover) can re-propagate through a sustained upstream outage,
@@ -69,14 +84,39 @@ func (r *SatelliteEphemerisReconciler) readerOrClient() client.Reader {
 	return r.Client
 }
 
-// ommCacheConfigMapName derives the per-CR cache ConfigMap name, bounded to the k8s name limit.
-// Names over the limit are truncated; the restore path UID-gates, so a (pathological) truncation
-// collision between two >243-char names never restores wrong data — see ADR-0007.
-func ommCacheConfigMapName(ephName string) string {
-	if len(ephName)+len(ommCacheConfigMapSuffix) > maxConfigMapNameLen {
-		ephName = ephName[:maxConfigMapNameLen-len(ommCacheConfigMapSuffix)]
+// ommCacheConfigMapName derives a collision-resistant per-CR cache ConfigMap name. The old scheme
+// truncated a long CR name to fit the k8s limit, so two names sharing their first 243 chars mapped
+// to ONE ConfigMap. The two CRs then overwrite each other's payload and owner reference every
+// reconcile (a flip-flop), and the loser's cache is garbage-collected when the owning CR is deleted
+// — a silent failover-continuity loss, beyond the wrong-restore the UID gate already blocked. A
+// 128-bit hash of namespace+name+UID makes the name unique per object; the readable prefix is
+// cosmetic. See ADR-0007.
+func ommCacheConfigMapName(namespace, name, uid string) string {
+	sum := sha256.Sum256([]byte(namespace + "/" + name + "/" + uid))
+	hash := hex.EncodeToString(sum[:16])                                            // 128 bits
+	maxPrefix := maxConfigMapNameLen - len(hash) - len(ommCacheConfigMapSuffix) - 1 // -1 for the '-' before the hash
+	prefix := name
+	if len(prefix) > maxPrefix {
+		prefix = prefix[:maxPrefix]
 	}
-	return ephName + ommCacheConfigMapSuffix
+	if prefix = strings.TrimRight(prefix, "-."); prefix == "" {
+		prefix = "eph"
+	}
+	return prefix + "-" + hash + ommCacheConfigMapSuffix
+}
+
+// ommCacheNameFor is the convenience form used at the call sites.
+func ommCacheNameFor(eph *ntnv1alpha1.SatelliteEphemeris) string {
+	return ommCacheConfigMapName(eph.Namespace, eph.Name, string(eph.UID))
+}
+
+// ommCacheLegacyName is the pre-hash truncated name. Restore checks it once so a cache written by
+// the old scheme is adopted across the upgrade instead of cold-starting. See ADR-0007.
+func ommCacheLegacyName(name string) string {
+	if len(name)+len(ommCacheConfigMapSuffix) > maxConfigMapNameLen {
+		name = name[:maxConfigMapNameLen-len(ommCacheConfigMapSuffix)]
+	}
+	return name + ommCacheConfigMapSuffix
 }
 
 // ommCachePayload is the tracked, capped set propagateStates would use (never the full GP
@@ -112,15 +152,17 @@ func (r *SatelliteEphemerisReconciler) persistOMMCache(
 	data, err := json.Marshal(omms)
 	if err != nil {
 		log.V(1).Info("omm-cache: marshal failed; skipping persist", "err", err.Error())
+		recordOMMPersist(eph, "failure")
 		return
 	}
 	if len(data) > maxOMMCacheBytes {
 		log.Info("omm-cache: payload over bound; skipping restart-continuity persist (warm cache unaffected)",
 			"bytes", len(data), "satellites", len(omms))
+		recordOMMPersist(eph, "oversize_skip")
 		return
 	}
 	digest := ommDigest(data)
-	key := client.ObjectKey{Namespace: eph.Namespace, Name: ommCacheConfigMapName(eph.Name)}
+	key := client.ObjectKey{Namespace: eph.Namespace, Name: ommCacheNameFor(eph)}
 
 	// Read uncached (APIReader) so configmaps get suffices and we do not start an informer that
 	// caches every ConfigMap in the cluster; writes still go through the cached client. Mirrors
@@ -134,22 +176,31 @@ func (r *SatelliteEphemerisReconciler) persistOMMCache(
 		stampOMMCache(cm, eph, fetchKey, digest, len(omms), string(data), result.FetchedAt, result.ETag, result.LastModified)
 		if err := controllerutil.SetControllerReference(eph, cm, r.Scheme); err != nil {
 			log.V(1).Info("omm-cache: owner ref failed; skipping persist", "err", err.Error())
+			recordOMMPersist(eph, "failure")
 			return
 		}
 		if err := r.Create(ctx, cm); err != nil && !apierrors.IsAlreadyExists(err) {
 			log.V(1).Info("omm-cache: create failed; skipping persist", "err", err.Error())
+			recordOMMPersist(eph, "failure")
+			return
 		}
+		recordOMMPersist(eph, "success")
 	case getErr != nil:
 		log.V(1).Info("omm-cache: get failed; skipping persist", "err", getErr.Error())
+		recordOMMPersist(eph, "failure")
 	default:
 		if cm.Annotations[ommCacheAnnDigest] == digest && cm.Data[ommCacheDataKey] != "" {
-			return // unchanged
+			recordOMMPersist(eph, "success") // already current
+			return
 		}
 		stampOMMCache(cm, eph, fetchKey, digest, len(omms), string(data), result.FetchedAt, result.ETag, result.LastModified)
 		_ = controllerutil.SetControllerReference(eph, cm, r.Scheme) // adopt for GC if pre-existing
 		if err := r.Update(ctx, cm); err != nil {
 			log.V(1).Info("omm-cache: update failed; skipping persist", "err", err.Error())
+			recordOMMPersist(eph, "failure")
+			return
 		}
+		recordOMMPersist(eph, "success")
 	}
 }
 
@@ -194,23 +245,40 @@ func (r *SatelliteEphemerisReconciler) restoreOMMCache(
 		return false // already warm
 	}
 	cm := &corev1.ConfigMap{}
-	if err := r.readerOrClient().Get(ctx, client.ObjectKey{Namespace: eph.Namespace, Name: ommCacheConfigMapName(eph.Name)}, cm); err != nil {
-		return false
+	name := ommCacheNameFor(eph)
+	migrated := false
+	err := r.readerOrClient().Get(ctx, client.ObjectKey{Namespace: eph.Namespace, Name: name}, cm)
+	if apierrors.IsNotFound(err) {
+		// One-time migration bridge: adopt a cache written under the pre-hash truncated name so an
+		// upgrade does not cold-start. The same digest/UID/fetchKey gates below still apply, so a
+		// legacy ConfigMap shared with another CR (the very collision this fix removes) is refused.
+		if legacy := ommCacheLegacyName(eph.Name); legacy != name {
+			if err = r.readerOrClient().Get(ctx, client.ObjectKey{Namespace: eph.Namespace, Name: legacy}, cm); err == nil {
+				migrated = true
+			}
+		}
+	}
+	if err != nil {
+		return false // no cache (or get error) — a cold CR with nothing to restore is normal
 	}
 	data := cm.Data[ommCacheDataKey]
 	if cm.Labels[ommCacheLabelKey] != ommCacheLabelValue || data == "" {
+		recordOMMRestore(eph, "refused")
 		return false
 	}
 	if cm.Annotations[ommCacheAnnDigest] != ommDigest([]byte(data)) {
 		log.Info("omm-cache: digest mismatch; ignoring (corrupt or hand-edited)")
+		recordOMMRestore(eph, "refused")
 		return false
 	}
 	if cm.Annotations[ommCacheAnnUID] != string(eph.UID) || cm.Annotations[ommCacheAnnFetchKey] != fetchKey {
-		return false // orphaned by delete-recreate, or a different source — do not restore
+		recordOMMRestore(eph, "refused") // orphaned by delete-recreate, or a different source
+		return false
 	}
 	omms, err := ephemeris.ParseValidOMMs(log, []byte(data))
 	if err != nil || len(omms) == 0 {
 		log.V(1).Info("omm-cache: payload unparseable or fully invalid; ignoring", "err", err)
+		recordOMMRestore(eph, "refused")
 		return false
 	}
 	// Unknown fetch time → zero, i.e. very old, so the next reconcile fetches and only serves
@@ -231,7 +299,13 @@ func (r *SatelliteEphemerisReconciler) restoreOMMCache(
 				cm.Annotations[ommCacheAnnETag], cm.Annotations[ommCacheAnnLastModified])
 		}
 	}
-	log.Info("omm-cache: hydrated last-good OMMs after cold start", "satellites", len(omms))
+	if migrated {
+		log.Info("omm-cache: adopted last-good OMMs from the pre-hash cache name (one-time migration)", "satellites", len(omms))
+		recordOMMRestore(eph, "hydrated_legacy")
+	} else {
+		log.Info("omm-cache: hydrated last-good OMMs after cold start", "satellites", len(omms))
+		recordOMMRestore(eph, "hydrated")
+	}
 	return true
 }
 

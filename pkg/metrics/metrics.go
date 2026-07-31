@@ -271,6 +271,31 @@ var (
 			Help: "spec.ephemerisRef indexed-lookup errors in the ephemeris mapper (excludes context cancel/deadline).",
 		},
 	)
+
+	// OMMCachePersistTotal counts durable OMM-cache persist attempts by outcome. A CR that silently
+	// cannot persist its last-good elements — the ConfigMap-name collision ADR-0007 fixes, or an API
+	// error — is otherwise invisible while its failover continuity degrades. Keyed
+	// namespace+ephemeris (like GPSatelliteCount), deleted on CR removal.
+	OMMCachePersistTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "ntn_operators_omm_cache_persist_total",
+			Help: "Durable OMM-cache persist attempts by outcome (success, failure, oversize_skip).",
+		},
+		[]string{"namespace", "ephemeris", "result"},
+	)
+
+	// OMMCacheRestoreTotal counts cold-start OMM-cache restore attempts against an EXISTING cache
+	// object (a missing cache and an already-warm cache are normal and not counted). "refused" means
+	// a cache exists but is unusable (digest/owner/source mismatch or corrupt) — failover continuity
+	// is silently broken; "hydrated_legacy" marks a one-time adoption of a pre-hash-named cache.
+	// Keyed namespace+ephemeris, deleted on CR removal.
+	OMMCacheRestoreTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "ntn_operators_omm_cache_restore_total",
+			Help: "Cold-start OMM-cache restore outcomes for an existing cache (hydrated, hydrated_legacy, refused).",
+		},
+		[]string{"namespace", "ephemeris", "result"},
+	)
 )
 
 func init() {
@@ -292,6 +317,8 @@ func init() {
 		ReaderErrorsTotal,
 		ReaderStaleUsedTotal,
 		EphemerisMapperIndexErrorTotal,
+		OMMCachePersistTotal,
+		OMMCacheRestoreTotal,
 	)
 	// Note: logging here is intentionally omitted because init() runs
 	// before controller-runtime's logger is configured. Registration

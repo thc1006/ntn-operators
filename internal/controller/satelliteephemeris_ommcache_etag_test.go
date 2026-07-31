@@ -63,7 +63,7 @@ func TestOMMCache_PersistsAndClearsValidators(t *testing.T) {
 	cli := fake.NewClientBuilder().WithScheme(sch).WithObjects(eph).Build()
 	r := &SatelliteEphemerisReconciler{Client: cli, Scheme: sch, Recorder: events.NewFakeRecorder(50)}
 	fetchKey := fetchInputKey(eph.Spec)
-	cmKey := types.NamespacedName{Namespace: eph.Namespace, Name: ommCacheConfigMapName(eph.Name)}
+	cmKey := types.NamespacedName{Namespace: eph.Namespace, Name: ommCacheNameFor(eph)}
 
 	t0 := time.Date(2026, 7, 31, 9, 0, 0, 0, time.UTC)
 	withVal := ommResultAt(t0)

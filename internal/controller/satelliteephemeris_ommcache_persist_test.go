@@ -12,16 +12,20 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/akhenakh/sgp4"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -29,6 +33,7 @@ import (
 
 	ntnv1alpha1 "github.com/thc1006/ntn-operators/api/v1alpha1"
 	"github.com/thc1006/ntn-operators/pkg/ephemeris"
+	ntnmetrics "github.com/thc1006/ntn-operators/pkg/metrics"
 )
 
 // ommCacheScheme is makeScheme + corev1 (the cache lives in a ConfigMap).
@@ -76,7 +81,7 @@ func TestOMMCache_PersistRestoreRoundTrip(t *testing.T) {
 
 	// The ConfigMap must exist and carry the identity/integrity metadata.
 	cm := &corev1.ConfigMap{}
-	if err := cli.Get(ctx, types.NamespacedName{Namespace: eph.Namespace, Name: ommCacheConfigMapName(eph.Name)}, cm); err != nil {
+	if err := cli.Get(ctx, types.NamespacedName{Namespace: eph.Namespace, Name: ommCacheNameFor(eph)}, cm); err != nil {
 		t.Fatalf("persist did not create the cache ConfigMap: %v", err)
 	}
 	if cm.Labels[ommCacheLabelKey] != ommCacheLabelValue {
@@ -121,6 +126,71 @@ func TestOMMCache_PersistRestoreRoundTrip(t *testing.T) {
 	}
 }
 
+// TestOMMCache_MetricsRecorded proves persist and restore increment the observability counters, so
+// a silently-degraded failover cache is alertable (ADR-0007).
+func TestOMMCache_MetricsRecorded(t *testing.T) {
+	sch := ommCacheScheme(t)
+	eph := newOMMCacheEph("eph-metric", "uid-metric")
+	cli := fake.NewClientBuilder().WithScheme(sch).WithObjects(eph).Build()
+	r := &SatelliteEphemerisReconciler{Client: cli, Scheme: sch, Recorder: events.NewFakeRecorder(50)}
+	ctx := context.Background()
+	key := types.NamespacedName{Namespace: eph.Namespace, Name: eph.Name}
+	fetchKey := fetchInputKey(eph.Spec)
+
+	// Reset any series left by another test for this key so the assertions are absolute.
+	ntnmetrics.OMMCachePersistTotal.DeletePartialMatch(prometheus.Labels{"namespace": eph.Namespace, "ephemeris": eph.Name})
+	ntnmetrics.OMMCacheRestoreTotal.DeletePartialMatch(prometheus.Labels{"namespace": eph.Namespace, "ephemeris": eph.Name})
+
+	r.persistOMMCache(ctx, eph, ommResultAt(time.Date(2026, 7, 30, 12, 0, 0, 0, time.UTC)), fetchKey)
+	if got := testutil.ToFloat64(ntnmetrics.OMMCachePersistTotal.WithLabelValues(eph.Namespace, eph.Name, "success")); got != 1 {
+		t.Fatalf("persist success counter = %v, want 1", got)
+	}
+	if !r.restoreOMMCache(ctx, ctrl.Request{NamespacedName: key}, eph, fetchKey) {
+		t.Fatalf("restore returned false on a valid cold cache")
+	}
+	if got := testutil.ToFloat64(ntnmetrics.OMMCacheRestoreTotal.WithLabelValues(eph.Namespace, eph.Name, "hydrated")); got != 1 {
+		t.Fatalf("restore hydrated counter = %v, want 1", got)
+	}
+}
+
+// TestOMMCache_RestoreMigratesLegacyName proves a cache written under the pre-hash (truncated) name
+// is adopted across the upgrade, so a restart during migration does not cold-start (ADR-0007).
+func TestOMMCache_RestoreMigratesLegacyName(t *testing.T) {
+	sch := ommCacheScheme(t)
+	eph := newOMMCacheEph("eph-legacy", "uid-legacy")
+	fetchedAt := time.Date(2026, 7, 30, 12, 0, 0, 0, time.UTC)
+	result := ommResultAt(fetchedAt)
+	fetchKey := fetchInputKey(eph.Spec)
+
+	// A valid cache ConfigMap under the OLD name, stamped exactly as the pre-hash code did.
+	data, err := json.Marshal(ommCachePayload(result, eph))
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	legacy := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: eph.Namespace, Name: ommCacheLegacyName(eph.Name)}}
+	stampOMMCache(legacy, eph, fetchKey, ommDigest(data), 1, string(data), fetchedAt, "", "")
+	if legacy.Name == ommCacheNameFor(eph) {
+		t.Fatalf("test invalid: legacy and hashed names coincide for %q", eph.Name)
+	}
+
+	cli := fake.NewClientBuilder().WithScheme(sch).WithObjects(eph, legacy).Build()
+	r := &SatelliteEphemerisReconciler{Client: cli, Scheme: sch, Recorder: events.NewFakeRecorder(50)}
+	ctx := context.Background()
+	key := types.NamespacedName{Namespace: eph.Namespace, Name: eph.Name}
+
+	// The hashed name does not exist; restore must fall back to the legacy name and hydrate.
+	if !r.restoreOMMCache(ctx, ctrl.Request{NamespacedName: key}, eph, fetchKey) {
+		t.Fatalf("restore did not adopt the legacy-named cache")
+	}
+	got, ok := r.cachedOMMResult(key)
+	if !ok || got.result.SatelliteCount != 1 {
+		t.Fatalf("legacy adoption did not populate the in-memory cache")
+	}
+	if !got.result.FetchedAt.Equal(fetchedAt) {
+		t.Fatalf("legacy adoption reset FetchedAt: got %s, want %s", got.result.FetchedAt.UTC(), fetchedAt)
+	}
+}
+
 // TestOMMCache_RestoreRejectsInvalid proves restore refuses corrupt or wrong-owner/source data,
 // so a tampered or orphaned ConfigMap never poisons the cache.
 func TestOMMCache_RestoreRejectsInvalid(t *testing.T) {
@@ -158,7 +228,7 @@ func TestOMMCache_RestoreRejectsInvalid(t *testing.T) {
 
 			r.persistOMMCache(ctx, base, ommResultAt(fetchedAt), fetchKey)
 			cm := &corev1.ConfigMap{}
-			cmKey := types.NamespacedName{Namespace: base.Namespace, Name: ommCacheConfigMapName(base.Name)}
+			cmKey := types.NamespacedName{Namespace: base.Namespace, Name: ommCacheNameFor(base)}
 			if err := cli.Get(ctx, cmKey, cm); err != nil {
 				t.Fatalf("get cache cm: %v", err)
 			}
@@ -210,7 +280,7 @@ func TestOMMCache_PersistNoopOnIdenticalDigest(t *testing.T) {
 	cli := fake.NewClientBuilder().WithScheme(sch).WithObjects(eph).Build()
 	r := &SatelliteEphemerisReconciler{Client: cli, Scheme: sch, Recorder: events.NewFakeRecorder(50)}
 	ctx := context.Background()
-	cmKey := types.NamespacedName{Namespace: eph.Namespace, Name: ommCacheConfigMapName(eph.Name)}
+	cmKey := types.NamespacedName{Namespace: eph.Namespace, Name: ommCacheNameFor(eph)}
 	fetchKey := fetchInputKey(eph.Spec)
 
 	fetchedAt := time.Date(2026, 7, 30, 12, 0, 0, 0, time.UTC)
@@ -242,7 +312,7 @@ func TestOMMCache_PersistSetsOwnerRefForGC(t *testing.T) {
 
 	r.persistOMMCache(ctx, eph, ommResultAt(time.Now().UTC()), fetchInputKey(eph.Spec))
 	cm := &corev1.ConfigMap{}
-	if err := cli.Get(ctx, types.NamespacedName{Namespace: eph.Namespace, Name: ommCacheConfigMapName(eph.Name)}, cm); err != nil {
+	if err := cli.Get(ctx, types.NamespacedName{Namespace: eph.Namespace, Name: ommCacheNameFor(eph)}, cm); err != nil {
 		t.Fatalf("get cm: %v", err)
 	}
 	if len(cm.OwnerReferences) != 1 {
@@ -271,21 +341,43 @@ func TestOMMCache_PersistSkipsOversizePayload(t *testing.T) {
 	r.persistOMMCache(ctx, eph, result, fetchInputKey(eph.Spec))
 
 	cm := &corev1.ConfigMap{}
-	err := cli.Get(ctx, types.NamespacedName{Namespace: eph.Namespace, Name: ommCacheConfigMapName(eph.Name)}, cm)
+	err := cli.Get(ctx, types.NamespacedName{Namespace: eph.Namespace, Name: ommCacheNameFor(eph)}, cm)
 	if !apierrors.IsNotFound(err) {
 		t.Fatalf("oversize payload must not create a ConfigMap; got err=%v", err)
 	}
 }
 
-// TestOMMCache_ConfigMapNameTruncation proves the derived name always fits the k8s name limit.
-func TestOMMCache_ConfigMapNameTruncation(t *testing.T) {
-	short := ommCacheConfigMapName("eph-a")
-	if short != "eph-a"+ommCacheConfigMapSuffix {
-		t.Fatalf("short name = %q", short)
+// TestOMMCache_ConfigMapNameCollisionResistant proves the derived name is unique per object, a
+// valid ConfigMap name, and deterministic. The old truncation mapped two long names to one
+// ConfigMap, silently breaking the second CR's persistence (ADR-0007).
+func TestOMMCache_ConfigMapNameCollisionResistant(t *testing.T) {
+	// Two >243-char names sharing their first 250 chars collided under the old truncation.
+	a, b := strings.Repeat("x", 250)+"-alpha", strings.Repeat("x", 250)+"-beta"
+	na := ommCacheConfigMapName("ns", a, "uid-a")
+	nb := ommCacheConfigMapName("ns", b, "uid-b")
+	if na == nb {
+		t.Fatalf("collision: two distinct long names mapped to one ConfigMap %q", na)
 	}
-	long := ommCacheConfigMapName(strings.Repeat("x", 300))
-	if len(long) > maxConfigMapNameLen {
-		t.Fatalf("truncated name len = %d, exceeds %d", len(long), maxConfigMapNameLen)
+	for _, n := range []string{na, nb, ommCacheConfigMapName("ns", "eph-a", "uid")} {
+		if len(n) > maxConfigMapNameLen {
+			t.Fatalf("name len = %d exceeds %d: %q", len(n), maxConfigMapNameLen, n)
+		}
+		if errs := validation.IsDNS1123Subdomain(n); len(errs) != 0 {
+			t.Fatalf("name %q is not a valid ConfigMap name: %v", n, errs)
+		}
+	}
+	// Deterministic: persist and restore must derive the same name.
+	if x, y := ommCacheConfigMapName("ns", a, "uid-a"), ommCacheConfigMapName("ns", a, "uid-a"); x != y {
+		t.Fatalf("non-deterministic: %q != %q", x, y)
+	}
+	// Same namespace+name, different UID (delete-recreate) → different name, so a recreated CR gets
+	// a fresh cache object instead of fighting over the old owner's ConfigMap.
+	if ommCacheConfigMapName("ns", a, "uid-a") == ommCacheConfigMapName("ns", a, "uid-b") {
+		t.Fatalf("same name+ns but different UID must differ")
+	}
+	// Short name keeps a readable prefix.
+	if short := ommCacheConfigMapName("ns", "eph-a", "uid"); !strings.HasPrefix(short, "eph-a-") {
+		t.Fatalf("short name lost its readable prefix: %q", short)
 	}
 }
 
@@ -344,7 +436,7 @@ func TestReconcile_ColdStartRestoresAndPropagatesDuringOutage(t *testing.T) {
 		t.Fatalf("warm phase never contacted upstream")
 	}
 	cm := &corev1.ConfigMap{}
-	if err := cli.Get(ctx, types.NamespacedName{Namespace: eph.Namespace, Name: ommCacheConfigMapName(eph.Name)}, cm); err != nil {
+	if err := cli.Get(ctx, types.NamespacedName{Namespace: eph.Namespace, Name: ommCacheNameFor(eph)}, cm); err != nil {
 		t.Fatalf("warm phase did not persist the cache ConfigMap: %v", err)
 	}
 
