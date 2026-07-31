@@ -252,9 +252,10 @@ func buildNTNConfigUpdate(u provider.RuntimeUpdate) (ntnConfigUpdateEnvelope, er
 type wsErrorKind int
 
 const (
-	// wsUnreachable: dial/write/read failed — transient, worth a requeue. Also covers a
-	// handshake the endpoint answered with a repeat-me status (408/425): the dial did fail,
-	// and the correct response is the same tight retry.
+	// wsUnreachable: dial/write/read failed — transient, worth a requeue. Also covers the
+	// handshake outcomes that are somebody else's transient problem rather than a verdict on
+	// us: a repeat-me status (408/425) and any 5xx. The dial did fail in each case, and the
+	// correct response is the same tight retry.
 	wsUnreachable wsErrorKind = iota
 	// wsPayloadTooLarge: frame exceeds OCUDU's 16 KB cap — permanent.
 	wsPayloadTooLarge
@@ -262,10 +263,11 @@ const (
 	wsMarshal
 	// wsRejected: the gNB replied {"error": ...} — permanent (bad config).
 	wsRejected
-	// wsHandshakeRejected: the handshake got a definitive HTTP response (a refused
-	// redirect, an auth rejection, or another non-101 in the 3xx/4xx range) rather
-	// than an Upgrade — the endpoint is reachable and said no, so a tight retry is
-	// pointless, but the fix is unwatched external state, so it must still be polled.
+	// wsHandshakeRejected: the handshake got a definitive HTTP response rather than a usable
+	// Upgrade — a refused redirect, an auth rejection, a plain 200/204 from something that is
+	// not a WebSocket server, or a 101 whose handshake headers are invalid. The endpoint is
+	// reachable and said no, so a tight retry is pointless, but the fix is unwatched external
+	// state, so it must still be polled.
 	wsHandshakeRejected
 )
 
@@ -365,23 +367,51 @@ func pushNTNConfigUpdate(
 	}
 	conn, resp, err := websocket.Dial(dialCtx, scheme+endpoint, dialOpts)
 	if err != nil {
-		// A definitive HTTP handshake response (a refused redirect, an auth rejection, or
-		// any other non-101 in the 3xx/4xx range) means the endpoint is reachable and said
-		// no — a tight per-minute retry cannot fix it. But it is NOT permanent either: the
-		// gNB, the proxy in front of it and the credential we present are all external
-		// state this controller does not watch, so "never retry" would strand the cell
-		// until some unrelated ephemeris heartbeat happens to fan out — and forever if the
-		// producer stalls. It gets the slow self-heal poll instead, exactly as the local
-		// credential path does (RemoteControlCredentialUnavailable, #282). A nil response is a
-		// connection-level failure (dial/TLS/timeout, or a 5xx) and keeps the tight
-		// cadence. coder/websocket owns resp.Body, so we only read the status.
-		if resp != nil && resp.StatusCode >= 300 && resp.StatusCode < 500 {
-			// 408 and 425 ask for the SAME request again (RFC 9110 §15.5.9, RFC 8470 §5.2),
-			// so they are the handshake's own transient failures, not a rejection.
-			if resp.StatusCode == http.StatusRequestTimeout || resp.StatusCode == http.StatusTooEarly {
+		// A NON-NIL response means the endpoint answered the handshake definitively: it is
+		// reachable and is either refusing us or is not a WebSocket server at all, so a tight
+		// per-minute retry cannot fix it. But it is NOT permanent either — the gNB, the proxy
+		// in front of it and the credential we present are all external state this controller
+		// does not watch, so "never retry" would strand the cell until some unrelated ephemeris
+		// heartbeat happens to fan out, and forever if the producer stalls. It gets the slow
+		// self-heal poll, exactly as the local credential path does (RemoteControlCredentialUnavailable,
+		// #282).
+		//
+		// Keying on resp != nil rather than on a status BAND matters: coder/websocket accepts
+		// only a valid 101, and returns a non-nil response for everything else — a plain 200
+		// from an HTTP server on the wrong port, a 204 from a proxy that swallowed the Upgrade,
+		// and even a 101 whose Sec-WebSocket-Accept or Upgrade header is invalid (verified
+		// against v1.8.15). A 3xx/4xx band silently left all of those on the tight cadence,
+		// hammering a misconfiguration once a minute forever.
+		//
+		// A NIL response is a connection-level failure (dial/TLS/timeout) and keeps the tight
+		// cadence. coder/websocket owns resp.Body, so we only ever read the status.
+		if resp != nil {
+			switch {
+			case resp.StatusCode >= 500 &&
+				resp.StatusCode != http.StatusNotImplemented &&
+				resp.StatusCode != http.StatusHTTPVersionNotSupported:
+				// Server-side blip rather than a verdict on us — conventionally transient. 501 and
+				// 505 are excluded on purpose: they say the server is INCAPABLE of the request, not
+				// that it is momentarily struggling, so the next minute changes nothing. Splitting
+				// them out keeps this classified by what fixes the failure rather than by a status
+				// band — banding is the mistake this whole path is being corrected for.
+				return &wsError{
+					wsUnreachable,
+					fmt.Sprintf("handshake to %s failed: HTTP %d", endpoint, resp.StatusCode),
+				}
+			case resp.StatusCode == http.StatusRequestTimeout || resp.StatusCode == http.StatusTooEarly:
+				// 408 and 425 ask for the SAME request again (RFC 9110 §15.5.9, RFC 8470 §5.2).
 				return &wsError{
 					wsUnreachable,
 					fmt.Sprintf("handshake to %s did not complete: HTTP %d", endpoint, resp.StatusCode),
+				}
+			case resp.StatusCode == http.StatusSwitchingProtocols:
+				// 101 that failed validation: the peer speaks something that is not RFC 6455.
+				// Carry the library's reason — it names the offending header, which is the
+				// whole diagnostic value here.
+				return &wsError{
+					wsHandshakeRejected,
+					fmt.Sprintf("handshake to %s returned HTTP 101 but is not a valid WebSocket upgrade: %v", endpoint, err),
 				}
 			}
 			return &wsError{wsHandshakeRejected, fmt.Sprintf("handshake to %s rejected: HTTP %d", endpoint, resp.StatusCode)}

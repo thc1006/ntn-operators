@@ -407,6 +407,8 @@ func TestPushNTNConfigUpdate_HandshakeStatusRetryPolicy(t *testing.T) {
 		want   wsRetryPolicy
 		why    string
 	}{
+		{http.StatusOK, wsRetrySlow, "200: an HTTP server on the wrong port is a config error, not a blip"},
+		{http.StatusNoContent, wsRetrySlow, "204: a proxy that swallowed the Upgrade will keep doing so"},
 		{http.StatusMovedPermanently, wsRetrySlow, "301: never followed, but the proxy rule behind it can be fixed"},
 		{http.StatusFound, wsRetrySlow, "302: same as 301"},
 		{http.StatusTemporaryRedirect, wsRetrySlow, "307: same as 301"},
@@ -419,6 +421,8 @@ func TestPushNTNConfigUpdate_HandshakeStatusRetryPolicy(t *testing.T) {
 		{http.StatusRequestTimeout, wsRetryTight, "408: RFC 9110 §15.5.9 — the client MAY repeat the request"},
 		{http.StatusTooEarly, wsRetryTight, "425: RFC 8470 §5.2 — retry once the early-data replay risk is gone"},
 		{http.StatusTooManyRequests, wsRetrySlow, "429: transient, but hammering at 1/min is exactly what it forbids"},
+		{http.StatusNotImplemented, wsRetrySlow, "501: the server says it CANNOT do this, not that it is busy"},
+		{http.StatusHTTPVersionNotSupported, wsRetrySlow, "505: same — a capability refusal, not a blip"},
 		{http.StatusInternalServerError, wsRetryTight, "500: a server-side blip is the transient case"},
 		{http.StatusServiceUnavailable, wsRetryTight, "503: same as 500"},
 	} {
@@ -443,6 +447,55 @@ func TestPushNTNConfigUpdate_HandshakeStatusRetryPolicy(t *testing.T) {
 			}
 			if we.retryPolicy() == wsRetryNever {
 				t.Errorf("HTTP %d must never be classified wsRetryNever: no spec edit can fix external state", tc.status)
+			}
+		})
+	}
+}
+
+// A 101 is not automatically a successful handshake: coder/websocket still validates
+// Sec-WebSocket-Accept, the Upgrade header and any negotiated subprotocol, and returns an error
+// with a NON-NIL response carrying status 101 when they do not check out. That peer speaks
+// something that is not RFC 6455 — a deterministic protocol/config fault whose fix is outside
+// this controller, so it must poll rather than hammer the endpoint once a minute forever.
+func TestPushNTNConfigUpdate_Malformed101IsRejectedNotUnreachable(t *testing.T) {
+	raw := func(payload string) http.HandlerFunc {
+		return func(w http.ResponseWriter, _ *http.Request) {
+			h, _, err := w.(http.Hijacker).Hijack()
+			if err != nil {
+				return
+			}
+			defer h.Close() //nolint:errcheck // best-effort in a test server
+			_, _ = h.Write([]byte(payload))
+		}
+	}
+	const upgrade101 = "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+	for name, payload := range map[string]string{
+		"bad Sec-WebSocket-Accept": upgrade101 + "Sec-WebSocket-Accept: wrong\r\n\r\n",
+		"missing Upgrade header":   "HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\n\r\n",
+		"unrequested subprotocol":  upgrade101 + "Sec-WebSocket-Protocol: nope\r\n\r\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			srv := httptest.NewServer(raw(payload))
+			t.Cleanup(srv.Close)
+
+			target := provider.ResolvedRemoteControl{Endpoint: strings.TrimPrefix(srv.URL, "http://")}
+			env, _ := buildNTNConfigUpdate(ecefRuntimeUpdate())
+			err := pushNTNConfigUpdate(context.Background(), target, env)
+			if err == nil {
+				t.Fatal("an invalid 101 upgrade must not be reported as a successful push")
+			}
+			var we *wsError
+			if !errors.As(err, &we) {
+				t.Fatalf("want a *wsError, got %T: %v", err, err)
+			}
+			if got := we.retryPolicy(); got != wsRetrySlow {
+				t.Errorf("retryPolicy = %d, want wsRetrySlow (%d): a peer that is not "+
+					"RFC 6455 will not become one on the next minute", got, wsRetrySlow)
+			}
+			// The library names the offending header; that detail is the whole diagnostic
+			// value, so it must reach the operator rather than being flattened to "dial failed".
+			if !strings.Contains(we.Error(), "not a valid WebSocket upgrade") {
+				t.Errorf("message should identify the invalid upgrade, got %q", we.Error())
 			}
 		})
 	}
