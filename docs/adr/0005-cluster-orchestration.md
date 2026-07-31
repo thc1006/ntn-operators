@@ -94,7 +94,7 @@ The following require new decisions and implementation:
 
 The following states are distinct:
 
-- `ContactOpportunityAvailable`;
+- `FailoverReady` (Reason `ConstellationMemberAvailable`, the pool contact opportunity);
 - `CellConfigurationSelected`;
 - `RuntimeConfigDelivered`;
 - `ProviderCellActive`;

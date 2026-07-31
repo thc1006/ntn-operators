@@ -19,10 +19,12 @@ For an `NTNSlice` that references a multi-member `SatelliteEphemeris`, contact
 opportunity is true when at least one eligible member has a current,
 deliverable pass window.
 
-This condition is named and documented as a **contact opportunity**, not as
-actual slice service availability. Actual availability requires a future
-slice-to-cell binding and evidence that the relevant cell is aligned,
-configured, active and carrying service.
+This condition keeps the existing condition **type `FailoverReady`** — renaming
+the type would break dashboards, alerts and any client keyed on it for no
+semantic gain — while its Reason and Message are corrected to make explicit that
+it is a **contact opportunity**, not actual slice service. Actual availability
+requires a future slice-to-cell binding and evidence that the relevant cell is
+aligned, configured, active and carrying service.
 
 ## Context
 
@@ -45,9 +47,16 @@ overhead?” but cannot answer “is my serving cell using that member?”.
 
 ### Opportunity condition
 
-Use `ContactOpportunityAvailable`.
+Keep the existing condition **type `FailoverReady`** — do not rename the type; a
+condition-type rename is an API/monitoring compatibility break for no benefit.
+Fix the **Reason** instead: replace the overstated `SatelliteAvailable` with
+`ConstellationMemberAvailable`, with a Message such as *"A fresh deliverable
+constellation member has an active pass window (contact opportunity, not slice
+service)."* This changes the Reason string, not the CRD schema, so it MUST be
+recorded in the CHANGELOG — dashboards and alerts may key on the Reason.
 
-It is true only when a candidate satisfies all of:
+`FailoverReady` is `True` with Reason `ConstellationMemberAvailable` only when a
+candidate satisfies all of:
 
 - active AOS/LOS window for a referenced ground station;
 - source element epoch within the freshness bound;
@@ -103,8 +112,14 @@ must not claim that a data path is already active.
 **Infer cell selection from `NTNCellConfig` globally.** Rejected until an
 explicit binding exists.
 
-**Keep the generic name `SatelliteAvailable`.** Rejected because it overstates
-what the controller knows.
+**Keep the Reason `SatelliteAvailable`.** Rejected because it overstates what the
+controller knows (a pool contact opportunity, not delivered service); the Reason
+becomes `ConstellationMemberAvailable`. This changes the Reason, not the
+condition *type* `FailoverReady`, which is deliberately preserved.
+
+**Rename the condition type to `ContactOpportunityAvailable`.** Rejected: a
+condition-type rename breaks existing dashboards/alerts and API clients for no
+semantic benefit over fixing the Reason and Message.
 
 ## Failure modes
 
