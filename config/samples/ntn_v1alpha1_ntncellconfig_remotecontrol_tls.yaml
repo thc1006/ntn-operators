@@ -1,0 +1,49 @@
+# Runtime NTN push over wss:// with mTLS + a bearer token.
+#
+# OCUDU's remote_control server is PLAINTEXT and unauthenticated, so this only makes
+# sense with a TLS-terminating proxy in front of it. See
+# config/samples/remote-control-tls/ for a deployable sidecar and
+# docs/remote-control-tls.md for the whole picture.
+apiVersion: ntn.operators.dev/v1alpha1
+kind: NTNCellConfig
+metadata:
+  labels:
+    app.kubernetes.io/name: ntn-operators
+    app.kubernetes.io/managed-by: kustomize
+  name: ntn-cell-remotecontrol-tls
+spec:
+  provider:
+    type: ocudu
+    # namespace is enforced to match metadata.namespace for security
+    remoteControl:
+      # The TLS front door, NOT OCUDU's plaintext port. The certificate's SAN must
+      # cover this host: the operator derives ServerName from it unless tls.serverName
+      # overrides. Keep this on the admin allow-list
+      # (--remote-control-allowed-endpoint-hosts) when you run one.
+      endpoint: "gnb-proxy.ntn-system.svc:8443"
+      tls:
+        # "tls"  — verify the server, send the bearer token.
+        # "mtls" — additionally present a client certificate.
+        mode: mtls
+        # Secret in THIS namespace. Its owner must opt it in with
+        #   ntn.operators.dev/remote-control-credential: "true"
+        # Keys: ca.crt (required whenever token is set), token, and for mode=mtls
+        # tls.crt + tls.key. See docs/remote-control-tls.md.
+        secretName: gnb-remote-control-cred
+  # Runtime push targets a cell by plmn+nci, so cellID is required with remoteControl.
+  cellID:
+    plmn: "00101"
+    nci: 6733824
+  # The propagated state vector actually pushed comes from this SatelliteEphemeris,
+  # not from spec.ntn.ephemerisECEF (that is the ConfigMap bootstrap value).
+  ephemerisRef: oneweb-constellation
+  ephemerisNoradID: 25544
+  ntn:
+    cellSpecificKoffset: 100
+    ephemerisECEF:
+      posX: 1000000
+      posY: 2000000
+      posZ: 3000000
+      velX: 0
+      velY: 0
+      velZ: 0
