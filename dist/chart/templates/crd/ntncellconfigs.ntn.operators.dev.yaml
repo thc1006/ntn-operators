@@ -910,6 +910,11 @@ spec:
                               "tls.crt" + "tls.key" (the client certificate/key). A bare shared secret is
                               replayable, so it is only ever sent over the wss:// (TLS) connection.
 
+                              "ca.crt" is REQUIRED whenever "token" is set: endpoint is caller-controlled, so a
+                              token validated only by the public roots could be delivered to any host whose owner
+                              can obtain a publicly-trusted certificate. Pin the gNB's own CA. mode=mtls without
+                              ca.crt is still permitted — it proves a key rather than sending one.
+
                               SECURITY: the Secret's owner must opt it in for remote-control use with the label
                               "ntn.operators.dev/remote-control-credential: true", and a Kubernetes API
                               credential (a service-account or bootstrap-token Secret) is refused. This is a

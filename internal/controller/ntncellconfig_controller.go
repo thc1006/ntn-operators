@@ -980,7 +980,9 @@ func (r *NTNCellConfigReconciler) resolveRemoteControlTLS(
 	// tracked follow-up): the opt-in is namespace-scoped — once labelled, ANY NTNCellConfig
 	// in the namespace may use the Secret; a principal with secrets `patch` but not `get`
 	// could add the label to a Secret it cannot read; and the type check does not stop an
-	// Opaque Secret from holding some other bearer token.
+	// Opaque Secret from holding some other bearer token. Those limits are about WHICH Secret
+	// may be named; the CA-pinning gate further down bounds where its token may be SENT,
+	// which is what turns "named the wrong Secret" into something less than exfiltration.
 	switch secret.Type {
 	case corev1.SecretTypeServiceAccountToken, secretTypeBootstrapToken:
 		return nil, "", fmt.Errorf("remoteControl.tls secret %q has type %q — a Kubernetes API credential must not be used as a gNB remote-control secret", t.SecretName, secret.Type)
@@ -1004,6 +1006,25 @@ func (r *NTNCellConfigReconciler) resolveRemoteControlTLS(
 			return nil, "", fmt.Errorf("remoteControl.tls secret %q: ca.crt is not valid PEM", t.SecretName)
 		}
 		cfg.RootCAs = pool
+	} else if len(secret.Data["token"]) > 0 {
+		// Refuse to TRANSMIT a bearer token to a server vouched for only by the public
+		// roots. The endpoint is CR-author-controlled and ServerName is derived from it, so
+		// with system roots an attacker who owns any domain can get a publicly-trusted
+		// certificate for it and receive the token verbatim — the confused deputy of #251
+		// completing, without needing the label gate to be bypassed at all. Pinning the
+		// gNB's own CA is what makes the destination unforgeable. This is the same reason
+		// kubeadm pins a CA public key for token-based discovery rather than trusting the
+		// system store before sending its bootstrap token.
+		//
+		// Only the token path is gated: mode=mtls PROVES a key rather than sending it, so a
+		// misdirected mTLS dial is identity misuse (and leaks the pushed config), not
+		// credential theft — ADR-0009 draws the same line. A deployment that genuinely
+		// fronts its gNB with a publicly-trusted certificate can still opt in explicitly by
+		// putting that CA in ca.crt.
+		return nil, "", fmt.Errorf(
+			"remoteControl.tls secret %q carries a bearer token but no ca.crt: the token would be sent to "+
+				"a server trusted only by the system roots, and remoteControl.endpoint is caller-controlled — "+
+				"pin the gNB's CA in ca.crt", t.SecretName)
 	}
 	// mTLS: present a client certificate.
 	if t.Mode == "mtls" {
