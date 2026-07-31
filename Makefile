@@ -157,6 +157,10 @@ lint-config: golangci-lint ## Verify golangci-lint linter configuration
 check-action-shas: ## Verify all GitHub Actions refs in .github/workflows are SHA-pinned (and resolve when GH_TOKEN is set).
 	./hack/check-action-shas.sh
 
+.PHONY: adr-lint
+adr-lint: ## Validate docs/adr: unique numbers, title==filename, Status line, index membership, resolvable relative links + internal anchors (repo-local; no network).
+	./hack/check-adr-index.sh
+
 ##@ Build
 
 .PHONY: build
