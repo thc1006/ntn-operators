@@ -108,20 +108,27 @@ func (r *SatelliteEphemerisReconciler) now() time.Time {
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
 
+// clampWarn is a deferred RefreshIntervalClamped Warning. clampRefreshInterval returns
+// one (non-empty ONLY for a new clamp episode); persistEphStatus emits it exactly once,
+// AFTER a Status().Update persists the condition, so the Warning can never fire before
+// its condition is durable. A zero value (empty reason) means "nothing to emit".
+type clampWarn struct {
+	reason string
+	msg    string
+}
+
 // clampRefreshInterval clamps spec.source.refreshInterval into [minRefreshInterval,
 // maxRefreshInterval] and records the RefreshIntervalClamped condition — True with
 // reason BelowMinimum/AboveMaximum when clamped, and False/WithinBounds (NOT absent)
 // when the configured interval is used as-is, so False is distinguishable from the
-// not-yet-reconciled Unknown per the Kubernetes condition contract. The clamp Warning
-// is emitted inline (pre-persist) and episode-gated, so it fires once per spec across
-// NORMAL reconciles instead of on every ~3-minute reconcile. Inline emission is
-// deliberate: the clamp is a deterministic function of the spec, so the Warning is
-// never fabricated and is not lost on an early-return fetch-error path. The one edge
-// it does NOT cover is a status-update CONFLICT that discards the reconcile — the prior
-// condition then does not persist, so the next reconcile re-detects the episode and
-// re-emits; that is rare and benign for a spec-validation Warning, and is the accepted
-// trade-off against threading a deferred note through every status-write path.
-func (r *SatelliteEphemerisReconciler) clampRefreshInterval(ctx context.Context, eph *ntnv1alpha1.SatelliteEphemeris) time.Duration {
+// not-yet-reconciled Unknown per the Kubernetes condition contract. It does NOT emit the
+// Warning itself: it returns a clampWarn (non-empty only for a NEW clamp episode) that
+// the caller threads to persistEphStatus, which emits it exactly once AFTER the status
+// write. This closes #311 (the last pre-persist WO-20 exception): a status-update
+// conflict that discards the reconcile no longer leaves a Warning that fired without a
+// persisted condition, and the episode gate still holds because the condition either
+// persisted (so the next reconcile is a no-op) or did not (so the retry re-emits — once).
+func (r *SatelliteEphemerisReconciler) clampRefreshInterval(ctx context.Context, eph *ntnv1alpha1.SatelliteEphemeris) (time.Duration, clampWarn) {
 	effectiveInterval := eph.Spec.Source.RefreshInterval.Duration
 	var clampReason, clampMsg string
 	switch {
@@ -144,7 +151,7 @@ func (r *SatelliteEphemerisReconciler) clampRefreshInterval(ctx context.Context,
 			Message:            "Configured refreshInterval is within the supported range [2h, 24h]",
 			ObservedGeneration: eph.Generation,
 		})
-		return effectiveInterval
+		return effectiveInterval, clampWarn{}
 	}
 	clampEpisode := conditionEpisodeChanged(
 		meta.FindStatusCondition(eph.Status.Conditions, ntnv1alpha1.ConditionRefreshIntervalClamped),
@@ -165,10 +172,26 @@ func (r *SatelliteEphemerisReconciler) clampRefreshInterval(ctx context.Context,
 		Message:            clampMsg,
 		ObservedGeneration: eph.Generation,
 	})
-	if clampEpisode && r.Recorder != nil {
-		r.Recorder.Eventf(eph, nil, corev1.EventTypeWarning, "RefreshIntervalClamped", clampReason, "%s", clampMsg)
+	if clampEpisode {
+		return effectiveInterval, clampWarn{reason: clampReason, msg: clampMsg}
 	}
-	return effectiveInterval
+	return effectiveInterval, clampWarn{}
+}
+
+// persistEphStatus writes eph's status and, only after a SUCCESSFUL write, emits any
+// deferred clamp Warning exactly once (clearing it so a second status write on the same
+// reconcile does not re-emit). EVERY status-write path in this controller routes through
+// this, so the RefreshIntervalClamped Warning is strictly emit-after-persist (#311). A
+// nil clamp is allowed for callers with nothing to defer.
+func (r *SatelliteEphemerisReconciler) persistEphStatus(ctx context.Context, eph *ntnv1alpha1.SatelliteEphemeris, clamp *clampWarn) error {
+	if err := r.Status().Update(ctx, eph); err != nil {
+		return err
+	}
+	if clamp != nil && clamp.reason != "" && r.Recorder != nil {
+		r.Recorder.Eventf(eph, nil, corev1.EventTypeWarning, "RefreshIntervalClamped", clamp.reason, "%s", clamp.msg)
+		*clamp = clampWarn{}
+	}
+	return nil
 }
 
 // Reconcile fetches GP data, computes pass predictions, and updates status.
@@ -203,7 +226,7 @@ func (r *SatelliteEphemerisReconciler) Reconcile(ctx context.Context, req ctrl.R
 	// re-propagate a 30-day-old element set as if fresh, and LEO SGP4 error grows
 	// ~1–3 km/day from the element epoch (findings.md I-17). metav1.Duration
 	// serialises as a string, so both bounds are enforced here rather than via CEL.
-	effectiveInterval := r.clampRefreshInterval(ctx, eph)
+	effectiveInterval, clampWarning := r.clampRefreshInterval(ctx, eph)
 	now := r.now()
 
 	// Step 3: Can this reconcile be answered from cache WITHOUT contacting the source?
@@ -213,7 +236,7 @@ func (r *SatelliteEphemerisReconciler) Reconcile(ctx context.Context, req ctrl.R
 	// Consulted BEFORE fetcher/credential setup: a reconcile the cache can answer must not
 	// read the source Secret, so a transient Secret failure (or a credential rotation) cannot
 	// break SIB19 continuity.
-	outcome, earlyResult, earlyErr := r.acquireOMMs(ctx, req, eph, effectiveInterval, now)
+	outcome, earlyResult, earlyErr := r.acquireOMMs(ctx, req, eph, effectiveInterval, now, &clampWarning)
 	if earlyResult != nil {
 		// obtainOMMs only early-returns on no-usable-data outcomes: a refused insecure
 		// URL, or a fetch error with no cache to fall back on. Readiness 0 either way
@@ -411,8 +434,9 @@ func (r *SatelliteEphemerisReconciler) Reconcile(ctx context.Context, req ctrl.R
 	}
 
 	// WRITE A — the epoch heartbeat. Always, and BEFORE the pass sweep, so a slow or ctx-cancelled
-	// sweep never delays or drops the epoch the consumer pushes (ADR 0006 / #234).
-	if err := r.Status().Update(ctx, eph); err != nil {
+	// sweep never delays or drops the epoch the consumer pushes (ADR 0006 / #234). This is the main
+	// path's first status write, so it also flushes the deferred clamp Warning after it persists.
+	if err := r.persistEphStatus(ctx, eph, &clampWarning); err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -472,8 +496,9 @@ func (r *SatelliteEphemerisReconciler) Reconcile(ctx context.Context, req ctrl.R
 		eph.Status.LastPassPredictionInputHash = inputSig
 		// WRITE B — pass windows + cadence state. controller-runtime wrote eph's fresh
 		// resourceVersion back after write A, so this uses it; an external edit in the gap 409s and
-		// requeues without losing the epoch.
-		if err := r.Status().Update(ctx, eph); err != nil {
+		// requeues without losing the epoch. clampWarning was already flushed by write A (the pointer
+		// self-clears), so this is a no-op for the clamp Warning.
+		if err := r.persistEphStatus(ctx, eph, &clampWarning); err != nil {
 			return ctrl.Result{}, err
 		}
 		// Pass-prediction events, post-persist + transition-gated (#188): the notes are non-empty
@@ -832,7 +857,7 @@ func (r *SatelliteEphemerisReconciler) cacheServe(
 // propagate at all.
 func (r *SatelliteEphemerisReconciler) acquireOMMs(
 	ctx context.Context, req ctrl.Request, eph *ntnv1alpha1.SatelliteEphemeris,
-	effectiveInterval time.Duration, now time.Time,
+	effectiveInterval time.Duration, now time.Time, clamp *clampWarn,
 ) (ommFetchOutcome, *ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
@@ -862,7 +887,7 @@ func (r *SatelliteEphemerisReconciler) acquireOMMs(
 
 	fetcher, fetcherErr := r.fetcherForSource(ctx, eph)
 	if fetcherErr == nil {
-		return r.obtainOMMs(ctx, req, eph, fetcher, effectiveInterval, now)
+		return r.obtainOMMs(ctx, req, eph, fetcher, effectiveInterval, now, clamp)
 	}
 
 	// 2a: setup failed but the cached payload is still propagatable.
@@ -876,13 +901,13 @@ func (r *SatelliteEphemerisReconciler) acquireOMMs(
 	}
 
 	// 2b: cold cache — nothing to keep alive.
-	res, err := r.handleSetupFailure(ctx, eph, fetcherErr)
+	res, err := r.handleSetupFailure(ctx, eph, fetcherErr, clamp)
 	return ommFetchOutcome{}, &res, err
 }
 
 // handleSetupFailure is the cold-cache fetcher/credential failure path: no OMMs at all.
 func (r *SatelliteEphemerisReconciler) handleSetupFailure(
-	ctx context.Context, eph *ntnv1alpha1.SatelliteEphemeris, fetcherErr error,
+	ctx context.Context, eph *ntnv1alpha1.SatelliteEphemeris, fetcherErr error, clamp *clampWarn,
 ) (ctrl.Result, error) {
 	meta.SetStatusCondition(&eph.Status.Conditions, metav1.Condition{
 		Type:               ntnv1alpha1.ConditionGPDataFetched,
@@ -901,7 +926,7 @@ func (r *SatelliteEphemerisReconciler) handleSetupFailure(
 	// that will never be recomputed while setup stays broken. (round-5 Blocker 2 —
 	// all no-OMM clear paths must invalidate.)
 	invalidatePassPredictionStatus(eph)
-	if err := r.Status().Update(ctx, eph); err != nil {
+	if err := r.persistEphStatus(ctx, eph, clamp); err != nil {
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{RequeueAfter: time.Minute}, nil
@@ -1601,6 +1626,7 @@ func (r *SatelliteEphemerisReconciler) handleInsecureURL(
 	ctx context.Context,
 	eph *ntnv1alpha1.SatelliteEphemeris,
 	ip string,
+	clamp *clampWarn,
 ) (ctrl.Result, error) {
 	msg := fmt.Sprintf(
 		"cleartext http source resolves to public IP %s; use https to prevent forged OMM injection into SIB19",
@@ -1619,7 +1645,7 @@ func (r *SatelliteEphemerisReconciler) handleInsecureURL(
 	// pass windows are unbacked — clear them and the cadence state so the NTNSlice
 	// consumer's PassesPredicted gate holds. (round-5 Blocker 2)
 	invalidatePassPredictionStatus(eph)
-	if err := r.Status().Update(ctx, eph); err != nil {
+	if err := r.persistEphStatus(ctx, eph, clamp); err != nil {
 		return ctrl.Result{}, err
 	}
 	// Gate on the episode so a permanently-insecure source emits one Warning per
@@ -1636,6 +1662,7 @@ func (r *SatelliteEphemerisReconciler) handleFetchError(
 	eph *ntnv1alpha1.SatelliteEphemeris,
 	fetchErr error,
 	effectiveInterval time.Duration,
+	clamp *clampWarn,
 ) (ctrl.Result, error) {
 	reason, requeueAfter, returnAsError := classifyFetchError(fetchErr, effectiveInterval)
 
@@ -1667,7 +1694,7 @@ func (r *SatelliteEphemerisReconciler) handleFetchError(
 	// instead of waiting out passPredictionInterval (ADR 0006 / #234).
 	invalidatePassPredictionStatus(eph)
 
-	if err := r.Status().Update(ctx, eph); err != nil {
+	if err := r.persistEphStatus(ctx, eph, clamp); err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -1727,7 +1754,7 @@ const (
 // I-17 EphemerisEpochStale condition.
 func (r *SatelliteEphemerisReconciler) obtainOMMs(
 	ctx context.Context, req ctrl.Request, eph *ntnv1alpha1.SatelliteEphemeris,
-	fetcher ephemeris.GPFetcher, effectiveInterval time.Duration, now time.Time,
+	fetcher ephemeris.GPFetcher, effectiveInterval time.Duration, now time.Time, clamp *clampWarn,
 ) (ommFetchOutcome, *ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 	fetchKey := fetchInputKey(eph.Spec)
@@ -1737,7 +1764,7 @@ func (r *SatelliteEphemerisReconciler) obtainOMMs(
 
 	// Refuse a cleartext http:// source that resolves to a PUBLIC IP (I-21).
 	if ip, insecure := r.publicHTTPSource(ctx, eph.Spec.Source.URL); insecure {
-		res, err := r.handleInsecureURL(ctx, eph, ip)
+		res, err := r.handleInsecureURL(ctx, eph, ip, clamp)
 		return ommFetchOutcome{}, &res, err
 	}
 
@@ -1776,7 +1803,7 @@ func (r *SatelliteEphemerisReconciler) obtainOMMs(
 		}
 		// No cache to serve: nothing to keep fresh, so the fetch backoff IS the reconcile
 		// cadence here (the wipe path) — unchanged.
-		res, err := r.handleFetchError(ctx, eph, fetchErr, effectiveInterval)
+		res, err := r.handleFetchError(ctx, eph, fetchErr, effectiveInterval, clamp)
 		return ommFetchOutcome{}, &res, err
 	}
 

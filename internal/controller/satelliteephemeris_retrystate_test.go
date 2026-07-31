@@ -200,7 +200,7 @@ func TestObtainOMMs_TransientAfterAuth_RestartsRampThroughWiring(t *testing.T) {
 	fetcher := &mockGPFetcher{err: errors.New("dial tcp: connection refused")} // a genuine transient error
 	before := time.Now()
 	outcome, res, err := r.obtainOMMs(context.Background(),
-		reconcile.Request{NamespacedName: key}, eph, fetcher, interval, time.Now())
+		reconcile.Request{NamespacedName: key}, eph, fetcher, interval, time.Now(), &clampWarn{})
 	if err != nil || res != nil {
 		t.Fatalf("a transient error over a valid cache must serve cache, not error/short-circuit; err=%v res=%v", err, res)
 	}

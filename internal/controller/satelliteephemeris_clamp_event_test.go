@@ -22,6 +22,7 @@ import (
 	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	ntnv1alpha1 "github.com/thc1006/ntn-operators/api/v1alpha1"
@@ -165,5 +166,66 @@ func TestReconcile_RefreshIntervalClamped_RecoveryContract(t *testing.T) {
 	}
 	if c := cond(); c == nil || c.Status != metav1.ConditionTrue {
 		t.Fatalf("re-clamp: want True, got %+v", c)
+	}
+}
+
+// TestReconcile_RefreshIntervalClamped_NoEventBeforePersist is the #311 regression: the
+// clamp Warning is strictly emit-after-persist. A status-update CONFLICT that discards the
+// reconcile must NOT emit the Warning (the condition never persisted) — the previous inline
+// pre-persist emission fired it here, so a retry produced a duplicate — and the retry then
+// emits it exactly once. This closes the last pre-persist exception to the WO-20 invariant.
+func TestReconcile_RefreshIntervalClamped_NoEventBeforePersist(t *testing.T) {
+	sch := makeScheme(t)
+	eph := &ntnv1alpha1.SatelliteEphemeris{
+		ObjectMeta: metav1.ObjectMeta{Name: "e", Namespace: "default"},
+		Spec: ntnv1alpha1.SatelliteEphemerisSpec{
+			Source: ntnv1alpha1.EphemerisSource{
+				Type: "CelesTrak", URL: "https://celestrak.org/x",
+				RefreshInterval: metav1.Duration{Duration: 1 * time.Hour}, // below the 2h minimum
+			},
+		},
+	}
+	failNextStatusWrite := true
+	cli := fake.NewClientBuilder().WithScheme(sch).WithObjects(eph).WithStatusSubresource(eph).
+		WithInterceptorFuncs(interceptor.Funcs{
+			SubResourceUpdate: func(ctx context.Context, c client.Client, sr string,
+				obj client.Object, opts ...client.SubResourceUpdateOption) error {
+				if failNextStatusWrite {
+					failNextStatusWrite = false // fail the FIRST status write only
+					return errors.New("simulated status-update conflict")
+				}
+				return c.SubResource(sr).Update(ctx, obj, opts...)
+			},
+		}).Build()
+
+	rec := events.NewFakeRecorder(20)
+	r := &SatelliteEphemerisReconciler{Client: cli, Scheme: sch, Recorder: rec, Fetcher: &mockGPFetcher{err: errors.New("outage")}}
+	key := client.ObjectKeyFromObject(eph)
+
+	countClamp := func() int {
+		n := 0
+		for drained := false; !drained; {
+			select {
+			case ev := <-rec.Events:
+				if strings.Contains(ev, "RefreshIntervalClamped") {
+					n++
+				}
+			default:
+				drained = true
+			}
+		}
+		return n
+	}
+
+	// Reconcile 1: the status write conflicts, so the reconcile is discarded. Emit-after-persist
+	// means the clamp Warning must NOT fire here (the pre-persist emission this fixes would have).
+	_, _ = r.Reconcile(context.Background(), reconcile.Request{NamespacedName: key})
+	if n := countClamp(); n != 0 {
+		t.Fatalf("a conflicted (discarded) reconcile must emit NO clamp Warning, got %d — pre-persist emission?", n)
+	}
+	// Reconcile 2: the write succeeds, so the clamp Warning fires exactly once (no duplicate).
+	_, _ = r.Reconcile(context.Background(), reconcile.Request{NamespacedName: key})
+	if n := countClamp(); n != 1 {
+		t.Fatalf("the retry after a conflict must emit exactly one clamp Warning, got %d", n)
 	}
 }
