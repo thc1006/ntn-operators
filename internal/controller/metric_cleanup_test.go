@@ -48,8 +48,14 @@ func TestSatelliteEphemerisReconcile_DeletedReleasesMetricSeries(t *testing.T) {
 		t.Fatalf("AddToScheme: %v", err)
 	}
 
-	// Seed a per-CR series, as a live reconcile would (keyed by namespace+name).
-	ntnmetrics.GPSatelliteCount.With(prometheus.Labels{"namespace": "ns", "ephemeris": "deleted-eph"}).Set(7)
+	// Seed per-CR series, as a live reconcile would (keyed by namespace+ephemeris).
+	del := prometheus.Labels{"namespace": "ns", "ephemeris": "deleted-eph"}
+	persistLbl := prometheus.Labels{"namespace": "ns", "ephemeris": "deleted-eph", "result": "success"}
+	restoreLbl := prometheus.Labels{"namespace": "ns", "ephemeris": "deleted-eph", "result": "hydrated"}
+	ntnmetrics.GPSatelliteCount.With(del).Set(7)
+	ntnmetrics.OMMCachePersistTotal.With(persistLbl).Inc()
+	ntnmetrics.OMMCacheRestoreTotal.With(restoreLbl).Inc()
+	ntnmetrics.OMMCacheRestoredAgeSeconds.With(del).Set(120)
 	before := testutil.CollectAndCount(ntnmetrics.GPSatelliteCount)
 
 	// Empty client → Get returns NotFound (the CR is "deleted").
@@ -69,6 +75,16 @@ func TestSatelliteEphemerisReconcile_DeletedReleasesMetricSeries(t *testing.T) {
 	if after != before-1 {
 		t.Errorf("deleted CR's metric series was not released: series count before=%d after=%d (want after=before-1)",
 			before, after)
+	}
+	// The OMM-cache series must be released too, or they leak for every deleted CR.
+	if got := testutil.ToFloat64(ntnmetrics.OMMCachePersistTotal.With(persistLbl)); got != 0 {
+		t.Errorf("OMMCachePersistTotal not released on delete: got %v", got)
+	}
+	if got := testutil.ToFloat64(ntnmetrics.OMMCacheRestoreTotal.With(restoreLbl)); got != 0 {
+		t.Errorf("OMMCacheRestoreTotal not released on delete: got %v", got)
+	}
+	if got := testutil.ToFloat64(ntnmetrics.OMMCacheRestoredAgeSeconds.With(del)); got != 0 {
+		t.Errorf("OMMCacheRestoredAgeSeconds not released on delete: got %v", got)
 	}
 }
 
