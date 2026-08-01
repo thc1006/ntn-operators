@@ -21,7 +21,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
+	"unicode"
 
 	"github.com/coder/websocket"
 
@@ -36,7 +38,44 @@ const (
 	wsDialTimeout = 5 * time.Second
 	// wsMaxPayload mirrors OCUDU's remote_control 16 KB frame cap.
 	wsMaxPayload = 16 * 1024
+	// maxRemoteErrorBytes caps gNB-supplied error text embedded in Condition/Event/log.
+	maxRemoteErrorBytes = 1024
 )
+
+// sanitizeRemoteError makes the untrusted gNB reply's {"error":...} text safe to embed in
+// a Condition message, Kubernetes Event, and log. A compromised gNB or proxy could
+// otherwise inject control, bidirectional-override, or zero-width runes to corrupt or
+// spoof `kubectl describe`/Event output (Trojan-Source style), or pad ~16 KiB toward the
+// reply cap. It maps Unicode Cc (control) to a space, drops Cf (format — covers bidi
+// overrides and zero-width joiners), collapses whitespace, and hard-caps the length.
+// Returns "(no detail)" when the input is empty or fully stripped.
+func sanitizeRemoteError(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	truncated := false
+	for _, r := range s {
+		if b.Len() >= maxRemoteErrorBytes {
+			truncated = true
+			break
+		}
+		switch {
+		case unicode.IsControl(r):
+			b.WriteByte(' ')
+		case unicode.In(r, unicode.Cf):
+			// bidi overrides + zero-width runes carry no visible glyph: drop them.
+		default:
+			b.WriteRune(r)
+		}
+	}
+	out := strings.Join(strings.Fields(b.String()), " ")
+	if truncated {
+		out += " (truncated)"
+	}
+	if out == "" {
+		return "(no detail)"
+	}
+	return out
+}
 
 // ntnConfigUpdateEnvelope is the JSON frame OCUDU's remote_control WebSocket
 // server expects: {"cmd":"ntn_config_update","cells":[...]}. Values are PHYSICAL
@@ -445,7 +484,7 @@ func pushNTNConfigUpdate(
 		return &wsError{wsUnreachable, fmt.Sprintf("unparseable reply from %s: %q", endpoint, reply[:min(len(reply), 200)])}
 	}
 	if r.Error != "" {
-		return &wsError{wsRejected, fmt.Sprintf("gNB rejected ntn_config_update: %s", r.Error)}
+		return &wsError{wsRejected, fmt.Sprintf("gNB rejected ntn_config_update: %s", sanitizeRemoteError(r.Error))}
 	}
 
 	return nil
