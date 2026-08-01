@@ -77,6 +77,10 @@ type SatelliteEphemerisReconciler struct {
 	Fetcher                 ephemeris.GPFetcher          // CelesTrak fetcher
 	SpaceTrackFetcher       *ephemeris.SpaceTrackFetcher // SpaceTrack fetcher (nil = disabled)
 
+	// SourceHostAllowlist restricts which hosts a CelesTrak source URL may be fetched from
+	// (#227 defense-in-depth / admin source integrity). Empty = permit-all (backward compatible).
+	SourceHostAllowlist netutil.EndpointAllowlist
+
 	// Now returns the current time; nil defaults to time.Now(). Injected in tests to make two
 	// clock-dependent behaviours deterministic: the propagation epoch (sampled at PROPAGATION time,
 	// not reconcile-start) and the fetch-retry backoff window (cacheServe's suppression gate and the
@@ -897,9 +901,13 @@ func (r *SatelliteEphemerisReconciler) acquireOMMs(
 	if c, ok := r.matchingCache(req.NamespacedName, eph); ok {
 		log.Info("fetcher/credential setup failed; serving cached OMMs for SIB19 continuity",
 			"err", fetcherErr.Error(), "cacheAge", now.Sub(c.result.FetchedAt).String())
+		serveReason := reasonSetupFailedServingCache
+		if errors.Is(fetcherErr, errSourceHostNotAllowed) {
+			serveReason = reasonSourceHostNotAllowed
+		}
 		return ommFetchOutcome{
 			result: c.result, servedCacheOnError: true,
-			cacheServeErr: fetcherErr, serveReason: reasonSetupFailedServingCache,
+			cacheServeErr: fetcherErr, serveReason: serveReason,
 		}, nil, nil
 	}
 
@@ -912,10 +920,14 @@ func (r *SatelliteEphemerisReconciler) acquireOMMs(
 func (r *SatelliteEphemerisReconciler) handleSetupFailure(
 	ctx context.Context, eph *ntnv1alpha1.SatelliteEphemeris, fetcherErr error, clamp *clampWarn,
 ) (ctrl.Result, error) {
+	reason := "FetcherSetupFailed"
+	if errors.Is(fetcherErr, errSourceHostNotAllowed) {
+		reason = reasonSourceHostNotAllowed // a policy refusal, not a credential/setup failure
+	}
 	meta.SetStatusCondition(&eph.Status.Conditions, metav1.Condition{
 		Type:               ntnv1alpha1.ConditionGPDataFetched,
 		Status:             metav1.ConditionFalse,
-		Reason:             "FetcherSetupFailed",
+		Reason:             reason,
 		Message:            fetcherErr.Error(),
 		ObservedGeneration: eph.Generation,
 	})
@@ -1744,6 +1756,10 @@ type ommFetchOutcome struct {
 const (
 	reasonFetchFailedServingCache = "FetchFailedServingCache"
 	reasonSetupFailedServingCache = "FetcherSetupFailedServingCache"
+	// reasonSourceHostNotAllowed marks a fetch refused because the source host is not in the
+	// operator's --ephemeris-allowed-source-hosts allow-list (#227) — a policy refusal distinct
+	// from a credential/setup failure, so an admin can alert on it specifically.
+	reasonSourceHostNotAllowed = "SourceHostNotAllowed"
 )
 
 // obtainOMMs resolves the OMM data for this reconcile (Step 4b/5). It returns the
@@ -1872,6 +1888,17 @@ func classifyFetchError(fetchErr error, effectiveInterval time.Duration) (reason
 // existence or key shape. #222 review blocker 3.
 var errSpaceTrackCredentialUnavailable = errors.New("Space-Track credentials unavailable or not authorized")
 
+// errSourceHostNotAllowed marks a fetch refused up front because the CelesTrak source host is
+// not in the operator's --ephemeris-allowed-source-hosts allow-list. Returned by fetcherForSource
+// BEFORE any dial, so a non-sanctioned source is never contacted.
+var errSourceHostNotAllowed = errors.New("ephemeris source host is not in the operator allow-list")
+
+// Supported spec.source.type values.
+const (
+	sourceTypeCelesTrak  = "CelesTrak"
+	sourceTypeSpaceTrack = "SpaceTrack"
+)
+
 // fetcherForSource returns the appropriate GPFetcher for the source type.
 // For SpaceTrack, it also loads credentials from the referenced Secret.
 func (r *SatelliteEphemerisReconciler) fetcherForSource(
@@ -1879,14 +1906,25 @@ func (r *SatelliteEphemerisReconciler) fetcherForSource(
 ) (ephemeris.GPFetcher, error) {
 	log := logf.FromContext(ctx)
 	log.V(1).Info("selecting fetcher", "sourceType", eph.Spec.Source.Type)
+
+	// Source-host allow-list (#227): refuse to CONTACT a non-sanctioned host before any dial.
+	// CelesTrak's source host is CR-author-controlled and fetched directly; SpaceTrack's contact
+	// host is the admin-hardcoded base (cmd/main.go), so it is already sanctioned and not gated
+	// here. Empty allow-list = permit-all (backward compatible), mirroring the remoteControl gate.
+	if eph.Spec.Source.Type == sourceTypeCelesTrak {
+		if err := r.SourceHostAllowlist.Check(eph.Spec.Source.URL); err != nil {
+			return nil, fmt.Errorf("%w: %v", errSourceHostNotAllowed, err)
+		}
+	}
+
 	switch eph.Spec.Source.Type {
-	case "CelesTrak":
+	case sourceTypeCelesTrak:
 		if r.Fetcher == nil {
 			return nil, fmt.Errorf("CelesTrak fetcher is not configured")
 		}
 		return r.Fetcher, nil
 
-	case "SpaceTrack":
+	case sourceTypeSpaceTrack:
 		if r.SpaceTrackFetcher == nil {
 			return nil, fmt.Errorf("SpaceTrack fetcher is not configured")
 		}
