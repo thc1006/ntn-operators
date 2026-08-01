@@ -30,6 +30,7 @@ Governance is machine-checked:
 | [0010](0010-v1alpha2-secure-defaults-and-duration-validation.md) | v1alpha2 secure-by-default transport and duration admission validation | proposed | — | #214, #315, #311, #299 |
 | [0011](0011-remote-control-credential-grant.md) | Owner-issued grant for remote-control credentials | proposed | supersedes **0009** admission-only end state | #251, #298, #329 (closed by #332) |
 | [0012](0012-ground-station-antenna-health-probe.md) | Evidence-based ground-station antenna health and readiness | proposed | supersedes node-exists→`AntennaReady=True` | #68 · #335 removed the fabricated `True`; the probe itself is unimplemented |
+| [0013](0013-transactional-data-plane-actuation.md) | Transactional data-plane actuation for `NTNSlice` path changes | proposed | relates 0005/0008/0010; v1alpha2 recommendation-vs-applied split, reframes #69 continuity as an actuator capability | #49, #69, #137, #141, #162 |
 
 ## Reserved / gaps
 
