@@ -322,7 +322,7 @@ spec:
     spec:
       containers:
         - name: nginx
-          image: nginx:1.29-alpine
+          image: nginx:1.29-alpine@sha256:5616878291a2eed594aee8db4dade5878cf7edcb475e59193904b198d9b830de
           ports: [{containerPort: 80, name: http}]
           # Ready means the fixture is actually servable, not merely that nginx started.
           readinessProbe:
@@ -391,7 +391,7 @@ spec:
     spec:
       containers:
         - name: gnb
-          image: golang:1.24-alpine
+          image: golang:1.24-alpine@sha256:8bee1901f1e530bfb4a7850aa7a479d17ae3a18beb6e09064ed54cfd245b7191
           command: ["go","run","/src/main.go"]
           env:
             - {name: GOCACHE, value: /tmp/gocache}
@@ -408,7 +408,7 @@ spec:
             - {name: src, mountPath: /src}
             - {name: tmp, mountPath: /tmp}
         - name: proxy
-          image: nginx:1.29-alpine
+          image: nginx:1.29-alpine@sha256:5616878291a2eed594aee8db4dade5878cf7edcb475e59193904b198d9b830de
           ports: [{containerPort: 8443, name: wss}]
           readinessProbe:
             tcpSocket: {port: 8443}
