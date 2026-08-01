@@ -75,6 +75,10 @@ const (
 	wssToken    = "e2e-wss-bearer-token"
 	wssNorad    = 25544
 	wssGPMock   = "e2e-wss-gp"
+	// The mTLS listener the sample documents, and the TLS-only listener the sample documents as
+	// a two-line deletion from it. Both are served by the same pod in front of one backend.
+	wssMTLSPort = 8443
+	wssTLSPort  = 8444
 )
 
 // wssRunNCI makes this run's frames distinguishable from any earlier run's. The backend log is
@@ -299,6 +303,66 @@ func proxyLogCount(t *testing.T, sub string) int {
 	return strings.Count(out, sub)
 }
 
+// sampleNginxConfTLSOnly is the variant the sample itself documents:
+//
+//	# Drop these two lines (and use tls.mode "tls") if you only want a bearer token.
+//	ssl_client_certificate /certs/ca.crt;
+//	ssl_verify_client on;
+//
+// Deriving it here rather than writing a second config by hand means the TLS-only arm tests the
+// documented instruction, not an invention of this test — and if the sample stops matching, the
+// derivation fails loudly instead of silently testing something else.
+func sampleNginxConfTLSOnly(t *testing.T) string {
+	t.Helper()
+	conf := sampleNginxConf(t)
+	for _, drop := range []string{"ssl_client_certificate", "ssl_verify_client"} {
+		var kept []string
+		found := false
+		for line := range strings.SplitSeq(conf, "\n") {
+			if strings.Contains(line, drop) {
+				found = true
+				continue
+			}
+			kept = append(kept, line)
+		}
+		if !found {
+			t.Fatalf("the sample no longer contains %q, so the TLS-only variant it documents "+
+				"(%q) cannot be derived from it", drop, "drop these two lines")
+		}
+		conf = strings.Join(kept, "\n")
+	}
+	listen := fmt.Sprintf("listen %d ssl", wssMTLSPort)
+	if !strings.Contains(conf, listen) {
+		t.Fatalf("the sample no longer listens on %d; this test moves that listener to %d",
+			wssMTLSPort, wssTLSPort)
+	}
+	return strings.Replace(conf, listen, fmt.Sprintf("listen %d ssl", wssTLSPort), 1)
+}
+
+// foreignCA is a throwaway CA unrelated to the one the proxy serves under. Pinning it in the
+// credential must make the operator refuse the server certificate.
+func foreignCA(t *testing.T) []byte {
+	t.Helper()
+	k, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("genkey: %v", err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(2),
+		Subject:               pkix.Name{CommonName: "e2e-wss-foreign-ca"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(24 * time.Hour),
+		KeyUsage:              x509.KeyUsageCertSign,
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &k.PublicKey, k)
+	if err != nil {
+		t.Fatalf("create foreign ca: %v", err)
+	}
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+}
+
 // ---------------------------------------------------------------- deployment
 
 func deployGPMock(t *testing.T) {
@@ -362,15 +426,18 @@ func deployGNB(t *testing.T, ca, server certPair) {
 	root, _ := os.Getwd()
 	stub := filepath.Join(root, "fixtures", "gnb-remote-control-stub.go.txt")
 
-	_, _ = kubectl(t, "-n", wssNS, "delete", "configmap", wssGNB+"-src", wssGNB+"-conf", "--ignore-not-found")
+	_, _ = kubectl(t, "-n", wssNS, "delete", "configmap",
+		wssGNB+"-src", wssGNB+"-conf", wssGNB+"-conf-tls", "--ignore-not-found")
 	if out, err := kubectl(t, "-n", wssNS, "create", "configmap", wssGNB+"-src", "--from-file=main.go="+stub); err != nil {
 		t.Fatalf("create stub configmap: %v: %s", err, out)
 	}
-	conf := sampleNginxConf(t)
-	cmd := exec.Command("kubectl", "-n", wssNS, "create", "configmap", wssGNB+"-conf", "--from-file=nginx.conf=/dev/stdin")
-	cmd.Stdin = strings.NewReader(conf)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("create nginx configmap: %v: %s", err, out)
+	conf, confTLS := sampleNginxConf(t), sampleNginxConfTLSOnly(t)
+	for _, c := range []struct{ name, body string }{{wssGNB + "-conf", conf}, {wssGNB + "-conf-tls", confTLS}} {
+		cmd := exec.Command("kubectl", "-n", wssNS, "create", "configmap", c.name, "--from-file=nginx.conf=/dev/stdin")
+		cmd.Stdin = strings.NewReader(c.body)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("create %s: %v: %s", c.name, err, out)
+		}
 	}
 	_, _ = kubectl(t, "-n", wssNS, "delete", "secret", wssGNB+"-tls", "--ignore-not-found")
 	if err := createSecret(t, wssGNB+"-tls", map[string][]byte{
@@ -384,7 +451,8 @@ func deployGNB(t *testing.T, ca, server certPair) {
 	// serving the old chain and every dial would fail x509 verification. Observed: a second run in
 	// a kept namespace failed every arm with "certificate signed by unknown authority". Rolling on
 	// a checksum of exactly what nginx loads is the Helm checksum/config pattern.
-	sum := sha256.Sum256(bytes.Join([][]byte{[]byte(conf), ca.certPEM, server.certPEM, server.keyPEM}, nil))
+	sum := sha256.Sum256(bytes.Join([][]byte{
+		[]byte(conf), []byte(confTLS), ca.certPEM, server.certPEM, server.keyPEM}, nil))
 	kubectlApply(t, fmt.Sprintf(`
 apiVersion: apps/v1
 kind: Deployment
@@ -415,6 +483,18 @@ spec:
           volumeMounts:
             - {name: src, mountPath: /src}
             - {name: tmp, mountPath: /tmp}
+        - name: proxy-tls
+          # The SAME sample config with the two client-verification lines dropped: TLS + bearer,
+          # no client certificate. Without it, mode "tls" is only ever exercised as the negative
+          # half of an mTLS test, so the whole TLS-plus-bearer path could break unnoticed.
+          image: nginx:1.29-alpine
+          ports: [{containerPort: %[6]d, name: tls}]
+          readinessProbe:
+            tcpSocket: {port: %[6]d}
+            periodSeconds: 2
+          volumeMounts:
+            - {name: conf-tls, mountPath: /etc/nginx/nginx.conf, subPath: nginx.conf}
+            - {name: certs,    mountPath: /certs, readOnly: true}
         - name: proxy
           image: nginx:1.29-alpine@sha256:5616878291a2eed594aee8db4dade5878cf7edcb475e59193904b198d9b830de
           ports: [{containerPort: 8443, name: wss}]
@@ -426,7 +506,8 @@ spec:
             - {name: certs, mountPath: /certs, readOnly: true}
       volumes:
         - {name: src,   configMap: {name: %[1]s-src}}
-        - {name: conf,  configMap: {name: %[1]s-conf}}
+        - {name: conf,     configMap: {name: %[1]s-conf}}
+        - {name: conf-tls, configMap: {name: %[1]s-conf-tls}}
         - {name: certs, secret: {secretName: %[1]s-tls}}
         - {name: tmp,   emptyDir: {}}
 ---
@@ -435,8 +516,10 @@ kind: Service
 metadata: {name: %[3]s, namespace: %[2]s}
 spec:
   selector: {app: %[1]s}
-  ports: [{name: wss, port: 8443, targetPort: 8443}]
-`, wssGNB, wssNS, wssSvc, hex.EncodeToString(sum[:8])))
+  ports:
+    - {name: wss, port: %[5]d, targetPort: %[5]d}
+    - {name: wss-tls, port: %[6]d, targetPort: %[6]d}
+`, wssGNB, wssNS, wssSvc, hex.EncodeToString(sum[:8]), wssMTLSPort, wssTLSPort))
 	if _, err := kubectl(t, "-n", wssNS, "rollout", "status", "deploy/"+wssGNB, "--timeout=300s"); err != nil {
 		t.Fatalf("gnb not ready: %v", err)
 	}
@@ -737,7 +820,7 @@ spec:
     type: ocudu
     namespace: %[2]s
     remoteControl:
-      endpoint: "%[3]s.%[2]s.svc:8443"
+      endpoint: "%[3]s.%[2]s.svc:%[8]d"
       tls: {mode: mtls, secretName: %[4]s}
   cellID: {plmn: "00101", nci: %[7]d}
   ephemerisRef: %[5]s
@@ -745,7 +828,7 @@ spec:
   ntn:
     cellSpecificKoffset: 100
     ephemerisECEF: {posX: 1000000, posY: 2000000, posZ: 3000000, velX: 0, velY: 0, velZ: 0}
-`, wssCell, wssNS, wssSvc, wssCredName, wssSatEph, wssNorad, wssRunNCI))
+`, wssCell, wssNS, wssSvc, wssCredName, wssSatEph, wssNorad, wssRunNCI, wssMTLSPort))
 
 	// --- arm 1: the whole chain works, and the PLAINTEXT backend proves it -------------
 	t.Run("mtls+bearer reaches the plaintext gNB behind the proxy", func(t *testing.T) {
@@ -832,6 +915,36 @@ spec:
 		waitCondition(t, "True/Pushed", 3*time.Minute)
 	})
 
+	// --- arm 6: the server certificate is actually verified -----------------------------
+	// The happy path proves a CORRECT chain works, which a client with verification disabled
+	// also does. Only a chain the client should reject separates the two, so this is the arm
+	// that fails if anyone reaches for InsecureSkipVerify.
+	t.Run("a credential pinning the wrong CA refuses the server certificate", func(t *testing.T) {
+		before := framesReceived(t)
+		patchSecretCA(t, wssCredName, foreignCA(t))
+		bumpGeneration(t, "foreign-ca")
+		waitCondition(t, "False/ProviderPushFailed", 3*time.Minute)
+		if now := framesReceived(t); now != before {
+			t.Errorf("frames went %d -> %d: the operator accepted a server certificate signed by a CA "+
+				"its credential does not pin — server verification is not being enforced", before, now)
+		}
+		patchSecretCA(t, wssCredName, ca.certPEM)
+		bumpGeneration(t, "restore-ca")
+		waitCondition(t, "True/Pushed", 3*time.Minute)
+	})
+
+	// --- arm 7: TLS + bearer, no client certificate ---------------------------------------
+	t.Run("mode tls succeeds against a proxy that wants no client certificate", func(t *testing.T) {
+		before := framesReceived(t)
+		patchEndpointAndMode(t, fmt.Sprintf("%s.%s.svc:%d", wssSvc, wssNS, wssTLSPort), "tls")
+		waitCondition(t, "True/Pushed", 3*time.Minute)
+		if now := framesReceived(t); now <= before {
+			t.Errorf("condition says pushed but frames stayed at %d: mode tls delivered nothing", before)
+		}
+		patchEndpointAndMode(t, fmt.Sprintf("%s.%s.svc:%d", wssSvc, wssNS, wssMTLSPort), "mtls")
+		waitCondition(t, "True/Pushed", 3*time.Minute)
+	})
+
 	t.Run("endpoint outside the admin allow-list is refused before the Secret is read", func(t *testing.T) {
 		runEndpointAllowlistArm(t)
 	})
@@ -870,6 +983,26 @@ func runEndpointAllowlistArm(t *testing.T) {
 		t.Fatalf("restore endpoint: %v: %s", err, out)
 	}
 	waitCondition(t, "True/Pushed", 3*time.Minute)
+}
+
+// patchSecretCA swaps the pinned trust anchor without touching the rest of the credential.
+func patchSecretCA(t *testing.T, name string, caPEM []byte) {
+	t.Helper()
+	if out, err := kubectl(t, "-n", wssNS, "patch", "secret", name, "--type=merge",
+		fmt.Sprintf(`-p={"data":{"ca.crt":%q}}`, base64.StdEncoding.EncodeToString(caPEM))); err != nil {
+		t.Fatalf("patch ca.crt on %s: %v: %s", name, err, out)
+	}
+}
+
+// patchEndpointAndMode moves the cell between the two listeners. Both are the same host, so the
+// admin endpoint allow-list (which matches on host) is satisfied either way.
+func patchEndpointAndMode(t *testing.T, endpoint, mode string) {
+	t.Helper()
+	if out, err := kubectl(t, "-n", wssNS, "patch", "ntncellconfig", wssCell, "--type=merge",
+		fmt.Sprintf(`-p={"spec":{"provider":{"remoteControl":{"endpoint":%q,"tls":{"mode":%q,"secretName":%q}}}}}`,
+			endpoint, mode, wssCredName)); err != nil {
+		t.Fatalf("patch endpoint/mode: %v: %s", err, out)
+	}
 }
 
 func patchSecretToken(t *testing.T, name, token string) {
