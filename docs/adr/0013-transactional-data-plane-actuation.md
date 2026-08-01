@@ -8,7 +8,12 @@ deciders: [thc1006]
 supersedes: []
 superseded_by: []
 implementation: []
-tracking: []
+tracking:
+  - "https://github.com/thc1006/ntn-operators/issues/49"
+  - "https://github.com/thc1006/ntn-operators/issues/69"
+  - "https://github.com/thc1006/ntn-operators/issues/137"
+  - "https://github.com/thc1006/ntn-operators/issues/141"
+  - "https://github.com/thc1006/ntn-operators/issues/162"
 ---
 
 # ADR 0013 — Transactional data-plane actuation for `NTNSlice` path changes
