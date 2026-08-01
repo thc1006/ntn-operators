@@ -30,8 +30,6 @@
 - credential grant CRD/controller;
 - structured ground-station hardware agent;
 - policy-capable NetworkPolicy E2E;
-- six-digit NORAD regression coverage;
-- collision-resistant OMM cache migration.
 
 ## Landed since this bundle was written
 
@@ -43,6 +41,11 @@
 - **Fabricated antenna readiness** — #335 changed `AntennaReady` from a node-exists
   `True` to `Unknown/NoAntennaProbe`, which is the correction ADR 0012 requires.
   The evidence-based agent contract itself remains unimplemented (#68).
+- **Six-digit NORAD regression coverage** — #351.
+- **Collision-resistant OMM cache naming and legacy migration** — #345. The
+  storage-mode half of ADR 0007 (`ConfigMap | Secret | Disabled`) is still open.
+- **`sessionContinuity` honesty** — #352 states in the field itself that the build
+  does not enforce it; enforcement remains #69.
 
 ## Claims deliberately not made
 
