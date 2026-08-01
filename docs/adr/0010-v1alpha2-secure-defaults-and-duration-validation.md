@@ -9,8 +9,8 @@ supersedes: []
 superseded_by: []
 implementation: []
 tracking:
+  - "https://github.com/thc1006/ntn-operators/issues/331"
   - "https://github.com/thc1006/ntn-operators/issues/214"
-  - "https://github.com/thc1006/ntn-operators/issues/315"
   - "https://github.com/thc1006/ntn-operators/issues/311"
   - "https://github.com/thc1006/ntn-operators/issues/299"
 ---
