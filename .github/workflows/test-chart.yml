@@ -319,7 +319,7 @@ jobs:
           for arm in \
             'mtls\+bearer_reaches_the_plaintext_gNB_behind_the_proxy' \
             'wrong_bearer_is_RemoteEndpointRejected' \
-            'token_without_ca.crt_is_refused_before_the_dial' \
+            'token_without_ca.crt_delivers_no_payload' \
             'dropping_the_client_certificate_is_refused_by_the_proxy' \
             'endpoint_outside_the_admin_allow-list_is_refused_before_the_Secret_is_read'; do
             grep -Eq "^    --- PASS: TestWSSCredentialedPush/${arm}" /tmp/wss_e2e.out || {

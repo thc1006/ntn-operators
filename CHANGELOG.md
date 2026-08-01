@@ -109,7 +109,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stdlib-only Go mounted from a ConfigMap and run with the stock `golang` image, and the proxy is stock
   `nginx` — so it runs identically on Kind in CI and on a plain kubeadm cluster, with no Docker, no
   registry and no `kind load`. The nginx config is read from `config/samples/remote-control-tls/`, so
-  the shipped sample is what is under test rather than a copy that could drift. Four arms: the happy
+  the shipped sample is what is under test rather than a copy that could drift. Five arms: the happy
   path (frame validated for cmd/plmn/nci/future-epoch), a wrong bearer classified as
   `RemoteEndpointRejected`, a token without `ca.crt` refused before any dial (#313), and a dropped
   client certificate refused by the proxy — the last three each also asserting that **nothing** reached
