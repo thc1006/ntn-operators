@@ -319,8 +319,10 @@ jobs:
           for arm in \
             'mtls\+bearer_reaches_the_plaintext_gNB_behind_the_proxy' \
             'wrong_bearer_is_RemoteEndpointRejected' \
-            'token_without_ca.crt_is_refused_before_the_dial' \
+            'token_without_ca.crt_delivers_no_payload' \
             'dropping_the_client_certificate_is_refused_by_the_proxy' \
+            'a_credential_pinning_the_wrong_CA_refuses_the_server_certificate' \
+            'mode_tls_succeeds_against_a_proxy_that_wants_no_client_certificate' \
             'endpoint_outside_the_admin_allow-list_is_refused_before_the_Secret_is_read'; do
             grep -Eq "^    --- PASS: TestWSSCredentialedPush/${arm}" /tmp/wss_e2e.out || {
               echo "FALSE GREEN: arm ${arm} did not run+PASS"; exit 1; }
