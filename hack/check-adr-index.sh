@@ -5,6 +5,7 @@
 #   - the "# ADR NNNN" title matches the filename number
 #   - a "- Status:" line is present
 #   - the ADR is listed in the index (docs/adr/README.md)
+#   - every issue the ADR's own front matter tracks also appears in its index row
 #   - every relative link to another ADR file resolves
 #   - every internal #anchor link resolves to a heading in the target file
 #     (repo-internal only; external URLs are never fetched, so a site being
@@ -52,6 +53,26 @@ for f in "$adr_dir"/[0-9][0-9][0-9][0-9]-*.md; do
   grep -qE '^status:|^- Status:' "$f" || err "$base: missing status (front-matter 'status:' or '- Status:' line)"
 
   grep -qE "(^|[^0-9])$num([^0-9]|\$)" "$readme" || err "$base: ADR $num not listed in $readme"
+
+  # Tracking drift. The index row may say MORE than the front matter — it carries
+  # implementation pointers ("impl #256") the ADR itself has no reason to list — but it
+  # must not say LESS, or the one place a reader is told to start goes stale while every
+  # other check still passes. That is not hypothetical: the index kept pointing at a
+  # closed duplicate for ADR-0010 while the ADR tracked a different issue, and an ADR-0008
+  # edit replaced a tracked follow-up with prose. Containment, not equality, is what makes
+  # this checkable without forbidding the editorial extras that make the index useful.
+  row=$(grep -m1 -E "^\| \[?$num[](]" "$readme" || true)
+  if [[ -n "$row" ]]; then
+    # || true throughout: a row or an ADR with no #refs is legitimate, but an empty grep
+    # exits 1 and, under `set -e -o pipefail`, would abort the whole lint with no message.
+    row_refs=$(printf '%s' "$row" | { grep -oE '#[0-9]+' || true; } | tr -d '#' | sort -u)
+    while IFS= read -r tracked; do
+      [[ -z "$tracked" ]] && continue
+      grep -qxF -- "$tracked" <<<"$row_refs" \
+        || err "$base: front matter tracks #$tracked but the index row does not mention it"
+    done < <(sed -n '/^tracking:/,/^[a-z_-]*:/p' "$f" \
+               | { grep -oE '(issues|pull)/[0-9]+' || true; } | { grep -oE '[0-9]+' || true; } | sort -u)
+  fi
 
   while IFS= read -r target; do
     [[ -z "$target" ]] && continue
