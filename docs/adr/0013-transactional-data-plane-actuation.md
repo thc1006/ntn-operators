@@ -1566,11 +1566,19 @@ A future 5GC actuator is not part of these PRs.
 - Requires an explicit actuator reference for enforcement.
 - Does not convert a legacy Boolean into a hard continuity requirement.
 - Does not synthesize successful applied status.
+- Reuses the shared `v1alpha2` scaffolding owned by ADR 0010 (#214); it is not a
+  separate version rollout.
 
 ### Storage migration
 
-Serving and storage-version changes follow the API-version migration ADR.
-Conversion does not itself rewrite stored objects.
+ADR 0010 (tracked in #214) is the single owner of the `v1alpha2` scaffolding:
+the version bump, the conversion webhook, and the storage-version migration.
+This ADR does not introduce a second or parallel `v1alpha2` rollout; its
+actuation surface (`PathActuation` and the new `NTNSlice` v1alpha2 fields) is an
+additive consumer of that scaffolding. Because `PathActuation` is a `v1alpha2`
+kind, actuation MUST NOT be enabled before `v1alpha2` is served. Serving and
+storage-version changes follow ADR 0010; conversion does not itself rewrite
+stored objects.
 
 ### Downgrade
 
