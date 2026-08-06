@@ -165,6 +165,13 @@ func main() {
 			"Set this only to enable internal CelesTrak mirrors (e.g. air-gapped "+
 			"deployments) or E2E test mock servers. Production clusters with public "+
 			"CelesTrak access should leave this empty.")
+
+	var ephemerisAllowedSourceHosts string
+	flag.StringVar(&ephemerisAllowedSourceHosts, "ephemeris-allowed-source-hosts", "",
+		"Comma-separated hostnames a CelesTrak SatelliteEphemeris source URL may be fetched "+
+			"from (defense-in-depth source integrity, #227). Empty (default) permits any host; "+
+			"set it to confine ephemeris fetches to admin-sanctioned sources. SpaceTrack's host "+
+			"is the fixed API base and is not gated by this flag.")
 	var remoteControlAllowedHosts string
 	flag.StringVar(&remoteControlAllowedHosts, "remote-control-allowed-endpoint-hosts", "",
 		"Comma-separated list of hostnames any NTNCellConfig "+
@@ -263,6 +270,7 @@ func main() {
 		Recorder:                mgr.GetEventRecorder("satelliteephemeris-controller"),
 		Fetcher:                 ephemeris.NewCelesTrakFetcher(gpHTTPClient),
 		SpaceTrackFetcher:       spaceTrackFetcher,
+		SourceHostAllowlist:     netutil.ParseEndpointAllowlist(ephemerisAllowedSourceHosts),
 		MaxConcurrentReconciles: maxConcurrentReconciles,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "SatelliteEphemeris")

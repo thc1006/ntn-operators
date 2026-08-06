@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **New opt-in `--ephemeris-allowed-source-hosts` allow-list confines CelesTrak ephemeris fetches to
+  admin-sanctioned hosts (#227).** A `SatelliteEphemeris` `spec.source.url` is CR-author-controlled, so
+  for a CelesTrak source the operator would otherwise `GET` from any host the author names (the SSRF-safe
+  dialer already blocks private IPs, but not arbitrary public hosts). The new flag gates the source host
+  before any dial — empty (default) permits all, backward compatible, mirroring
+  `--remote-control-allowed-endpoint-hosts`. A refused fetch reports `SourceHostNotAllowed` and, if a
+  matching cache exists, keeps SIB19 alive from it. SpaceTrack is **not** gated: its contact host is the
+  fixed, admin-configured API base (not `spec.source.url`), so it is already sanctioned. Defense-in-depth /
+  source integrity — not a fix for a credential path (Space-Track credentials only ever go to the hardcoded base).
+
 - **The `remoteControl` endpoint allow-list now gates plaintext pushes too, not only credentialed ones.**
   `--remote-control-allowed-endpoint-hosts` previously refused only a *credentialed* (`remoteControl.tls`)
   push to a non-allowlisted host (closing bearer exfiltration); a *plaintext* `ws://` push escaped it, so
