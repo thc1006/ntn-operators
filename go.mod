@@ -11,7 +11,7 @@ require (
 	github.com/prometheus/client_golang v1.24.1
 	github.com/prometheus/client_model v0.6.2
 	github.com/prometheus/common v0.70.1
-	golang.org/x/net v0.57.0
+	golang.org/x/net v0.58.0
 	k8s.io/api v0.36.3
 	k8s.io/apimachinery v0.36.3
 	k8s.io/client-go v0.36.3
@@ -73,14 +73,14 @@ require (
 	go.yaml.in/yaml/v2 v2.4.4 // indirect
 	go.yaml.in/yaml/v3 v3.0.4 // indirect
 	golang.org/x/exp v0.0.0-20251219203646-944ab1f22d93 // indirect
-	golang.org/x/mod v0.37.0 // indirect
+	golang.org/x/mod v0.38.0 // indirect
 	golang.org/x/oauth2 v0.36.0 // indirect
 	golang.org/x/sync v0.22.0 // indirect
 	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/term v0.45.0 // indirect
-	golang.org/x/text v0.40.0 // indirect
+	golang.org/x/text v0.41.0 // indirect
 	golang.org/x/time v0.14.0 // indirect
-	golang.org/x/tools v0.47.0 // indirect
+	golang.org/x/tools v0.48.0 // indirect
 	gomodules.xyz/jsonpatch/v2 v2.4.0 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20260128011058-8636f8732409 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260128011058-8636f8732409 // indirect
